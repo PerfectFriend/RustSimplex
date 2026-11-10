@@ -90,6 +90,7 @@ fn main() {
         if let BrokerMsg::Msg { msg_id, body: enc } = m {
             match decrypt_for_recipient(&dh_secret, msg_id, enc) {
                 Some(pt) => { got = Some((msg_id.clone(), pt)); }
+                None => {}
             }
             break 'outer;
         }
