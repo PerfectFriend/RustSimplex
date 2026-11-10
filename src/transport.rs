@@ -21,17 +21,20 @@ use rustls::{
 };
 
 use crate::encoding::*;
-use crate::identity::{cert_spki_sha256, RouterIdentity};
+use crate::identity::{cert_fingerprint, RouterIdentity};
 
 pub const ALPN_SMP: &[u8] = b"smp/1";
 
 // ---------- handshake blocks ----------
 
 pub fn server_hello_block(min_v: u16, max_v: u16, session_id: &[u8]) -> Result<Vec<u8>, EncodeError> {
+    // SMPServerHandshake: smpEncode (vRange, sessionId) <> authPubKey(maybe, v>=7).
+    // We send authPubKey = Nothing ("0"): no X25519 session key, Ed25519 command auth still works.
     let mut c = Vec::new();
     w_u16(&mut c, min_v);
     w_u16(&mut c, max_v);
     w_short(&mut c, session_id)?;
+    c.push(b'0'); // authPubKey = Nothing
     pad(&c, BLOCK_SIZE)
 }
 
@@ -41,15 +44,19 @@ pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeErr
     let min = r.u16()?;
     let max = r.u16()?;
     let sid = r.short()?;
+    // remaining authPubKey field is ignored here
     Ok((min, max, sid))
 }
 
 pub fn client_hello_block(version: u16, key_hash: &[u8], proxy: bool) -> Result<Vec<u8>, EncodeError> {
+    // SMPClientHandshake (v>=16): smpEncode (v, keyHash) <> authPubKey? <> proxyServer(v>=14) <> clientService?(v>=16)
+    // keyHash on the wire = raw 32 bytes as shortString; authPubKey/clientService = Nothing ("0").
     let mut c = Vec::new();
     w_u16(&mut c, version);
     w_short(&mut c, key_hash)?;
-    w_bool(&mut c, proxy);
-    c.push(b'0'); // no client service
+    c.push(b'0'); // authPubKey = Nothing
+    w_bool(&mut c, proxy); // proxyServer (v >= 14)
+    c.push(b'0'); // clientService = Nothing (v >= 16)
     pad(&c, BLOCK_SIZE)
 }
 
@@ -58,8 +65,8 @@ pub fn parse_client_hello(block: &[u8]) -> Result<(u16, Vec<u8>, bool), EncodeEr
     let mut r = Reader::new(&c);
     let v = r.u16()?;
     let kh = r.short()?;
-    let proxy = r.bool()?;
-    Ok((v, kh, proxy))
+    // authPubKey / proxy / service fields are ignored by our server
+    Ok((v, kh, false))
 }
 
 // ---------- block I/O ----------
@@ -157,10 +164,8 @@ impl ServerCertVerifier for PinVerifier {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
         for c in std::iter::once(end_entity).chain(intermediates.iter()) {
-            if let Some(h) = cert_spki_sha256(c.as_ref()) {
-                if h == self.key_hash {
-                    return Ok(ServerCertVerified::assertion());
-                }
+            if cert_fingerprint(c.as_ref()) == self.key_hash {
+                return Ok(ServerCertVerified::assertion());
             }
         }
         Err(TlsError::InvalidCertificate(

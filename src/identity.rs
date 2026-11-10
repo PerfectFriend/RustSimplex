@@ -32,9 +32,8 @@ impl RouterIdentity {
         off.distinguished_name = dn;
         let ca = CertifiedIssuer::self_signed(off, offline_kp).map_err(|e| e.to_string())?;
         let offline_der = ca.der().to_vec();
-        let offline_pub = ca.key().public_key_raw();
-        let offline_raw: [u8; 32] = offline_pub.try_into().map_err(|_| "bad offline pub len")?;
-        let key_hash = sha256(&spki_ed25519(&offline_raw));
+        // keyHash = SHA-256 of the FULL offline CA certificate DER (x509 getFingerprint HashSHA256)
+        let key_hash = sha256(&offline_der);
 
         // online (leaf) cert — signed by the offline CA, ServerAuth, SAN = host
         let online_kp = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| e.to_string())?;
@@ -76,16 +75,8 @@ impl RouterIdentity {
     }
 }
 
-/// Extract the Ed25519 SPKI (44-byte template) from a cert DER by scanning for the
-/// fixed SPKI prefix, then SHA-256 it. Used by the client to pin the router identity.
-pub fn cert_spki_sha256(cert_der: &[u8]) -> Option<[u8; 32]> {
-    const PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
-    let mut i = 0;
-    while i + 44 <= cert_der.len() {
-        if cert_der[i..i + 12] == PREFIX {
-            return Some(sha256(&cert_der[i..i + 44]));
-        }
-        i += 1;
-    }
-    None
+/// Fingerprint of a certificate = SHA-256 of its full DER (matches x509 `getFingerprint` HashSHA256,
+/// which is what simplexmq puts in the `smp://` keyHash). Used by the client to pin the router.
+pub fn cert_fingerprint(cert_der: &[u8]) -> [u8; 32] {
+    sha256(cert_der)
 }
