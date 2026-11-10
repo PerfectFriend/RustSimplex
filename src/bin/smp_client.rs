@@ -11,6 +11,8 @@ use smp_rs::crypto::*;
 use smp_rs::protocol::*;
 use smp_rs::server::decrypt_for_recipient;
 
+fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
+
 fn b64url_dec(s: &str) -> Result<Vec<u8>, String> {
     let mut tbl = [0xffu8; 256];
     for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".iter().enumerate() {
@@ -90,7 +92,11 @@ fn main() {
         if let BrokerMsg::Msg { msg_id, body: enc } = m {
             match decrypt_for_recipient(&dh_secret, msg_id, enc) {
                 Some(pt) => { got = Some((msg_id.clone(), pt)); }
-                None => {}
+                None => {
+                    let dump = format!("{{\"msg_id\":\"{}\",\"enc\":\"{}\",\"dh\":\"{}\",\"rcv_priv\":\"{}\",\"srv_der\":\"{}\"}}",
+                        hex(&msg_id), hex(enc), hex(&dh_secret), hex(&rcv_dh.secret.to_bytes()), hex(&srv_dh_der));
+                    let _ = std::fs::write("/home/thomas/.hermes/cache/scratch/msg_dump.json", dump);
+                }
             }
             break 'outer;
         }
