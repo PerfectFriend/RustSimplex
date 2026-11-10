@@ -1,30 +1,32 @@
-//! SMP router (server). In-memory queue store, command dispatch, and
-//! authorization verification (Ed25519 signature authenticators; X25519
-//! crypto_box authenticators supported where a router session key exists).
+//! SMP router engine (server). In-memory queue store, command dispatch, Ed25519
+//! signature auth. Transport-agnostic: works over plain TCP or TLS 1.3 (rustls).
 //!
-//! Plain-TCP transport: sessionId = "" and no router session key, so the
-//! Ed25519 signature authenticator path is the one exercised here.
+//! Concurrency model: one pump thread per connection owns the stream (non-blocking
+//! reads). Recipient pushes (MSG) go to a per-connection outbox channel that the
+//! pump drains and writes — so a single writer per connection, no TLS split needed.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use crate::crypto::*;
-use crate::encoding::{w_short, EncodeError};
+use crate::encoding::{EncodeError, BLOCK_SIZE};
+use crate::identity::RouterIdentity;
 use crate::protocol::*;
 use crate::transport::*;
-
-type Writer = Arc<Mutex<TcpStream>>;
 
 pub struct Queue {
     pub rcv_id: Vec<u8>,
     pub snd_id: Vec<u8>,
     pub rcv_auth_raw: [u8; 32],
     pub snd_auth: Option<[u8; 32]>,
-    pub rcv_dh_secret: [u8; 32], // DH(server dh priv, client rcv dh pub)
+    pub rcv_dh_secret: [u8; 32],
     pub messages: VecDeque<(Vec<u8>, Vec<u8>)>, // (msg_id, body)
-    pub subscriber: Option<Writer>,
+    pub subscriber: Option<mpsc::Sender<Vec<u8>>>, // outbox of wire transmissions to push
 }
 
 pub struct ServerState {
@@ -47,24 +49,25 @@ fn resp(corr_id: Vec<u8>, entity_id: Vec<u8>, m: BrokerMsg) -> Result<Transmissi
         command: encode_broker(&m)?,
     })
 }
-
 fn err_resp(corr_id: Vec<u8>, entity_id: Vec<u8>, e: &str) -> Result<Transmission, EncodeError> {
     resp(corr_id, entity_id, BrokerMsg::Err(e.to_string()))
 }
 
-/// Encrypt a stored message body for delivery to the recipient (MSG body):
-/// secretbox(rcvDhSecret, cbNonce(msgId), pad(body, MAX_RCV_MSG_LEN))
 pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Vec<u8> {
     let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN).expect("pad");
     secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded)
 }
-
 pub fn decrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], enc: &[u8]) -> Option<Vec<u8>> {
     let pt = secretbox_decrypt(rcv_dh_secret, &cb_nonce(msg_id), enc)?;
     crate::encoding::unpad(&pt).ok()
 }
 
-fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], writer: &Writer) -> Vec<Transmission> {
+fn dispatch(
+    t: &Transmission,
+    st: &Arc<Mutex<ServerState>>,
+    session_id: &[u8],
+    outbox: &mpsc::Sender<Vec<u8>>,
+) -> Vec<Transmission> {
     let cmd = match parse_command(&t.command) {
         Ok(c) => c,
         Err(e) => return vec![err_resp(t.corr_id.clone(), t.entity_id.clone(), &format!("CMD {e}")).unwrap()],
@@ -80,12 +83,11 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
             };
             let ok = match alg {
                 AuthAlg::Ed25519 => verify_sign(session_id, t, &raw),
-                AuthAlg::X25519 => false, // needs router session key; not in plain mode
+                AuthAlg::X25519 => false, // needs router session key (TLS); not in plain mode
             };
             if !ok {
                 return vec![err_resp(t.corr_id.clone(), vec![], "AUTH").unwrap()];
             }
-            // client rcv dh pub
             let (_dh_alg, dh_raw) = match parse_spki(&rcv_dh_key) {
                 Ok(x) => x,
                 Err(_) => return vec![err_resp(t.corr_id.clone(), vec![], "CMD SYNTAX").unwrap()],
@@ -123,9 +125,8 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
             if !verify_sign(session_id, t, &q.rcv_auth_raw) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
-            q.subscriber = Some(writer.clone());
+            q.subscriber = Some(outbox.clone());
             let mut out = vec![resp(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Sok(None)).unwrap()];
-            // deliver pending messages
             while let Some((mid, body)) = q.messages.pop_front() {
                 let enc = encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body);
                 out.push(resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid, body: enc }).unwrap());
@@ -151,11 +152,13 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
         }
         Command::Send { body, .. } => {
             let snd_id = t.entity_id.clone();
-            let s = st.lock().unwrap();
-            let Some(rcv_id) = s.by_snd.get(&snd_id).cloned() else {
-                return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
+            let rcv_id = {
+                let s = st.lock().unwrap();
+                let Some(rcv_id) = s.by_snd.get(&snd_id).cloned() else {
+                    return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
+                };
+                rcv_id
             };
-            drop(s);
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
@@ -167,14 +170,13 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
             }
             let msg_id = random_bytes(16);
             q.messages.push_back((msg_id.clone(), body.clone()));
-            // push to subscriber if present
             if let Some(sub) = &q.subscriber {
                 let enc = encrypt_for_recipient(&q.rcv_dh_secret, &msg_id, &body);
-                let msg_t = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }).unwrap();
-                let wire = encode_transmission(&msg_t).unwrap();
-                let blk = encode_block(&[wire]).unwrap();
-                let _ = sub.lock().unwrap().write_all(&blk);
-                let _ = sub.lock().unwrap().flush();
+                if let Ok(msg_t) = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
+                    if let Ok(wire) = encode_transmission(&msg_t) {
+                        let _ = sub.send(wire);
+                    }
+                }
             }
             vec![resp(t.corr_id.clone(), snd_id, BrokerMsg::Ok).unwrap()]
         }
@@ -196,9 +198,10 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            // KEY is sent by recipient (verify with rcv key); SKEY by sender.
             let is_recipient = tag_of(&t.command) == "KEY";
-            let key_ok = if is_recipient { verify_sign(session_id, t, &q.rcv_auth_raw) } else {
+            let key_ok = if is_recipient {
+                verify_sign(session_id, t, &q.rcv_auth_raw)
+            } else {
                 q.snd_auth.map(|r| verify_sign(session_id, t, &r)).unwrap_or(true)
             };
             if !key_ok {
@@ -228,80 +231,190 @@ fn dispatch(t: &Transmission, st: &Arc<Mutex<ServerState>>, session_id: &[u8], w
     }
 }
 
-pub fn handle_conn(stream: TcpStream, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
-    let mut reader = stream.try_clone()?;
-    let writer: Writer = Arc::new(Mutex::new(stream));
-    // server hello first
-    let hello = server_hello_block(SMP_VERSION, SMP_VERSION, b"").map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.0))?;
-    write_block(&mut *writer.lock().unwrap(), &hello)?;
-    // client hello
-    let ch = read_block(&mut reader)?;
-    let (v, _kh, _proxy) = parse_client_hello(&ch).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.0))?;
+fn io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+}
+
+/// One connection: blocking SMP/TLS handshake, then a poll pump (50 ms read timeout)
+/// that reads commands and drains the outbox of pushed transmissions.
+pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
+    let ctrl = tcp.try_clone()?;
+    let mut stream: BoxStream = match mode {
+        Mode::Plain => Box::new(tcp),
+        Mode::Tls(cfg) => match rustls::ServerConnection::new(cfg.clone()) {
+            Ok(c) => Box::new(rustls::StreamOwned::new(c, tcp)),
+            Err(e) => return Err(io_err(e)),
+        },
+    };
+    let session_id: Vec<u8> = Vec::new();
+    // --- phase 1: blocking handshake (drives the TLS handshake too) ---
+    let hello = server_hello_block(SMP_VERSION, SMP_VERSION, &session_id).map_err(io_err)?;
+    write_block(&mut stream, &hello)?;
+    let ch = read_block(&mut stream)?;
+    let (v, _kh, _proxy) = parse_client_hello(&ch).map_err(io_err)?;
     if v != SMP_VERSION {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("version {v} != {SMP_VERSION}")));
+        return Err(io_err(format!("version {v} != {SMP_VERSION}")));
     }
-    let session_id: Vec<u8> = Vec::new(); // plain TCP
+    // --- phase 2: poll pump ---
+    ctrl.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let mut rbuf = vec![0u8; BLOCK_SIZE];
+    let mut rpos = 0usize;
     loop {
-        let blk = match read_block(&mut reader) {
-            Ok(b) => b,
-            Err(_) => break,
-        };
-        let wires = match decode_block(&blk) {
-            Ok(w) => w,
-            Err(_) => continue,
-        };
-        let mut responses: Vec<Vec<u8>> = Vec::new();
-        for w in &wires {
-            let t = match decode_transmission(w) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            for r in dispatch(&t, &st, &session_id, &writer) {
-                if let Ok(enc) = encode_transmission(&r) {
-                    responses.push(enc);
-                }
+        // drain outbox (pushes from SEND on other connections)
+        let mut pushes: Vec<Vec<u8>> = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            pushes.push(w);
+        }
+        if !pushes.is_empty() {
+            let blk = encode_block(&pushes).map_err(io_err)?;
+            if write_block(&mut stream, &blk).is_err() {
+                break;
             }
         }
-        if responses.is_empty() {
-            continue;
+        // one non-blocking read attempt
+        match stream.read(&mut rbuf[rpos..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                rpos += n;
+                if rpos == BLOCK_SIZE {
+                    let wires = match decode_block(&rbuf) {
+                        Ok(w) => w,
+                        Err(_) => {
+                            rpos = 0;
+                            continue;
+                        }
+                    };
+                    let mut responses: Vec<Vec<u8>> = Vec::new();
+                    for w in &wires {
+                        let t = match decode_transmission(w) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        for r in dispatch(&t, &st, &session_id, &tx) {
+                            if let Ok(enc) = encode_transmission(&r) {
+                                responses.push(enc);
+                            }
+                        }
+                    }
+                    if !responses.is_empty() {
+                        let out = encode_block(&responses).map_err(io_err)?;
+                        if write_block(&mut stream, &out).is_err() {
+                            break;
+                        }
+                    }
+                    rpos = 0;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
         }
-        let out = match encode_block(&responses) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if write_block(&mut *writer.lock().unwrap(), &out).is_err() {
-            break;
-        }
+        thread::sleep(Duration::from_millis(2));
     }
     Ok(())
+}
+
+#[derive(Clone)]
+pub enum Mode {
+    Plain,
+    Tls(Arc<rustls::ServerConfig>),
+}
+
+/// The server engine: a bound listener + shared state + transport mode.
+pub struct Engine {
+    pub listener: TcpListener,
+    pub state: Arc<Mutex<ServerState>>,
+    pub mode: Mode,
+    pub identity: Option<RouterIdentity>,
+    pub host: String,
+    pub shutdown: Arc<AtomicBool>,
+}
+
+impl Engine {
+    pub fn bind_plain(addr: &str) -> std::io::Result<Engine> {
+        let listener = TcpListener::bind(addr)?;
+        Ok(Engine {
+            listener,
+            state: new_state(),
+            mode: Mode::Plain,
+            identity: None,
+            host: addr.to_string(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Bind with TLS; generates a fresh router identity. `host` goes into the cert SAN
+    /// and the printed smp:// address.
+    pub fn bind_tls(addr: &str, host: &str) -> Result<Engine, String> {
+        let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
+        let id = RouterIdentity::generate(host)?;
+        let cfg = tls_server_config(&id);
+        Ok(Engine {
+            listener,
+            state: new_state(),
+            mode: Mode::Tls(Arc::new((*cfg).clone())),
+            identity: Some(id),
+            host: host.to_string(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// smp://<keyHash>@<host>:<port>  (TLS mode only)
+    pub fn address(&self) -> Option<String> {
+        let id = self.identity.as_ref()?;
+        let port = self.local_addr().ok()?.port();
+        Some(id.address(&self.host, port))
+    }
+
+    pub fn key_hash(&self) -> Option<[u8; 32]> {
+        self.identity.as_ref().map(|i| i.key_hash)
+    }
+
+    /// Accept loop (blocking). Spawns a pump thread per connection.
+    pub fn serve(&self) -> std::io::Result<()> {
+        for conn in self.listener.incoming() {
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            let tcp = match conn {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[engine] incoming: {e}");
+                    continue;
+                }
+            };
+            let st = self.state.clone();
+            let mode = self.mode.clone();
+            thread::spawn(move || {
+                let _ = handle_conn(tcp, &mode, st);
+            });
+        }
+        Ok(())
+    }
+}
+
+// The `serve` above re-accepts; provide a cleaner accept that uses the already-accepted stream.
+// (Kept for clarity; tests use spawn_engine.)
+
+/// Spawn the engine on a background thread. Returns (addr, state, shutdown, join).
+pub fn spawn_engine(engine: Engine) -> (SocketAddr, Arc<Mutex<ServerState>>, Arc<AtomicBool>, thread::JoinHandle<()>) {
+    let addr = engine.local_addr().expect("local addr");
+    let state = engine.state.clone();
+    let shutdown = engine.shutdown.clone();
+    let handle = thread::spawn(move || {
+        let _ = engine.serve();
+    });
+    (addr, state, shutdown, handle)
 }
 
 pub fn run(addr: &str) -> std::io::Result<()> {
-    let st = new_state();
-    let listener = TcpListener::bind(addr)?;
-    eprintln!("[smp-server] listening on {addr} (SMP v{SMP_VERSION})");
-    serve_listener(listener, st)
-}
-
-/// Accept loop on an existing listener (used by tests with an ephemeral port).
-pub fn serve_listener(listener: TcpListener, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
-    for conn in listener.incoming() {
-        match conn {
-            Ok(stream) => {
-                let st = st.clone();
-                std::thread::spawn(move || {
-                    let _ = handle_conn(stream, st);
-                });
-            }
-            Err(e) => eprintln!("accept error: {e}"),
-        }
-    }
-    Ok(())
-}
-
-// keep EncodeError/w_short imports used
-#[allow(dead_code)]
-fn _u() -> Result<(), EncodeError> {
-    let mut v = Vec::new();
-    w_short(&mut v, b"x")
+    let engine = Engine::bind_plain(addr)?;
+    eprintln!("[smp-server] listening on {addr} (SMP v{SMP_VERSION}, plain)");
+    engine.serve()
 }

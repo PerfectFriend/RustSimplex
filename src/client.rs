@@ -1,7 +1,6 @@
-//! SMP client.
+//! SMP client over plain TCP or TLS 1.3 (rustls), pinning the router by keyHash.
 
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
 
 use crate::crypto::*;
 use crate::protocol::*;
@@ -14,28 +13,30 @@ fn map_e<E: std::fmt::Display>(e: E) -> String {
 }
 
 pub struct Client {
-    reader: TcpStream,
-    writer: Arc<Mutex<TcpStream>>,
+    stream: BoxStream,
     session_id: Vec<u8>,
     pub server_key_hash: Vec<u8>,
 }
 
 impl Client {
-    pub fn connect(addr: &str, key_hash: &[u8]) -> ClResult<Client> {
-        let stream = TcpStream::connect(addr).map_err(map_e)?;
-        let reader = stream.try_clone().map_err(map_e)?;
-        let writer = Arc::new(Mutex::new(stream));
-        let mut r = reader.try_clone().map_err(map_e)?;
-        let sh = read_block(&mut r).map_err(map_e)?;
+    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<Vec<u8>> {
+        let sh = read_block(stream).map_err(map_e)?;
         let (_min, _max, sid) = parse_server_hello(&sh).map_err(map_e)?;
         let ch = client_hello_block(SMP_VERSION, key_hash, false).map_err(map_e)?;
-        write_block(&mut *writer.lock().unwrap(), &ch).map_err(map_e)?;
-        Ok(Client {
-            reader,
-            writer,
-            session_id: sid,
-            server_key_hash: key_hash.to_vec(),
-        })
+        write_block(stream, &ch).map_err(map_e)?;
+        Ok(sid)
+    }
+
+    pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
+        let mut s = connect_plain(addr).map_err(map_e)?;
+        let sid = Self::handshake(&mut s, key_hash)?;
+        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec() })
+    }
+
+    pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
+        let mut s = connect_tls(addr, host, key_hash).map_err(map_e)?;
+        let sid = Self::handshake(&mut s, &key_hash)?;
+        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec() })
     }
 
     /// Send one command transmission (signed if `auth` given) and read one response block.
@@ -51,13 +52,13 @@ impl Client {
         }
         let wire = encode_transmission(&t).map_err(map_e)?;
         let blk = encode_block(&[wire]).map_err(map_e)?;
-        write_block(&mut *self.writer.lock().unwrap(), &blk).map_err(map_e)?;
+        write_block(&mut self.stream, &blk).map_err(map_e)?;
         self.recv_block()
     }
 
-    /// Read one block and parse all broker messages in it.
+    /// Read one block and parse all broker messages in it (responses + pushed MSG).
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
-        let rb = read_block(&mut self.reader).map_err(map_e)?;
+        let rb = read_block(&mut self.stream).map_err(map_e)?;
         let wires = decode_block(&rb).map_err(map_e)?;
         let mut out = Vec::new();
         for w in wires {

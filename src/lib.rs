@@ -10,6 +10,7 @@
 //!   client    — SMP client
 
 pub mod client;
+pub mod identity;
 pub mod crypto;
 pub mod encoding;
 pub mod protocol;

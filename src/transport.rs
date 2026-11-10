@@ -1,15 +1,31 @@
-//! Transport: SMP handshake blocks + fixed-size block I/O over a byte stream.
+//! Transport: SMP handshake blocks + fixed 16384-byte block I/O over a byte stream,
+//! plus optional TLS 1.3 (rustls) matching simplexmq's network surface:
+//!   - ALPN "smp/1", TLS 1.3 only, self-signed 2-cert Ed25519 chain (offline+online)
+//!   - client pins the router by keyHash = SHA-256(offline SPKI)
 //!
-//! After (optional) TLS, the router sends `paddedRouterHello`, the client
-//! answers `paddedClientHello`. Both are padded to 16384 bytes.
-//!   routerHello = word16 minVer <> word16 maxVer <> shortString sessionId <> [routerCertKey] <> ignored
-//!   clientHello = word16 version <> shortString keyHash <> [clientKey] <> 'T'/'F' proxy <> '0'/'1' service <> ignored
-//! For plain TCP (no TLS) we omit the cert key and use sessionId = "".
+//! After (optional) TLS the router sends padded routerHello, the client answers
+//! padded clientHello. For plain TCP sessionId = "" ; over TLS we also use "" on
+//! both ends (channel binding to tls-unique is a known follow-up for real-client interop).
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error as TlsError, ServerConfig,
+    ServerConnection, SignatureScheme, StreamOwned,
+};
 
 use crate::encoding::*;
+use crate::identity::{cert_spki_sha256, RouterIdentity};
+
+pub const ALPN_SMP: &[u8] = b"smp/1";
+
+// ---------- handshake blocks ----------
 
 pub fn server_hello_block(min_v: u16, max_v: u16, session_id: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let mut c = Vec::new();
@@ -46,18 +62,182 @@ pub fn parse_client_hello(block: &[u8]) -> Result<(u16, Vec<u8>, bool), EncodeEr
     Ok((v, kh, proxy))
 }
 
-pub fn write_block(w: &mut impl Write, block: &[u8]) -> std::io::Result<()> {
-    w.write_all(block)?;
+// ---------- block I/O ----------
+
+/// Tolerant write: retries on WouldBlock/TimedOut (for non-blocking sockets / TLS).
+pub fn write_all_tol(w: &mut impl Write, buf: &[u8]) -> std::io::Result<()> {
+    let mut off = 0;
+    while off < buf.len() {
+        match w.write(&buf[off..]) {
+            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write 0")),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     w.flush()
 }
 
+/// Tolerant read_exact: retries on WouldBlock/TimedOut until the buffer is full.
+pub fn read_exact_tol(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut off = 0;
+    while off < buf.len() {
+        match r.read(&mut buf[off..]) {
+            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof")),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+pub fn write_block(w: &mut impl Write, block: &[u8]) -> std::io::Result<()> {
+    write_all_tol(w, block)
+}
+
+/// Blocking read of one full block (client side).
 pub fn read_block(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; BLOCK_SIZE];
     r.read_exact(&mut buf)?;
     Ok(buf)
 }
 
+/// Tolerant read of one full block (handshake on a non-blocking socket).
+pub fn read_block_tol(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    read_exact_tol(r, &mut buf)?;
+    Ok(buf)
+}
+
 pub fn read_block_stream(s: &TcpStream) -> std::io::Result<Vec<u8>> {
     let mut s = s;
     read_block(&mut s)
+}
+
+// ---------- generic stream ----------
+
+pub trait RW: Read + Write + Send + 'static {}
+impl<T: Read + Write + Send + 'static> RW for T {}
+pub type BoxStream = Box<dyn RW>;
+
+// ---------- TLS ----------
+
+pub fn tls_server_config(id: &RouterIdentity) -> Arc<ServerConfig> {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let mut cfg = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("tls13")
+        .with_no_client_auth()
+        .with_single_cert(id.cert_chain(), PrivateKeyDer::Pkcs8(id.private_key()))
+        .expect("cert");
+    cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
+    Arc::new(cfg)
+}
+
+/// Client-side certificate verifier: pins the router by keyHash (SHA-256 of offline SPKI)
+/// found anywhere in the presented chain; handshake CertificateVerify is checked against
+/// the leaf key via the provider's signature algorithms.
+#[derive(Debug)]
+pub struct PinVerifier {
+    pub key_hash: [u8; 32],
+}
+
+impl ServerCertVerifier for PinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        for c in std::iter::once(end_entity).chain(intermediates.iter()) {
+            if let Some(h) = cert_spki_sha256(c.as_ref()) {
+                if h == self.key_hash {
+                    return Ok(ServerCertVerified::assertion());
+                }
+            }
+        }
+        Err(TlsError::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ))
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        Err(TlsError::General("tls1.2 disabled".into()))
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ED25519,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ]
+    }
+}
+
+pub fn tls_client_config(key_hash: [u8; 32]) -> Arc<ClientConfig> {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("tls13")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerifier { key_hash }))
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
+    Arc::new(cfg)
+}
+
+/// Accept a TLS connection (server side). Underlying socket set non-blocking for the pump.
+pub fn accept_tls(listener: &TcpListener, cfg: Arc<ServerConfig>) -> std::io::Result<BoxStream> {
+    let (tcp, _peer) = listener.accept()?;
+    tcp.set_nonblocking(true)?;
+    let conn = ServerConnection::new(cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(Box::new(StreamOwned::new(conn, tcp)))
+}
+
+/// Accept a plain TCP connection (server side). Non-blocking for the pump.
+pub fn accept_plain(listener: &TcpListener) -> std::io::Result<BoxStream> {
+    let (tcp, _peer) = listener.accept()?;
+    tcp.set_nonblocking(true)?;
+    Ok(Box::new(tcp))
+}
+
+/// Connect over TLS 1.3 to a router, pinning `key_hash`. Client socket stays blocking.
+pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> std::io::Result<BoxStream> {
+    let tcp = TcpStream::connect(addr)?;
+    let name = ServerName::try_from(host.to_string())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let conn = ClientConnection::new(tls_client_config(key_hash), name)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(Box::new(StreamOwned::new(conn, tcp)))
+}
+
+/// Connect over plain TCP. Client socket stays blocking.
+pub fn connect_plain(addr: SocketAddr) -> std::io::Result<BoxStream> {
+    let tcp = TcpStream::connect(addr)?;
+    Ok(Box::new(tcp))
 }
