@@ -81,21 +81,27 @@ fn main() {
     // sender side: SEND a message
     let body = b"hello over rust smp engine".to_vec();
     let send = client.request(Command::Send { flags: true, body: body.clone() }, snd_id.clone(), None).expect("SEND");
-    println!("SEND -> {:?}", send);
+    println!("SEND -> {:?}", send.iter().map(|m| match m { BrokerMsg::Msg{..} => "Msg(..)".into(), other => format!("{other:?}") }).collect::<Vec<_>>());
 
-    // recipient receives the pushed MSG
+    // recipient receives the pushed MSG (may already be inside the SEND response block)
     let dh_secret = x25519_dh(&rcv_dh.secret, &x25519_public(parse_spki(&srv_dh_der).unwrap().1));
     let mut got = None;
+    'outer: for m in &send {
+        if let BrokerMsg::Msg { msg_id, body: enc } = m {
+            match decrypt_for_recipient(&dh_secret, msg_id, enc) {
+                Some(pt) => { got = Some((msg_id.clone(), pt)); }
+            }
+            break 'outer;
+        }
+    }
     for _ in 0..50 {
+        if got.is_some() { break; }
         let blk = client.recv_block().expect("recv");
         for m in &blk {
             if let BrokerMsg::Msg { msg_id, body: enc } = m {
                 let pt = decrypt_for_recipient(&dh_secret, msg_id, enc).expect("decrypt");
                 got = Some((msg_id.clone(), pt));
             }
-        }
-        if got.is_some() {
-            break;
         }
     }
     let (msg_id, pt) = got.expect("no MSG received");
