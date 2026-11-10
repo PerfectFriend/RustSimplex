@@ -54,6 +54,7 @@ fn main() {
     // recipient side: create queue
     let rcv_auth = ed25519_keypair();
     let rcv_dh = x25519_keypair();
+    // APublicAuthKey/PublicKeyX25519 on the wire = SPKI DER (X.509 SubjectPublicKeyInfo) as shortString
     let auth_der = spki_ed25519(&rcv_auth.verifying.to_bytes());
     let dh_der = spki_x25519(&rcv_dh.public.to_bytes());
     let resp = client

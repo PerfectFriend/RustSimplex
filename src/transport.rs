@@ -49,14 +49,24 @@ pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeErr
 }
 
 pub fn client_hello_block(version: u16, key_hash: &[u8], proxy: bool) -> Result<Vec<u8>, EncodeError> {
-    // SMPClientHandshake (v>=16): smpEncode (v, keyHash) <> authPubKey? <> proxyServer(v>=14) <> clientService?(v>=16)
-    // keyHash on the wire = raw 32 bytes as shortString; authPubKey/clientService = Nothing ("0").
+    // SMPClientHandshake (v6.5.0, Transport.hs):
+    //   smpEncode (v, keyHash)
+    //   <> encodeAuthEncryptCmds v authPubKey   -- v>=7: Nothing -> EMPTY (zero bytes), not '0'
+    //   <> ifHasProxy v (smpEncode proxyServer) -- v>=14: Bool 'T'/'F'
+    //   <> ifHasService v (smpEncode clientService) -- v>=16: Maybe '0'/'1'
     let mut c = Vec::new();
     w_u16(&mut c, version);
     w_short(&mut c, key_hash)?;
-    c.push(b'0'); // authPubKey = Nothing (Maybe: '0'/'1', NOT Bool 'T'/'F')
-    c.push(b'0'); // proxyServer (v >= 14) = Nothing (Maybe '0')
-    c.push(b'0'); // clientService = Nothing (v >= 16)
+    // authPubKey = Nothing: for v>=7 encode as empty (no bytes)
+    if version < 7 {
+        w_short(&mut c, &[])?; // legacy v6 required key; send empty shortString
+    }
+    if version >= 14 {
+        w_bool(&mut c, proxy); // proxyServer Bool
+    }
+    if version >= 16 {
+        c.push(b'0'); // clientService = Nothing (Maybe)
+    }
     pad(&c, BLOCK_SIZE)
 }
 
