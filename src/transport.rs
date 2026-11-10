@@ -54,8 +54,8 @@ pub fn client_hello_block(version: u16, key_hash: &[u8], proxy: bool) -> Result<
     let mut c = Vec::new();
     w_u16(&mut c, version);
     w_short(&mut c, key_hash)?;
-    c.push(b'0'); // authPubKey = Nothing
-    w_bool(&mut c, proxy); // proxyServer (v >= 14)
+    c.push(b'0'); // authPubKey = Nothing (Maybe: '0'/'1', NOT Bool 'T'/'F')
+    c.push(b'0'); // proxyServer (v >= 14) = Nothing (Maybe '0')
     c.push(b'0'); // clientService = Nothing (v >= 16)
     pad(&c, BLOCK_SIZE)
 }
