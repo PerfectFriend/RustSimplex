@@ -226,10 +226,15 @@ pub fn authorized_bytes(session_id: &[u8], t: &Transmission) -> Result<Vec<u8>, 
     Ok(o)
 }
 
-/// wire bytes of a transmission (v>=7: sessionId NOT on the wire).
+/// wire bytes of a transmission (v>=7, normal client):
+///   authenticator(shortString) [<> '0' serviceSig if authenticator non-empty] <> corrId <> entityId <> command(Tail)
+/// serviceSig (Maybe) is read by the peer only when the authenticator is non-empty (serviceAuth connections).
 pub fn encode_transmission(t: &Transmission) -> Result<Vec<u8>, EncodeError> {
     let mut o = Vec::new();
     w_short(&mut o, &t.authenticator)?;
+    if !t.authenticator.is_empty() {
+        o.push(b'0'); // serviceSig = Nothing (read only when authenticator non-empty)
+    }
     w_short(&mut o, &t.corr_id)?;
     w_short(&mut o, &t.entity_id)?;
     o.extend_from_slice(&t.command);
@@ -239,6 +244,9 @@ pub fn encode_transmission(t: &Transmission) -> Result<Vec<u8>, EncodeError> {
 pub fn decode_transmission(b: &[u8]) -> Result<Transmission, EncodeError> {
     let mut r = Reader::new(b);
     let authenticator = r.short()?;
+    if !authenticator.is_empty() {
+        let _service_sig = r.u8()?; // '0'/'1' Maybe tag (we only support Nothing)
+    }
     let corr_id = r.short()?;
     let entity_id = r.short()?;
     let command = r.rest().to_vec();
