@@ -62,6 +62,11 @@ pub fn decrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], enc: &[u8]
     crate::encoding::unpad(&pt).ok()
 }
 
+/// public wrapper for debug
+pub fn hsalsa20_pub(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
+    crate::crypto::hsalsa20_pub(key, nonce)
+}
+
 fn dispatch(
     t: &Transmission,
     st: &Arc<Mutex<ServerState>>,

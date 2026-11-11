@@ -109,10 +109,48 @@ pub fn x25519_public(raw: [u8; 32]) -> XPublic {
     XPublic::from(raw)
 }
 
-// ---------- XSalsa20-Poly1305 secretbox (NaCl crypto_box with precomputed DH key) ----------
+// ---------- NaCl crypto_box == HSalsa20(shared, 0^16) then XSalsa20-Poly1305 ----------
+/// Derive the symmetric key exactly like NaCl crypto_box_beforenm: HSalsa20(shared, 0^16).
+fn box_key(shared: &[u8; 32]) -> [u8; 32] {
+    hsalsa20(shared, &[0u8; 16])
+}
+
+/// HSalsa20 (NaCl): Salsa20 core with key, 16-byte nonce, no feedforward, output words 0,5,10,15,6,7,8,9.
+pub fn hsalsa20_pub(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] { hsalsa20(key, nonce) }
+fn hsalsa20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
+    const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]; // "expand 32-byte k"
+    let k = |i: usize| u32::from_le_bytes([key[4*i], key[4*i+1], key[4*i+2], key[4*i+3]]);
+    let n = |i: usize| u32::from_le_bytes([nonce[4*i], nonce[4*i+1], nonce[4*i+2], nonce[4*i+3]]);
+    let mut x = [
+        SIGMA[0], k(0), k(1), k(2),
+        k(3), SIGMA[1], n(0), n(1),
+        n(2), n(3), SIGMA[2], k(4),
+        k(5), k(6), k(7), SIGMA[3],
+    ];
+    let rotl = |v: u32, c: u32| v.rotate_left(c);
+    macro_rules! qr {
+        ($a:expr, $b:expr, $c:expr, $d:expr) => {
+            x[$b] ^= rotl(x[$a].wrapping_add(x[$d]), 7);
+            x[$c] ^= rotl(x[$b].wrapping_add(x[$a]), 9);
+            x[$d] ^= rotl(x[$c].wrapping_add(x[$b]), 13);
+            x[$a] ^= rotl(x[$d].wrapping_add(x[$c]), 18);
+        };
+    }
+    for _ in 0..10 {
+        qr!(0, 4, 8, 12); qr!(5, 9, 13, 1); qr!(10, 14, 2, 6); qr!(15, 3, 7, 11);
+        qr!(0, 1, 2, 3); qr!(5, 6, 7, 4); qr!(10, 11, 8, 9); qr!(15, 12, 13, 14);
+    }
+    let out = [x[0], x[5], x[10], x[15], x[6], x[7], x[8], x[9]];
+    let mut r = [0u8; 32];
+    for (i, w) in out.iter().enumerate() {
+        r[4*i..4*i+4].copy_from_slice(&w.to_le_bytes());
+    }
+    r
+}
 /// NaCl format output: 16-byte MAC || ciphertext.
 pub fn secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = XSalsa20Poly1305::new(key.into());
+    let k = box_key(key);
+    let cipher = XSalsa20Poly1305::new(&k.into());
     let ct = cipher
         .encrypt(Nonce::from_slice(nonce24), plaintext)
         .expect("encrypt infallible");
@@ -133,7 +171,8 @@ pub fn secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Opt
     let mut ct = Vec::with_capacity(nacl.len());
     ct.extend_from_slice(body);
     ct.extend_from_slice(tag);
-    let cipher = XSalsa20Poly1305::new(key.into());
+    let k = box_key(key);
+    let cipher = XSalsa20Poly1305::new(&k.into());
     cipher.decrypt(Nonce::from_slice(nonce24), ct.as_slice()).ok()
 }
 

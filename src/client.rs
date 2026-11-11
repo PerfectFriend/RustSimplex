@@ -59,6 +59,12 @@ impl Client {
     /// Read one block and parse all broker messages in it (responses + pushed MSG).
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
         let rb = read_block(&mut self.stream).map_err(map_e)?;
+        if std::env::var("SMP_DUMP_RAW").is_ok() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/home/thomas/.hermes/cache/scratch/raw_blocks.hex") {
+                let _ = writeln!(f, "{}", rb.iter().map(|b| format!("{b:02x}")).collect::<String>());
+            }
+        }
         let wires = decode_block(&rb).map_err(map_e)?;
         let mut out = Vec::new();
         for w in wires {
