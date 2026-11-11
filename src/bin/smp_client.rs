@@ -87,16 +87,11 @@ fn main() {
 
     // recipient receives the pushed MSG (may already be inside the SEND response block)
     let dh_secret = x25519_dh(&rcv_dh.secret, &x25519_public(parse_spki(&srv_dh_der).unwrap().1));
-    { // DEBUG: print box_key
-        let k = {
-            let shared: [u8;32] = dh_secret; hsalsa20_pub(&shared, &[0u8;16])
-        };
-                Some(pt) => { got = Some((msg_id.clone(), pt)); }
-                None => {
-                    let dump = format!("{{\"msg_id\":\"{}\",\"enc\":\"{}\",\"dh\":\"{}\",\"rcv_priv\":\"{}\",\"srv_der\":\"{}\"}}",
-                        hex(&msg_id), hex(enc), hex(&dh_secret), hex(&rcv_dh.secret.to_bytes()), hex(&srv_dh_der));
-                    let _ = std::fs::write("/home/thomas/.hermes/cache/scratch/msg_dump.json", dump);
-                }
+    let mut got = None;
+    'outer: for m in &send {
+        if let BrokerMsg::Msg { msg_id, body: enc } = m {
+            if let Some(pt) = decrypt_for_recipient(&dh_secret, msg_id, enc) {
+                got = Some((msg_id.clone(), pt));
             }
             break 'outer;
         }
