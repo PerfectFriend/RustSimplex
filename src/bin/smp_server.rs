@@ -15,8 +15,9 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bind = arg(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5223".into());
+    let store = arg(&args, "--store").map(std::path::PathBuf::from);
     match arg(&args, "--tls") {
-        Some(host) => match Engine::bind_tls(&bind, &host) {
+        Some(host) => match Engine::bind_tls_store(&bind, &host, store) {
             Ok(e) => {
                 eprintln!("[smp-server] TLS 1.3 listening on {bind} (SMP v{SMP_VERSION}, ALPN smp/1)");
                 eprintln!("[smp-server] router address: {}", e.address().unwrap_or_default());
@@ -30,7 +31,7 @@ fn main() {
                 exit(1);
             }
         },
-        None => match Engine::bind_plain(&bind) {
+        None => match Engine::bind_plain_store(&bind, store) {
             Ok(e) => {
                 eprintln!("[smp-server] plain TCP listening on {bind} (SMP v{SMP_VERSION})");
                 if let Err(err) = e.serve() {

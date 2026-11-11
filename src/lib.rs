@@ -15,4 +15,5 @@ pub mod crypto;
 pub mod encoding;
 pub mod protocol;
 pub mod server;
+pub mod store;
 pub mod transport;

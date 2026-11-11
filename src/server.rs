@@ -32,13 +32,28 @@ pub struct Queue {
 pub struct ServerState {
     pub by_rcv: HashMap<Vec<u8>, Queue>,
     pub by_snd: HashMap<Vec<u8>, Vec<u8>>, // snd_id -> rcv_id
+    pub persist: Option<std::path::PathBuf>,
+}
+
+impl ServerState {
+    pub fn new() -> Self {
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), persist: None }
+    }
+    pub fn persist_now(&self) {
+        if let Some(p) = &self.persist {
+            let _ = crate::store::save(p, self);
+        }
+    }
 }
 
 pub fn new_state() -> Arc<Mutex<ServerState>> {
-    Arc::new(Mutex::new(ServerState {
-        by_rcv: HashMap::new(),
-        by_snd: HashMap::new(),
-    }))
+    Arc::new(Mutex::new(ServerState::new()))
+}
+
+pub fn new_state_persist(path: std::path::PathBuf) -> Arc<Mutex<ServerState>> {
+    let mut st = crate::store::load(&path).unwrap_or_else(ServerState::new);
+    st.persist = Some(path);
+    Arc::new(Mutex::new(st))
 }
 
 fn resp(corr_id: Vec<u8>, entity_id: Vec<u8>, m: BrokerMsg) -> Result<Transmission, EncodeError> {
@@ -77,6 +92,24 @@ fn dispatch(
         Ok(c) => c,
         Err(e) => return vec![err_resp(t.corr_id.clone(), t.entity_id.clone(), &format!("CMD {e}")).unwrap()],
     };
+    let dirty = matches!(
+        cmd,
+        Command::New { .. } | Command::Send { .. } | Command::Ack(_) | Command::Key(_) | Command::Skey(_) | Command::Del
+    );
+    let out = dispatch_cmd(cmd, t, st, session_id, outbox);
+    if dirty {
+        st.lock().unwrap().persist_now();
+    }
+    out
+}
+
+fn dispatch_cmd(
+    cmd: Command,
+    t: &Transmission,
+    st: &Arc<Mutex<ServerState>>,
+    session_id: &[u8],
+    outbox: &mpsc::Sender<Vec<u8>>,
+) -> Vec<Transmission> {
     match cmd {
         Command::New { rcv_auth_key, rcv_dh_key, .. } => {
             if !t.entity_id.is_empty() {
@@ -339,10 +372,17 @@ pub struct Engine {
 
 impl Engine {
     pub fn bind_plain(addr: &str) -> std::io::Result<Engine> {
+        Self::bind_plain_store(addr, None)
+    }
+
+    pub fn bind_plain_store(addr: &str, store: Option<std::path::PathBuf>) -> std::io::Result<Engine> {
         let listener = TcpListener::bind(addr)?;
         Ok(Engine {
             listener,
-            state: new_state(),
+            state: match store {
+                Some(p) => new_state_persist(p),
+                None => new_state(),
+            },
             mode: Mode::Plain,
             identity: None,
             host: addr.to_string(),
@@ -353,12 +393,19 @@ impl Engine {
     /// Bind with TLS; generates a fresh router identity. `host` goes into the cert SAN
     /// and the printed smp:// address.
     pub fn bind_tls(addr: &str, host: &str) -> Result<Engine, String> {
+        Self::bind_tls_store(addr, host, None)
+    }
+
+    pub fn bind_tls_store(addr: &str, host: &str, store: Option<std::path::PathBuf>) -> Result<Engine, String> {
         let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
         let id = RouterIdentity::generate(host)?;
         let cfg = tls_server_config(&id);
         Ok(Engine {
             listener,
-            state: new_state(),
+            state: match store {
+                Some(p) => new_state_persist(p),
+                None => new_state(),
+            },
             mode: Mode::Tls(Arc::new((*cfg).clone())),
             identity: Some(id),
             host: host.to_string(),
