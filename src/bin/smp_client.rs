@@ -109,11 +109,13 @@ fn main() {
     let (msg_id, pt) = got.expect("no MSG received");
     println!("MSG received: msg_id={} plaintext={:?}", base64url_nopad(&msg_id), String::from_utf8_lossy(&pt));
     // RcvMsgBody layout (Protocol.hs v6.5.0): rcvMeta = smpEncode(msgTs :: Int64 BE, msgFlags, ' ') <> msgBody
-    let msg_ts = i64::from_be_bytes(pt[0..8].try_into().unwrap());
-    let msg_flags = pt[8];
-    assert_eq!(pt[9], b' ', "rcvMeta separator");
-    let rcv_body = &pt[10..];
-    println!("MSG meta: msgTs={} ({}s epoch) flags={} body={:?}", msg_ts, msg_ts, msg_flags as char, String::from_utf8_lossy(rcv_body));
+    // (our own engine sends the bare body; the real smp-server prepends the 10-byte rcvMeta)
+    let (msg_ts, msg_flags, rcv_body) = if pt.len() > 10 && pt[9] == b' ' {
+        (i64::from_be_bytes(pt[0..8].try_into().unwrap()), pt[8], &pt[10..])
+    } else {
+        (0i64, 0u8, &pt[..])
+    };
+    println!("MSG meta: msgTs={} flags={} body={:?}", msg_ts, msg_flags as char, String::from_utf8_lossy(rcv_body));
     assert_eq!(rcv_body, body.as_slice(), "decrypted rcv body mismatch");
 
     println!("ACK -> {:?}", client.request(Command::Ack(msg_id), rcv_id.clone(), Some(&rcv_auth)).expect("ACK"));
@@ -193,6 +195,27 @@ fn main() {
             }
         }
         let _ = c2.request(Command::Del, rcv_id2, Some(&rcv_auth2)).expect("DEL2");
+    }
+
+    // optional XFTP demo (SMP_DEMO_XFTP=1): FNEW/FPUT upload, FGET download on 2nd conn, verify, FDEL
+    if std::env::var("SMP_DEMO_XFTP").is_ok() {
+        use smp_rs::xftp::{delete_file, download_file, upload_file, FileDesc};
+        let sender = ed25519_keypair();
+        let data: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let desc = upload_file(&mut client, &data, &sender).expect("XFTP upload");
+        println!("FNEW -> FID({}) size={} chunks={}", hex(&desc.packet_id), desc.size, desc.chunks);
+        let desc_text = desc.encode();
+        let desc2 = FileDesc::decode(&desc_text).expect("desc decode");
+        let mut c3 = if args.first().map(|a| a == "--tls").unwrap_or(false) {
+            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("c3 connect_tls")
+        } else {
+            Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("c3 connect_plain")
+        };
+        let padded = download_file(&mut c3, &desc2).expect("XFTP download+decrypt+digest");
+        assert_eq!(&padded[..data.len()], &data[..], "XFTP content mismatch");
+        println!("FGET -> {} chunks, decrypt OK, digest OK, content matches ({} bytes)", desc2.chunks, data.len());
+        delete_file(&mut client, &desc.packet_id, &sender).expect("FDEL");
+        println!("FDEL -> OK (packet removed)");
     }
     println!("OK: full round-trip over the Rust engine succeeded");
 }
