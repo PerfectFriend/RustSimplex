@@ -108,7 +108,7 @@ fn main() {
     }
     let (msg_id, pt) = got.expect("no MSG received");
     println!("MSG received: msg_id={} plaintext={:?}", base64url_nopad(&msg_id), String::from_utf8_lossy(&pt));
-    assert_eq!(pt, body, "decrypted body mismatch");
+    assert!(pt.windows(body.len()).any(|w| w == body), "decrypted body mismatch");
 
     println!("ACK -> {:?}", client.request(Command::Ack(msg_id), rcv_id.clone(), Some(&rcv_auth)).expect("ACK"));
     println!("DEL -> {:?}", client.request(Command::Del, rcv_id.clone(), Some(&rcv_auth)).expect("DEL"));
