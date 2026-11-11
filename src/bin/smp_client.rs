@@ -118,5 +118,81 @@ fn main() {
 
     println!("ACK -> {:?}", client.request(Command::Ack(msg_id), rcv_id.clone(), Some(&rcv_auth)).expect("ACK"));
     println!("DEL -> {:?}", client.request(Command::Del, rcv_id.clone(), Some(&rcv_auth)).expect("DEL"));
+
+    // optional NTF interop demo (SMP_DEMO_NTF=1): NKEY -> NID, NSUB on 2nd conn, SEND(notify) -> NMSG
+    if std::env::var("SMP_DEMO_NTF").is_ok() {
+        let mut c2 = if args.first().map(|a| a == "--tls").unwrap_or(false) {
+            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("c2 connect_tls")
+        } else {
+            Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("c2 connect_plain")
+        };
+        let rcv_auth2 = ed25519_keypair();
+        let rcv_dh2 = x25519_keypair();
+        let resp2 = c2
+            .request(
+                Command::New {
+                    rcv_auth_key: spki_ed25519(&rcv_auth2.verifying.to_bytes()),
+                    rcv_dh_key: spki_x25519(&rcv_dh2.public.to_bytes()),
+                    basic_auth: None,
+                    sub_mode: b'S',
+                    queue_req_data: None,
+                    ntf_creds: None,
+                },
+                vec![],
+                Some(&rcv_auth2),
+            )
+            .expect("NEW2");
+        let rcv_id2 = match &resp2[0] {
+            BrokerMsg::Ids { rcv_id, snd_id: _, .. } => rcv_id.clone(),
+            other => panic!("expected IDS, got {other:?}"),
+        };
+        let ntf_auth = ed25519_keypair();
+        let rcv_ntf_dh = x25519_keypair();
+        let nkey = c2
+            .request(
+                Command::Nkey {
+                    ntf_key: spki_ed25519(&ntf_auth.verifying.to_bytes()),
+                    rcv_ntf_dh_key: spki_x25519(&rcv_ntf_dh.public.to_bytes()),
+                },
+                rcv_id2.clone(),
+                Some(&rcv_auth2),
+            )
+            .expect("NKEY");
+        println!("NKEY -> {:?}", nkey.iter().map(|m| match m { BrokerMsg::Nid { ntf_id, .. } => format!("Nid({})", base64url_nopad(ntf_id)), other => format!("{other:?}") }).collect::<Vec<_>>());
+        let (ntf_id, srv_ntf_dh) = match &nkey[0] {
+            BrokerMsg::Nid { ntf_id, srv_ntf_dh } => (ntf_id.clone(), srv_ntf_dh.clone()),
+            other => panic!("expected NID, got {other:?}"),
+        };
+        // second connection as notifier: NSUB signed with ntf key
+        let mut ntf_conn = if args.first().map(|a| a == "--tls").unwrap_or(false) {
+            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("ntf connect_tls")
+        } else {
+            Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("ntf connect_plain")
+        };
+        let nsub = ntf_conn.request(Command::Nsub, ntf_id.clone(), Some(&ntf_auth)).expect("NSUB");
+        println!("NSUB -> {:?}", nsub);
+        // SEND with notify flag from the first connection's queue
+        let snd_id2 = match &resp2[0] {
+            BrokerMsg::Ids { snd_id, .. } => snd_id.clone(),
+            _ => unreachable!(),
+        };
+        let s = c2.request(Command::Send { flags: true, body: b"ntf probe".to_vec() }, snd_id2, None).expect("SEND2");
+        println!("SEND(notify) -> {:?}", s.iter().map(|m| match m { BrokerMsg::Ok => "Ok".into(), other => format!("{other:?}") }).collect::<Vec<_>>());
+        let blk = ntf_conn.recv_block().expect("recv NMSG");
+        for m in &blk {
+            if let BrokerMsg::Nmsg { nonce, enc_meta } = m {
+                println!("NMSG received: nonce={} enc_meta_len={}", base64url_nopad(nonce), enc_meta.len());
+                let srv_raw = parse_spki(&srv_ntf_dh).unwrap().1;
+                let sec = x25519_dh(&rcv_ntf_dh.secret, &x25519_public(srv_raw));
+                let mut n24 = [0u8; 24];
+                n24.copy_from_slice(nonce);
+                match decrypt_for_recipient(&sec, nonce, enc_meta) {
+                    Some(pt) => println!("NMSG meta decrypted OK: {:02x?}...", &pt[..pt.len().min(24)]),
+                    None => println!("NMSG meta decrypt FAILED"),
+                }
+            }
+        }
+        let _ = c2.request(Command::Del, rcv_id2, Some(&rcv_auth2)).expect("DEL2");
+    }
     println!("OK: full round-trip over the Rust engine succeeded");
 }
