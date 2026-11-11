@@ -39,6 +39,12 @@ pub enum Command {
     Nsub,
     /// NDEL — disable notifications (recipient-signed)
     Ndel,
+    /// PRXY <host> <port> [basicAuth] — ask router to open a proxied session to another router
+    Proxy { host: Vec<u8>, port: Vec<u8>, auth: Option<Vec<u8>> },
+    /// PFWD <smpVersion u16> <commandKey SPKI> <tail: enc transmission padded to 16226>
+    Pfwd { version: u16, command_key: Vec<u8>, enc: Vec<u8> },
+    /// RFWD <tail: enc fwdTransmission> — proxy router -> destination router
+    Rfwd { enc: Vec<u8> },
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +64,12 @@ pub enum BrokerMsg {
     Nid { ntf_id: Vec<u8>, srv_ntf_dh: Vec<u8> },
     /// NMSG <nonce 24B raw> <encMeta shortString>
     Nmsg { nonce: Vec<u8>, enc_meta: Vec<u8> },
+    /// PKEY <sessionId> <vMin u16> <vMax u16> <certChain+signedKey blob shortString>
+    Pkey { session_id: Vec<u8>, v_min: u16, v_max: u16, cert_key: Vec<u8> },
+    /// PRES <tail: enc response>
+    Pres { enc: Vec<u8> },
+    /// RRES <tail: enc fwd response>
+    Rres { enc: Vec<u8> },
     Ok,
     Err(String),
     Pong,
@@ -98,6 +110,23 @@ pub fn encode_command(c: &Command) -> Result<Vec<u8>, EncodeError> {
         }
         Command::Nsub => o.extend_from_slice(b"NSUB"),
         Command::Ndel => o.extend_from_slice(b"NDEL"),
+        Command::Proxy { host, port, auth } => {
+            o.extend_from_slice(b"PRXY ");
+            w_short(&mut o, host)?;
+            w_short(&mut o, port)?;
+            w_maybe(&mut o, auth.as_deref())?;
+        }
+        Command::Pfwd { version, command_key, enc } => {
+            o.extend_from_slice(b"PFWD ");
+            w_u16(&mut o, *version);
+            o.push(b' ');
+            w_short(&mut o, command_key)?;
+            o.extend_from_slice(enc); // Tail
+        }
+        Command::Rfwd { enc } => {
+            o.extend_from_slice(b"RFWD ");
+            o.extend_from_slice(enc); // Tail
+        }
     }
     Ok(o)
 }
@@ -132,6 +161,15 @@ pub fn encode_broker(m: &BrokerMsg) -> Result<Vec<u8>, EncodeError> {
             o.extend_from_slice(nonce); // 24-byte raw nonce, no length prefix
             w_short(&mut o, enc_meta)?;
         }
+        BrokerMsg::Pkey { session_id, v_min, v_max, cert_key } => {
+            o.extend_from_slice(b"PKEY ");
+            w_short(&mut o, session_id)?;
+            w_u16(&mut o, *v_min);
+            w_u16(&mut o, *v_max);
+            w_short(&mut o, cert_key)?;
+        }
+        BrokerMsg::Pres { enc } => { o.extend_from_slice(b"PRES "); o.extend_from_slice(enc); }
+        BrokerMsg::Rres { enc } => { o.extend_from_slice(b"RRES "); o.extend_from_slice(enc); }
         BrokerMsg::Err(e) => { o.extend_from_slice(b"ERR "); o.extend_from_slice(e.as_bytes()); }
         BrokerMsg::Pong => o.extend_from_slice(b"PONG"),
         BrokerMsg::End => o.extend_from_slice(b"END"),
@@ -193,6 +231,15 @@ pub fn parse_broker(cmd: &[u8]) -> Result<BrokerMsg, EncodeError> {
             let enc_meta = r.short()?;
             Ok(BrokerMsg::Nmsg { nonce, enc_meta })
         }
+        b"PKEY" => {
+            let session_id = r.short()?;
+            let v_min = r.u16()?;
+            let v_max = r.u16()?;
+            let cert_key = r.short()?;
+            Ok(BrokerMsg::Pkey { session_id, v_min, v_max, cert_key })
+        }
+        b"PRES" => Ok(BrokerMsg::Pres { enc: r.rest().to_vec() }),
+        b"RRES" => Ok(BrokerMsg::Rres { enc: r.rest().to_vec() }),
         b"ERR" => Ok(BrokerMsg::Err(String::from_utf8_lossy(r.rest()).to_string())),
         b"PONG" => Ok(BrokerMsg::Pong),
         b"END" => Ok(BrokerMsg::End),
@@ -234,6 +281,20 @@ pub fn parse_command(cmd: &[u8]) -> Result<Command, EncodeError> {
         b"NKEY" => Ok(Command::Nkey { ntf_key: r.short()?, rcv_ntf_dh_key: r.short()? }),
         b"NSUB" => Ok(Command::Nsub),
         b"NDEL" => Ok(Command::Ndel),
+        b"PRXY" => {
+            let host = r.short()?;
+            let port = r.short()?;
+            let auth = read_maybe_vec(&mut r)?;
+            Ok(Command::Proxy { host, port, auth })
+        }
+        b"PFWD" => {
+            let version = r.u16()?;
+            r.u8()?; // space
+            let command_key = r.short()?;
+            let enc = r.rest().to_vec();
+            Ok(Command::Pfwd { version, command_key, enc })
+        }
+        b"RFWD" => Ok(Command::Rfwd { enc: r.rest().to_vec() }),
         _ => Err(EncodeError(format!(
             "parse_command: unhandled tag {:?}",
             String::from_utf8_lossy(&tag)

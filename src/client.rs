@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 
 use crate::crypto::*;
+use crate::encoding::{pad, unpad};
 use crate::protocol::*;
 use crate::transport::*;
 
@@ -72,5 +73,66 @@ impl Client {
             out.push(parse_broker(&t.command).map_err(map_e)?);
         }
         Ok(out)
+    }
+
+    /// PRXY: ask this router to open a proxied session to dest. Returns the PKEY.
+    pub fn proxy_open(&mut self, dest_host: &str, dest_port: u16) -> ClResult<BrokerMsg> {
+        let r = self
+            .request(
+                Command::Proxy { host: dest_host.as_bytes().to_vec(), port: dest_port.to_string().into_bytes(), auth: None },
+                vec![],
+                None,
+            )
+            .map_err(map_e)?;
+        r.into_iter().next().ok_or_else(|| "empty PRXY response".into())
+    }
+
+    /// PFWD: send a command via the proxy session to the destination router.
+    /// `pkey` = the PKEY response; returns decrypted broker messages from PRES.
+    pub fn pfwd(&mut self, pkey: &BrokerMsg, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
+        let BrokerMsg::Pkey { session_id, cert_key, .. } = pkey else {
+            return Err("expected PKEY".into());
+        };
+        let (_a, dest_pub_raw) = parse_spki(cert_key).map_err(map_e)?;
+        let dest_pub = x25519_public(dest_pub_raw);
+        // per-command ephemeral key
+        let eph = x25519_keypair();
+        let client_sess = x25519_dh(&eph.secret, &dest_pub);
+        // inner transmission (signed with OUR session id on the proxy connection, as usual)
+        let mut t = Transmission {
+            authenticator: Vec::new(),
+            corr_id: random_bytes(24),
+            entity_id,
+            command: encode_command(&cmd).map_err(map_e)?,
+        };
+        if let Some(kp) = auth {
+            auth_sign(&self.session_id, &mut t, kp).map_err(map_e)?;
+        }
+        let wire = encode_transmission(&t).map_err(map_e)?;
+        let padded = pad(&wire, crate::proxy::PROXIED_T_LEN).map_err(map_e)?;
+        let nonce = cb_nonce(&t.corr_id);
+        let enc = secretbox_encrypt(&client_sess, &nonce, &padded);
+        // PFWD transmission: entity = proxy session id, unsigned
+        let pfwd_cmd = Command::Pfwd { version: SMP_VERSION, command_key: spki_x25519(&eph.public.to_bytes()), enc };
+        let pt = Transmission {
+            authenticator: Vec::new(),
+            corr_id: t.corr_id.clone(),
+            entity_id: session_id.clone(),
+            command: encode_command(&pfwd_cmd).map_err(map_e)?,
+        };
+        let pwire = encode_transmission(&pt).map_err(map_e)?;
+        let blk = encode_block(&[pwire]).map_err(map_e)?;
+        write_block(&mut self.stream, &blk).map_err(map_e)?;
+        let msgs = self.recv_block()?;
+        for m in &msgs {
+            if let BrokerMsg::Pres { enc } = m {
+                let rn = crate::proxy::reverse_nonce(&nonce);
+                let plain = secretbox_decrypt(&client_sess, &rn, enc).ok_or("PRES decrypt failed")?;
+                let inner = unpad(&plain).map_err(map_e)?;
+                let it = decode_transmission(&inner).map_err(map_e)?;
+                return Ok(vec![parse_broker(&it.command).map_err(map_e)?]);
+            }
+        }
+        Ok(msgs)
     }
 }

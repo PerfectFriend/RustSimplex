@@ -38,12 +38,19 @@ pub struct ServerState {
     pub by_rcv: HashMap<Vec<u8>, Queue>,
     pub by_snd: HashMap<Vec<u8>, Vec<u8>>, // snd_id -> rcv_id
     pub by_ntf: HashMap<Vec<u8>, Vec<u8>>, // ntf_id -> rcv_id
+    pub proxies: crate::proxy::ProxyMap,   // proxy_session_id -> dest conn
     pub persist: Option<std::path::PathBuf>,
+}
+
+/// Per-connection proxy context (session key from hello exchange).
+pub struct ConnCtx {
+    pub sess_secret: Option<[u8; 32]>,
+    pub server_eph_priv: Option<x25519_dalek::StaticSecret>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), persist: None }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), persist: None }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -93,6 +100,7 @@ fn dispatch(
     st: &Arc<Mutex<ServerState>>,
     session_id: &[u8],
     outbox: &mpsc::Sender<Vec<u8>>,
+    ctx: &ConnCtx,
 ) -> Vec<Transmission> {
     let cmd = match parse_command(&t.command) {
         Ok(c) => c,
@@ -103,7 +111,7 @@ fn dispatch(
         Command::New { .. } | Command::Send { .. } | Command::Ack(_) | Command::Key(_) | Command::Skey(_) | Command::Del
             | Command::Nkey { .. } | Command::Nsub | Command::Ndel
     );
-    let out = dispatch_cmd(cmd, t, st, session_id, outbox);
+    let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
     if dirty {
         st.lock().unwrap().persist_now();
     }
@@ -116,6 +124,7 @@ fn dispatch_cmd(
     st: &Arc<Mutex<ServerState>>,
     session_id: &[u8],
     outbox: &mpsc::Sender<Vec<u8>>,
+    ctx: &ConnCtx,
 ) -> Vec<Transmission> {
     match cmd {
         Command::New { rcv_auth_key, rcv_dh_key, .. } => {
@@ -308,6 +317,55 @@ fn dispatch_cmd(
         }
         Command::Off => vec![resp(t.corr_id.clone(), t.entity_id.clone(), BrokerMsg::Ok).unwrap()],
         Command::Ping => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Pong).unwrap()],
+        Command::Proxy { host, port, .. } => {
+            let host = String::from_utf8_lossy(&host).to_string();
+            let port: u16 = String::from_utf8_lossy(&port).parse().unwrap_or(0);
+            // connect to destination router as a proxy client (plain TCP for now)
+            let dest_kh = [0u8; 32]; // plain mode: no keyHash pinning between our engines
+            match crate::proxy::open_proxy_session(&host, port, &dest_kh) {
+                Ok(conn) => {
+                    let proxy_id = random_bytes(24);
+                    let pkey = BrokerMsg::Pkey {
+                        session_id: proxy_id.clone(),
+                        v_min: conn.v_min,
+                        v_max: conn.v_max,
+                        cert_key: spki_x25519(&conn.dest_session_pub),
+                    };
+                    st.lock().unwrap().proxies.insert(proxy_id.clone(), Arc::new(Mutex::new(conn)));
+                    vec![resp(t.corr_id.clone(), vec![], pkey).unwrap()]
+                }
+                Err(e) => vec![err_resp(t.corr_id.clone(), vec![], &format!("PROXY {e}")).unwrap()],
+            }
+        }
+        Command::Pfwd { version, command_key, enc } => {
+            let proxy_id = t.entity_id.clone();
+            let conn = st.lock().unwrap().proxies.get(&proxy_id).cloned();
+            let Some(conn) = conn else {
+                return vec![err_resp(t.corr_id.clone(), proxy_id, "NO_AUTH").unwrap()];
+            };
+            match crate::proxy::relay_pfwd(&conn, &t.corr_id, version, &command_key, &enc) {
+                Ok(client_enc_resp) => vec![resp(t.corr_id.clone(), proxy_id, BrokerMsg::Pres { enc: client_enc_resp }).unwrap()],
+                Err(e) => vec![err_resp(t.corr_id.clone(), proxy_id, &format!("PROXY {e}")).unwrap()],
+            }
+        }
+        Command::Rfwd { enc } => {
+            let Some(sess) = ctx.sess_secret else {
+                return vec![err_resp(t.corr_id.clone(), vec![], "NO_AUTH").unwrap()];
+            };
+            let Some(eph_priv) = &ctx.server_eph_priv else {
+                return vec![err_resp(t.corr_id.clone(), vec![], "NO_AUTH").unwrap()];
+            };
+            let st2 = st.clone();
+            let sid = session_id.to_vec();
+            let outbox2 = outbox.clone();
+            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None };
+            match crate::proxy::handle_rfwd(&enc, &t.corr_id, &sess, eph_priv, session_id, &move |inner| {
+                dispatch(inner, &st2, &sid, &outbox2, &ctx2)
+            }) {
+                Ok(rres_enc) => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Rres { enc: rres_enc }).unwrap()],
+                Err(e) => vec![err_resp(t.corr_id.clone(), vec![], &format!("CRYPTO {e}")).unwrap()],
+            }
+        }
         Command::Nkey { ntf_key, rcv_ntf_dh_key } => {
             // recipient-signed, entity = rcv_id
             let rcv_id = t.entity_id.clone();
@@ -395,13 +453,23 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
     };
     let session_id: Vec<u8> = Vec::new();
     // --- phase 1: blocking handshake (drives the TLS handshake too) ---
-    let hello = server_hello_block(SMP_VERSION, SMP_VERSION, &session_id).map_err(io_err)?;
+    // per-connection ephemeral X25519 key for proxy sessions (authPubKey in server hello)
+    let eph = x25519_keypair();
+    let eph_pub = eph.public.to_bytes();
+    let hello = server_hello_block_key(SMP_VERSION, SMP_VERSION, &session_id, Some(&eph_pub)).map_err(io_err)?;
     write_block(&mut stream, &hello)?;
     let ch = read_block(&mut stream)?;
-    let (v, _kh, _proxy) = parse_client_hello(&ch).map_err(io_err)?;
+    let (v, _kh, _proxy, client_auth) = parse_client_hello_key(&ch).map_err(io_err)?;
     if v != SMP_VERSION {
         return Err(io_err(format!("version {v} != {SMP_VERSION}")));
     }
+    let ctx = ConnCtx {
+        sess_secret: client_auth.map(|der| {
+            let (_a, raw) = parse_spki(&der).map_err(io_err).unwrap();
+            x25519_dh(&eph.secret, &x25519_public(raw))
+        }),
+        server_eph_priv: Some(eph.secret),
+    };
     // --- phase 2: poll pump ---
     ctrl.set_read_timeout(Some(Duration::from_millis(50)))?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -438,7 +506,7 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                             Ok(t) => t,
                             Err(_) => continue,
                         };
-                        for r in dispatch(&t, &st, &session_id, &tx) {
+                        for r in dispatch(&t, &st, &session_id, &tx, &ctx) {
                             if let Ok(enc) = encode_transmission(&r) {
                                 responses.push(enc);
                             }

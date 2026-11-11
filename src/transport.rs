@@ -28,55 +28,95 @@ pub const ALPN_SMP: &[u8] = b"smp/1";
 // ---------- handshake blocks ----------
 
 pub fn server_hello_block(min_v: u16, max_v: u16, session_id: &[u8]) -> Result<Vec<u8>, EncodeError> {
+    server_hello_block_key(min_v, max_v, session_id, None)
+}
+
+/// Server hello with optional X25519 session pubkey (authPubKey = Just) used for SMP proxy sessions.
+pub fn server_hello_block_key(min_v: u16, max_v: u16, session_id: &[u8], auth_pub: Option<&[u8; 32]>) -> Result<Vec<u8>, EncodeError> {
     // SMPServerHandshake: smpEncode (vRange, sessionId) <> authPubKey(maybe, v>=7).
-    // We send authPubKey = Nothing ("0"): no X25519 session key, Ed25519 command auth still works.
     let mut c = Vec::new();
     w_u16(&mut c, min_v);
     w_u16(&mut c, max_v);
     w_short(&mut c, session_id)?;
-    c.push(b'0'); // authPubKey = Nothing
+    match auth_pub {
+        Some(pk) => {
+            c.push(b'1'); // Maybe = Just
+            w_short(&mut c, &crate::crypto::spki_x25519(pk))?;
+        }
+        None => c.push(b'0'), // authPubKey = Nothing
+    }
     pad(&c, BLOCK_SIZE)
 }
 
 pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeError> {
+    let (min, max, sid, _auth) = parse_server_hello_key(block)?;
+    Ok((min, max, sid))
+}
+
+/// Returns (min, max, sessionId, authPubKey SPKI DER if Just).
+pub fn parse_server_hello_key(block: &[u8]) -> Result<(u16, u16, Vec<u8>, Option<Vec<u8>>), EncodeError> {
     let c = unpad(block)?;
     let mut r = Reader::new(&c);
     let min = r.u16()?;
     let max = r.u16()?;
     let sid = r.short()?;
-    // remaining authPubKey field is ignored here
-    Ok((min, max, sid))
+    let auth = match r.u8()? {
+        b'0' => None,
+        b'1' => Some(r.short()?),
+        t => return Err(EncodeError(format!("bad Maybe tag {t} in server hello"))),
+    };
+    Ok((min, max, sid, auth))
 }
 
 pub fn client_hello_block(version: u16, key_hash: &[u8], proxy: bool) -> Result<Vec<u8>, EncodeError> {
-    // SMPClientHandshake (v6.5.0, Transport.hs):
-    //   smpEncode (v, keyHash)
-    //   <> encodeAuthEncryptCmds v authPubKey   -- v>=7: Nothing -> EMPTY (zero bytes), not '0'
-    //   <> ifHasProxy v (smpEncode proxyServer) -- v>=14: Bool 'T'/'F'
-    //   <> ifHasService v (smpEncode clientService) -- v>=16: Maybe '0'/'1'
+    client_hello_block_key(version, key_hash, proxy, None)
+}
+
+/// Client hello with optional X25519 pubkey (authPubKey = Just) — used by proxy sessions.
+pub fn client_hello_block_key(version: u16, key_hash: &[u8], proxy: bool, auth_pub: Option<Vec<u8>>) -> Result<Vec<u8>, EncodeError> {
     let mut c = Vec::new();
     w_u16(&mut c, version);
     w_short(&mut c, key_hash)?;
-    // authPubKey = Nothing: for v>=7 encode as empty (no bytes)
-    if version < 7 {
-        w_short(&mut c, &[])?; // legacy v6 required key; send empty shortString
+    match &auth_pub {
+        Some(k) => {
+            c.push(b'1');
+            w_short(&mut c, k)?;
+        }
+        None => {
+            if version < 7 {
+                w_short(&mut c, &[])?;
+            }
+        }
     }
     if version >= 14 {
-        w_bool(&mut c, proxy); // proxyServer Bool
+        w_bool(&mut c, proxy);
     }
     if version >= 16 {
-        c.push(b'0'); // clientService = Nothing (Maybe)
+        c.push(b'0');
     }
     pad(&c, BLOCK_SIZE)
 }
 
 pub fn parse_client_hello(block: &[u8]) -> Result<(u16, Vec<u8>, bool), EncodeError> {
+    let (v, kh, proxy, _auth) = parse_client_hello_key(block)?;
+    Ok((v, kh, proxy))
+}
+
+/// Returns (version, keyHash, proxyServer, authPubKey SPKI DER if Just).
+pub fn parse_client_hello_key(block: &[u8]) -> Result<(u16, Vec<u8>, bool, Option<Vec<u8>>), EncodeError> {
     let c = unpad(block)?;
     let mut r = Reader::new(&c);
     let v = r.u16()?;
     let kh = r.short()?;
-    // authPubKey / proxy / service fields are ignored by our server
-    Ok((v, kh, false))
+    // For v>=7 a Nothing authPubKey is encoded as ZERO bytes (maybe "" smpEncode),
+    // so only consume a Maybe tag when the next byte is actually '0'/'1'.
+    let auth = match r.peek_u8()? {
+        b'0' => { r.u8()?; None }
+        b'1' => { r.u8()?; Some(r.short()?) }
+        _ => None,
+    };
+    let proxy = if v >= 14 { r.bool()? } else { false };
+    Ok((v, kh, proxy, auth))
 }
 
 // ---------- block I/O ----------
