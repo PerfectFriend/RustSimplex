@@ -108,7 +108,13 @@ fn main() {
     }
     let (msg_id, pt) = got.expect("no MSG received");
     println!("MSG received: msg_id={} plaintext={:?}", base64url_nopad(&msg_id), String::from_utf8_lossy(&pt));
-    assert!(pt.windows(body.len()).any(|w| w == body), "decrypted body mismatch");
+    // RcvMsgBody layout (Protocol.hs v6.5.0): rcvMeta = smpEncode(msgTs :: Int64 BE, msgFlags, ' ') <> msgBody
+    let msg_ts = i64::from_be_bytes(pt[0..8].try_into().unwrap());
+    let msg_flags = pt[8];
+    assert_eq!(pt[9], b' ', "rcvMeta separator");
+    let rcv_body = &pt[10..];
+    println!("MSG meta: msgTs={} ({}s epoch) flags={} body={:?}", msg_ts, msg_ts, msg_flags as char, String::from_utf8_lossy(rcv_body));
+    assert_eq!(rcv_body, body.as_slice(), "decrypted rcv body mismatch");
 
     println!("ACK -> {:?}", client.request(Command::Ack(msg_id), rcv_id.clone(), Some(&rcv_auth)).expect("ACK"));
     println!("DEL -> {:?}", client.request(Command::Del, rcv_id.clone(), Some(&rcv_auth)).expect("DEL"));
