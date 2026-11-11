@@ -27,17 +27,23 @@ pub struct Queue {
     pub rcv_dh_secret: [u8; 32],
     pub messages: VecDeque<(Vec<u8>, Vec<u8>)>, // (msg_id, body)
     pub subscriber: Option<mpsc::Sender<Vec<u8>>>, // outbox of wire transmissions to push
+    // notifier (NTF) — separate queue id so router compromise can't correlate
+    pub ntf_id: Option<Vec<u8>>,
+    pub ntf_auth_raw: Option<[u8; 32]>,       // notifier's Ed25519 pubkey (raw)
+    pub rcv_ntf_dh_secret: Option<[u8; 32]>,  // DH(srv_ntf_priv, rcv_ntf_dh_pub)
+    pub ntf_subscriber: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 pub struct ServerState {
     pub by_rcv: HashMap<Vec<u8>, Queue>,
     pub by_snd: HashMap<Vec<u8>, Vec<u8>>, // snd_id -> rcv_id
+    pub by_ntf: HashMap<Vec<u8>, Vec<u8>>, // ntf_id -> rcv_id
     pub persist: Option<std::path::PathBuf>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), persist: None }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), persist: None }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -95,6 +101,7 @@ fn dispatch(
     let dirty = matches!(
         cmd,
         Command::New { .. } | Command::Send { .. } | Command::Ack(_) | Command::Key(_) | Command::Skey(_) | Command::Del
+            | Command::Nkey { .. } | Command::Nsub | Command::Ndel
     );
     let out = dispatch_cmd(cmd, t, st, session_id, outbox);
     if dirty {
@@ -146,6 +153,10 @@ fn dispatch_cmd(
                     rcv_dh_secret,
                     messages: VecDeque::new(),
                     subscriber: None,
+                    ntf_id: None,
+                    ntf_auth_raw: None,
+                    rcv_ntf_dh_secret: None,
+                    ntf_subscriber: None,
                 });
                 s.by_snd.insert(snd_id.clone(), rcv_id.clone());
             }
@@ -188,7 +199,7 @@ fn dispatch_cmd(
                 None => vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Sok(None)).unwrap()],
             }
         }
-        Command::Send { body, .. } => {
+        Command::Send { flags, body } => {
             let snd_id = t.entity_id.clone();
             let rcv_id = {
                 let s = st.lock().unwrap();
@@ -213,6 +224,29 @@ fn dispatch_cmd(
                 if let Ok(msg_t) = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
                     if let Ok(wire) = encode_transmission(&msg_t) {
                         let _ = sub.send(wire);
+                    }
+                }
+            }
+            // NTF: if notifications enabled and SEND has notify flag, push NMSG to notifier subscriber
+            if flags {
+                if let (Some(ntf_secret), Some(ntf_sub)) = (&q.rcv_ntf_dh_secret, &q.ntf_subscriber) {
+                    let nonce = random_bytes(24);
+                    let mut meta = Vec::new();
+                    crate::encoding::w_short(&mut meta, &msg_id).unwrap();
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    crate::encoding::w_i64(&mut meta, ts);
+                    if let Ok(padded) = crate::encoding::pad(&meta, 128) {
+                        let mut n24 = [0u8; 24];
+                        n24.copy_from_slice(&nonce);
+                        let enc_meta = secretbox_encrypt(ntf_secret, &n24, &padded);
+                        if let Ok(ntf_t) = resp(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta }) {
+                            if let Ok(wire) = encode_transmission(&ntf_t) {
+                                let _ = ntf_sub.send(wire);
+                            }
+                        }
                     }
                 }
             }
@@ -260,12 +294,87 @@ fn dispatch_cmd(
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             let snd = q.snd_id.clone();
-            s.by_rcv.remove(&rcv_id);
-            s.by_snd.remove(&snd);
+            if let Some(nid) = q.ntf_id.take() {
+                let s = &mut *s;
+                s.by_ntf.remove(&nid);
+                s.by_rcv.remove(&rcv_id);
+                s.by_snd.remove(&snd);
+            } else {
+                let s = &mut *s;
+                s.by_rcv.remove(&rcv_id);
+                s.by_snd.remove(&snd);
+            }
             vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Deld).unwrap()]
         }
         Command::Off => vec![resp(t.corr_id.clone(), t.entity_id.clone(), BrokerMsg::Ok).unwrap()],
         Command::Ping => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Pong).unwrap()],
+        Command::Nkey { ntf_key, rcv_ntf_dh_key } => {
+            // recipient-signed, entity = rcv_id
+            let rcv_id = t.entity_id.clone();
+            let mut g = st.lock().unwrap();
+            let s = &mut *g;
+            let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
+                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+            };
+            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+            }
+            let (_alg, ntf_raw) = match parse_spki(&ntf_key) {
+                Ok(x) => x,
+                Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()],
+            };
+            let (_dh_alg, rcv_ntf_dh_raw) = match parse_spki(&rcv_ntf_dh_key) {
+                Ok(x) => x,
+                Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "CMD SYNTAX").unwrap()],
+            };
+            let srv_ntf = x25519_keypair();
+            let rcv_ntf_dh_secret = x25519_dh(&srv_ntf.secret, &x25519_public(rcv_ntf_dh_raw));
+            let ntf_id = random_bytes(16);
+            let srv_ntf_dh_der = spki_x25519(&srv_ntf.public.to_bytes());
+            q.ntf_id = Some(ntf_id.clone());
+            q.ntf_auth_raw = Some(ntf_raw);
+            q.rcv_ntf_dh_secret = Some(rcv_ntf_dh_secret);
+            s.by_ntf.insert(ntf_id.clone(), rcv_id.clone());
+            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Nid { ntf_id, srv_ntf_dh: srv_ntf_dh_der }).unwrap()]
+        }
+        Command::Nsub => {
+            // notifier-key-signed, entity = ntf_id
+            let ntf_id = t.entity_id.clone();
+            let mut s = st.lock().unwrap();
+            let rcv_id = match s.by_ntf.get(&ntf_id) {
+                Some(r) => r.clone(),
+                None => return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()],
+            };
+            let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
+                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+            };
+            let Some(ntf_raw) = q.ntf_auth_raw else {
+                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+            };
+            if !verify_sign(session_id, t, &ntf_raw) {
+                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+            }
+            q.ntf_subscriber = Some(outbox.clone());
+            vec![resp(t.corr_id.clone(), ntf_id, BrokerMsg::Sok(None)).unwrap()]
+        }
+        Command::Ndel => {
+            let rcv_id = t.entity_id.clone();
+            let mut g = st.lock().unwrap();
+            let s = &mut *g;
+            let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
+                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+            };
+            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+            }
+            if let Some(nid) = q.ntf_id.take() {
+                s.by_ntf.remove(&nid);
+            }
+            q.ntf_auth_raw = None;
+            q.rcv_ntf_dh_secret = None;
+            q.ntf_subscriber = None;
+            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Ok).unwrap()]
+        }
     }
 }
 

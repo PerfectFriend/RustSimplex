@@ -33,6 +33,12 @@ pub enum Command {
     Ack(Vec<u8>),
     Off,
     Del,
+    /// NKEY <notifierKey SPKI> <recipientNtfDhKey SPKI> — enable notifications (recipient-signed)
+    Nkey { ntf_key: Vec<u8>, rcv_ntf_dh_key: Vec<u8> },
+    /// NSUB — subscribe to NMSG pushes on the notifier queue (notifier-key-signed, entity = ntf_id)
+    Nsub,
+    /// NDEL — disable notifications (recipient-signed)
+    Ndel,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +54,10 @@ pub enum BrokerMsg {
     },
     Sok(Option<Vec<u8>>),
     Msg { msg_id: Vec<u8>, body: Vec<u8> },
+    /// NID <ntfId> <srvNtfDhPub SPKI>
+    Nid { ntf_id: Vec<u8>, srv_ntf_dh: Vec<u8> },
+    /// NMSG <nonce 24B raw> <encMeta shortString>
+    Nmsg { nonce: Vec<u8>, enc_meta: Vec<u8> },
     Ok,
     Err(String),
     Pong,
@@ -81,6 +91,13 @@ pub fn encode_command(c: &Command) -> Result<Vec<u8>, EncodeError> {
         Command::Ack(m) => { o.extend_from_slice(b"ACK "); w_short(&mut o, m)?; }
         Command::Off => o.extend_from_slice(b"OFF"),
         Command::Del => o.extend_from_slice(b"DEL"),
+        Command::Nkey { ntf_key, rcv_ntf_dh_key } => {
+            o.extend_from_slice(b"NKEY ");
+            w_short(&mut o, ntf_key)?;
+            w_short(&mut o, rcv_ntf_dh_key)?;
+        }
+        Command::Nsub => o.extend_from_slice(b"NSUB"),
+        Command::Ndel => o.extend_from_slice(b"NDEL"),
     }
     Ok(o)
 }
@@ -105,6 +122,16 @@ pub fn encode_broker(m: &BrokerMsg) -> Result<Vec<u8>, EncodeError> {
             o.extend_from_slice(body); // Tail
         }
         BrokerMsg::Ok => o.extend_from_slice(b"OK"),
+        BrokerMsg::Nid { ntf_id, srv_ntf_dh } => {
+            o.extend_from_slice(b"NID ");
+            w_short(&mut o, ntf_id)?;
+            w_short(&mut o, srv_ntf_dh)?;
+        }
+        BrokerMsg::Nmsg { nonce, enc_meta } => {
+            o.extend_from_slice(b"NMSG ");
+            o.extend_from_slice(nonce); // 24-byte raw nonce, no length prefix
+            w_short(&mut o, enc_meta)?;
+        }
         BrokerMsg::Err(e) => { o.extend_from_slice(b"ERR "); o.extend_from_slice(e.as_bytes()); }
         BrokerMsg::Pong => o.extend_from_slice(b"PONG"),
         BrokerMsg::End => o.extend_from_slice(b"END"),
@@ -160,6 +187,12 @@ pub fn parse_broker(cmd: &[u8]) -> Result<BrokerMsg, EncodeError> {
             Ok(BrokerMsg::Msg { msg_id, body })
         }
         b"OK" => Ok(BrokerMsg::Ok),
+        b"NID" => Ok(BrokerMsg::Nid { ntf_id: r.short()?, srv_ntf_dh: r.short()? }),
+        b"NMSG" => {
+            let nonce = r.take(24)?.to_vec();
+            let enc_meta = r.short()?;
+            Ok(BrokerMsg::Nmsg { nonce, enc_meta })
+        }
         b"ERR" => Ok(BrokerMsg::Err(String::from_utf8_lossy(r.rest()).to_string())),
         b"PONG" => Ok(BrokerMsg::Pong),
         b"END" => Ok(BrokerMsg::End),
@@ -198,6 +231,9 @@ pub fn parse_command(cmd: &[u8]) -> Result<Command, EncodeError> {
         b"ACK" => Ok(Command::Ack(r.short()?)),
         b"OFF" => Ok(Command::Off),
         b"DEL" => Ok(Command::Del),
+        b"NKEY" => Ok(Command::Nkey { ntf_key: r.short()?, rcv_ntf_dh_key: r.short()? }),
+        b"NSUB" => Ok(Command::Nsub),
+        b"NDEL" => Ok(Command::Ndel),
         _ => Err(EncodeError(format!(
             "parse_command: unhandled tag {:?}",
             String::from_utf8_lossy(&tag)

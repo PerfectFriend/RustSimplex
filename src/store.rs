@@ -27,6 +27,19 @@ pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
             None => out.push(0),
         }
         out.extend_from_slice(&q.rcv_dh_secret);
+        // ntf fields
+        match &q.ntf_id {
+            Some(nid) => { out.push(1); put_bytes(&mut out, nid); }
+            None => out.push(0),
+        }
+        match &q.ntf_auth_raw {
+            Some(k) => { out.push(1); out.extend_from_slice(k); }
+            None => out.push(0),
+        }
+        match &q.rcv_ntf_dh_secret {
+            Some(k) => { out.push(1); out.extend_from_slice(k); }
+            None => out.push(0),
+        }
         out.extend_from_slice(&(q.messages.len() as u32).to_be_bytes());
         for (mid, body) in &q.messages {
             put_bytes(&mut out, mid);
@@ -76,12 +89,27 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
             _ => None,
         };
         let rcv_dh_secret: [u8; 32] = r.take(32)?.try_into().ok()?;
+        let ntf_id = match r.take(1)?[0] {
+            1 => Some(r.bytes()?),
+            _ => None,
+        };
+        let ntf_auth_raw = match r.take(1)?[0] {
+            1 => Some(r.take(32)?.try_into().ok()?),
+            _ => None,
+        };
+        let rcv_ntf_dh_secret = match r.take(1)?[0] {
+            1 => Some(r.take(32)?.try_into().ok()?),
+            _ => None,
+        };
         let nmsg = r.u32()? as usize;
         let mut messages = std::collections::VecDeque::new();
         for _ in 0..nmsg {
             let mid = r.bytes()?;
             let body = r.bytes()?;
             messages.push_back((mid, body));
+        }
+        if let Some(nid) = &ntf_id {
+            st.by_ntf.insert(nid.clone(), rcv_id.clone());
         }
         st.by_snd.insert(snd_id.clone(), rcv_id.clone());
         st.by_rcv.insert(
@@ -94,6 +122,10 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
                 rcv_dh_secret,
                 messages,
                 subscriber: None,
+                ntf_id,
+                ntf_auth_raw,
+                rcv_ntf_dh_secret,
+                ntf_subscriber: None,
             },
         );
     }
