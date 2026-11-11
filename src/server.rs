@@ -39,6 +39,7 @@ pub struct ServerState {
     pub by_snd: HashMap<Vec<u8>, Vec<u8>>, // snd_id -> rcv_id
     pub by_ntf: HashMap<Vec<u8>, Vec<u8>>, // ntf_id -> rcv_id
     pub proxies: crate::proxy::ProxyMap,   // proxy_session_id -> dest conn
+    pub xftp: crate::xftp::XftpStore,      // packet_id -> XftpPacket
     pub persist: Option<std::path::PathBuf>,
 }
 
@@ -50,7 +51,7 @@ pub struct ConnCtx {
 
 impl ServerState {
     pub fn new() -> Self {
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), persist: None }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -317,6 +318,69 @@ fn dispatch_cmd(
         }
         Command::Off => vec![resp(t.corr_id.clone(), t.entity_id.clone(), BrokerMsg::Ok).unwrap()],
         Command::Ping => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Pong).unwrap()],
+        Command::Fnew { size, digest, sender_key } => {
+            let (_alg, sender_raw) = match parse_spki(&sender_key) {
+                Ok(v) => v,
+                Err(e) => return vec![err_resp(t.corr_id.clone(), vec![], &format!("AUTH {e}")).unwrap()],
+            };
+            if !verify_sign(session_id, t, &sender_raw) {
+                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+            }
+            let packet_id = random_bytes(16);
+            st.lock().unwrap().xftp.insert(
+                packet_id.clone(),
+                crate::xftp::XftpPacket { size, digest, sender_raw, chunks: Default::default() },
+            );
+            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Fid { packet_id }).unwrap()]
+        }
+        Command::Fput { packet_id, offset, chunk } => {
+            let mut g = st.lock().unwrap();
+            let Some(p) = g.xftp.get(&packet_id) else {
+                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+            };
+            if !verify_sign(session_id, t, &p.sender_raw) {
+                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+            }
+            let p = g.xftp.get_mut(&packet_id).unwrap();
+            p.chunks.insert(offset, chunk);
+            drop(g);
+            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Ok).unwrap()]
+        }
+        Command::Fget { packet_id, offset } => {
+            let g = st.lock().unwrap();
+            let Some(p) = g.xftp.get(&packet_id) else {
+                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+            };
+            // as many chunks as fit into one 16KB block starting at `offset` (15KB chunk -> 1 per block)
+            let mut out = Vec::new();
+            let mut size = 0usize;
+            for (off, ch) in p.chunks.range(offset..) {
+                let need = 8 + ch.len(); // approx transmission overhead + FDATA
+                if !out.is_empty() && size + need > 16000 {
+                    break;
+                }
+                size += need;
+                if let Ok(r) = resp(t.corr_id.clone(), vec![], BrokerMsg::Fdata { offset: *off, chunk: ch.clone() }) {
+                    out.push(r);
+                }
+            }
+            if out.is_empty() {
+                out.push(err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap());
+            }
+            out
+        }
+        Command::Fdel { packet_id } => {
+            let mut g = st.lock().unwrap();
+            let Some(p) = g.xftp.get(&packet_id) else {
+                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+            };
+            if !verify_sign(session_id, t, &p.sender_raw) {
+                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+            }
+            g.xftp.remove(&packet_id);
+            drop(g);
+            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Ok).unwrap()]
+        }
         Command::Proxy { host, port, .. } => {
             let host = String::from_utf8_lossy(&host).to_string();
             let port: u16 = String::from_utf8_lossy(&port).parse().unwrap_or(0);

@@ -46,6 +46,9 @@ pub fn w_u32(out: &mut Vec<u8>, v: u32) {
 pub fn w_i64(out: &mut Vec<u8>, v: i64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
+pub fn w_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
 pub fn w_bool(out: &mut Vec<u8>, b: bool) {
     out.push(if b { b'T' } else { b'F' });
 }
@@ -89,6 +92,14 @@ impl<'a> Reader<'a> {
     pub fn u16(&mut self) -> Result<u16, EncodeError> {
         let b = self.take(2)?;
         Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+    pub fn u32(&mut self) -> Result<u32, EncodeError> {
+        let b = self.take(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    pub fn u64(&mut self) -> Result<u64, EncodeError> {
+        let b = self.take(8)?;
+        Ok(u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
     }
     pub fn short(&mut self) -> Result<Vec<u8>, EncodeError> {
         let n = self.u8()? as usize;

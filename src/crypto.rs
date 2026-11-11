@@ -172,6 +172,20 @@ pub fn cb_nonce(bytes: &[u8]) -> [u8; 24] {
     n
 }
 
+/// Raw NaCl secretbox (XSalsa20-Poly1305 with the key used directly, NO HSalsa20 beforenm).
+/// Used for XFTP file encryption, where the file key from the file description is the box key itself.
+pub fn raw_secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = XSalsa20Poly1305::new(key.into());
+    cipher.encrypt(Nonce::from_slice(nonce24), plaintext).expect("encrypt infallible")
+}
+pub fn raw_secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
+    if nacl.len() < 16 {
+        return None;
+    }
+    let cipher = XSalsa20Poly1305::new(key.into());
+    cipher.decrypt(Nonce::from_slice(nonce24), nacl).ok()
+}
+
 // ---------- hashes ----------
 pub fn sha256(b: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();

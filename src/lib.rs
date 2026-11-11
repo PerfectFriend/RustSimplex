@@ -18,3 +18,4 @@ pub mod proxy;
 pub mod server;
 pub mod store;
 pub mod transport;
+pub mod xftp;

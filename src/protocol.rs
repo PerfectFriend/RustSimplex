@@ -45,6 +45,14 @@ pub enum Command {
     Pfwd { version: u16, command_key: Vec<u8>, enc: Vec<u8> },
     /// RFWD <tail: enc fwdTransmission> — proxy router -> destination router
     Rfwd { enc: Vec<u8> },
+    /// FNEW <size u64> <digest 32B> <senderKey SPKI> — register a new XFTP data packet (sender-signed)
+    Fnew { size: u64, digest: Vec<u8>, sender_key: Vec<u8> },
+    /// FPUT <packetId> <offset u32> <largeString: nonce24||secretbox(chunk)> — upload one encrypted chunk
+    Fput { packet_id: Vec<u8>, offset: u32, chunk: Vec<u8> },
+    /// FGET <packetId> <offset u32> — download chunks starting at offset (as many as fit one block)
+    Fget { packet_id: Vec<u8>, offset: u32 },
+    /// FDEL <packetId> — delete packet (sender-signed)
+    Fdel { packet_id: Vec<u8> },
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +78,10 @@ pub enum BrokerMsg {
     Pres { enc: Vec<u8> },
     /// RRES <tail: enc fwd response>
     Rres { enc: Vec<u8> },
+    /// FID <packetId> — packet registered
+    Fid { packet_id: Vec<u8> },
+    /// FDATA <offset u32> <largeString: chunk> — one chunk of a packet (several per block)
+    Fdata { offset: u32, chunk: Vec<u8> },
     Ok,
     Err(String),
     Pong,
@@ -127,6 +139,32 @@ pub fn encode_command(c: &Command) -> Result<Vec<u8>, EncodeError> {
             o.extend_from_slice(b"RFWD ");
             o.extend_from_slice(enc); // Tail
         }
+        Command::Fnew { size, digest, sender_key } => {
+            o.extend_from_slice(b"FNEW ");
+            w_u64(&mut o, *size);
+            o.push(b' ');
+            w_short(&mut o, digest)?;
+            o.push(b' ');
+            w_short(&mut o, sender_key)?;
+        }
+        Command::Fput { packet_id, offset, chunk } => {
+            o.extend_from_slice(b"FPUT ");
+            w_short(&mut o, packet_id)?;
+            o.push(b' ');
+            w_u32(&mut o, *offset);
+            o.push(b' ');
+            w_large(&mut o, chunk)?;
+        }
+        Command::Fget { packet_id, offset } => {
+            o.extend_from_slice(b"FGET ");
+            w_short(&mut o, packet_id)?;
+            o.push(b' ');
+            w_u32(&mut o, *offset);
+        }
+        Command::Fdel { packet_id } => {
+            o.extend_from_slice(b"FDEL ");
+            w_short(&mut o, packet_id)?;
+        }
     }
     Ok(o)
 }
@@ -170,6 +208,16 @@ pub fn encode_broker(m: &BrokerMsg) -> Result<Vec<u8>, EncodeError> {
         }
         BrokerMsg::Pres { enc } => { o.extend_from_slice(b"PRES "); o.extend_from_slice(enc); }
         BrokerMsg::Rres { enc } => { o.extend_from_slice(b"RRES "); o.extend_from_slice(enc); }
+        BrokerMsg::Fid { packet_id } => {
+            o.extend_from_slice(b"FID ");
+            w_short(&mut o, packet_id)?;
+        }
+        BrokerMsg::Fdata { offset, chunk } => {
+            o.extend_from_slice(b"FDATA ");
+            w_u32(&mut o, *offset);
+            o.push(b' ');
+            w_large(&mut o, chunk)?;
+        }
         BrokerMsg::Err(e) => { o.extend_from_slice(b"ERR "); o.extend_from_slice(e.as_bytes()); }
         BrokerMsg::Pong => o.extend_from_slice(b"PONG"),
         BrokerMsg::End => o.extend_from_slice(b"END"),
@@ -240,6 +288,13 @@ pub fn parse_broker(cmd: &[u8]) -> Result<BrokerMsg, EncodeError> {
         }
         b"PRES" => Ok(BrokerMsg::Pres { enc: r.rest().to_vec() }),
         b"RRES" => Ok(BrokerMsg::Rres { enc: r.rest().to_vec() }),
+        b"FID" => Ok(BrokerMsg::Fid { packet_id: r.short()? }),
+        b"FDATA" => {
+            let offset = r.u32()?;
+            r.u8()?;
+            let chunk = r.large()?;
+            Ok(BrokerMsg::Fdata { offset, chunk })
+        }
         b"ERR" => Ok(BrokerMsg::Err(String::from_utf8_lossy(r.rest()).to_string())),
         b"PONG" => Ok(BrokerMsg::Pong),
         b"END" => Ok(BrokerMsg::End),
@@ -295,6 +350,29 @@ pub fn parse_command(cmd: &[u8]) -> Result<Command, EncodeError> {
             Ok(Command::Pfwd { version, command_key, enc })
         }
         b"RFWD" => Ok(Command::Rfwd { enc: r.rest().to_vec() }),
+        b"FNEW" => {
+            let size = r.u64()?;
+            r.u8()?;
+            let digest = r.short()?;
+            r.u8()?;
+            let sender_key = r.short()?;
+            Ok(Command::Fnew { size, digest, sender_key })
+        }
+        b"FPUT" => {
+            let packet_id = r.short()?;
+            r.u8()?;
+            let offset = r.u32()?;
+            r.u8()?;
+            let chunk = r.large()?;
+            Ok(Command::Fput { packet_id, offset, chunk })
+        }
+        b"FGET" => {
+            let packet_id = r.short()?;
+            r.u8()?;
+            let offset = r.u32()?;
+            Ok(Command::Fget { packet_id, offset })
+        }
+        b"FDEL" => Ok(Command::Fdel { packet_id: r.short()? }),
         _ => Err(EncodeError(format!(
             "parse_command: unhandled tag {:?}",
             String::from_utf8_lossy(&tag)
