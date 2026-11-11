@@ -147,33 +147,21 @@ fn hsalsa20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     }
     r
 }
-/// NaCl format output: 16-byte MAC || ciphertext.
+/// NaCl format output: 16-byte MAC || ciphertext (the xsalsa20poly1305 0.9 crate uses NaCl order natively).
 pub fn secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
     let k = box_key(key);
     let cipher = XSalsa20Poly1305::new(&k.into());
-    let ct = cipher
+    cipher
         .encrypt(Nonce::from_slice(nonce24), plaintext)
-        .expect("encrypt infallible");
-    // aead returns ciphertext || tag ; NaCl wants tag || ciphertext
-    let tag = &ct[ct.len() - 16..];
-    let body = &ct[..ct.len() - 16];
-    let mut out = Vec::with_capacity(16 + body.len());
-    out.extend_from_slice(tag);
-    out.extend_from_slice(body);
-    out
+        .expect("encrypt infallible")
 }
 pub fn secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
     if nacl.len() < 16 {
         return None;
     }
-    let tag = &nacl[..16];
-    let body = &nacl[16..];
-    let mut ct = Vec::with_capacity(nacl.len());
-    ct.extend_from_slice(body);
-    ct.extend_from_slice(tag);
     let k = box_key(key);
     let cipher = XSalsa20Poly1305::new(&k.into());
-    cipher.decrypt(Nonce::from_slice(nonce24), ct.as_slice()).ok()
+    cipher.decrypt(Nonce::from_slice(nonce24), nacl).ok()
 }
 
 /// cbNonce: take up to 24 bytes, right-pad with zeros to 24.
