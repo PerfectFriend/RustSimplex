@@ -17,6 +17,10 @@ path = "src/bin/smp_server.rs"
 name = "smp-client"
 path = "src/bin/smp_client.rs"
 
+[[bin]]
+name = "xftp-h2"
+path = "src/bin/xftp_h2.rs"
+
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -29,6 +33,12 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 rcgen = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util"] }
+tokio-rustls = "0.26"
+h2 = "0.4"
+http = "1"
+bytes = "1"
+futures = "0.3"
 
 [profile.release]
 opt-level = 2
