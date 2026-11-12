@@ -25,34 +25,31 @@
 ## Проверка
 
 ```
-cargo test        # 10 тестов, все зелёные
+cargo test --test-threads=1   # 33 теста, все зелёные (2026-11-12)
 ```
 
-- `tests/wire.rs` — 8 golden-векторов: точные байты shortString/largeString/pad,
-  SPKI-шаблоны (OID на offset 6), NaCl-формат secretbox, layout блока 16384B,
-  подпись/верификация transmission.
-- `tests/interop.rs` — 2 end-to-end теста Rust-клиент ↔ Rust-сервер по TCP:
-  полный цикл `NEW→IDS, SUB→SOK, SEND→OK, push MSG→decrypt→ACK→OK, DEL→DELD`
-  и отказ в авторизации при неверном ключе (`ERR AUTH`).
-
-Живой запуск:
-
-```
-./smp-server 127.0.0.1:5599        # роутер
-./smp-client 127.0.0.1:5599        # PING→PONG, NEW→IDS, печатает smp:// URI
-```
+- `tests/wire.rs` — 8 golden-векторов байтов (pad, SPKI OID offset 6, NaCl
+  secretbox tag-first, блок 16384, подпись transmission).
+- `tests/interop.rs` — e2e Rust-клиент↔Rust-сервер по TCP и по TLS 1.3.
+- `tests/xcheck.rs` — cross-check crypto_box beforenm против PyNaCl.
+- `tests/pqdr.rs` — SNTRUP761 KEM, SHA3-256 KAT гибридного секрета, kemParams.
+- `tests/xftp.rs`, `tests/agent.rs`, `tests/chat.rs`, `tests/persist.rs`,
+  `tests/ntf.rs`, `tests/proxy.rs` — e2e по слоям.
+- Live interop верифицирован против настоящих simplexmq v6.5.0.17:
+  SMP over TLS (`PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG decrypt OK, ACK, DEL`,
+  NTF `NKEY→NID, NSUB→NMSG`) и XFTP over HTTP/2 (`FNEW→SIDS, FPUT→OK,
+  FGET→FILE`, расшифровка байт-в-байт). См. `docs/AUDIT.md`.
 
 ## намеченные отклонения / границы
 
-- Транспорт — plain TCP (sessionId = `""`, без TLS). Поэтому auth — Ed25519-подпись
-  (ветка `TASignature`, поддерживается сервером). X25519 crypto_box-authenticator
-  требует router session key из TLS-handshake — реализован (`auth_box`/`verify_box`),
-  но в plain-режиме не используется.
-- Ответ на `SEND` — `OK` (локальная договорённость для request/response; в Haskell
-  ответ на SEND может отсутствовать).
-- TLS 1.3 транспорт (ChaCha20-Poly1305, Ed25519, X25519, ALPN `smp/1`, проверка
-  router identity по SHA-256 SPKI) — не реализован; для интероп с настоящим
-  `smp-server` нужен этот слой (rustls + tls-unique как sessionId).
+- TLS 1.3 транспорт реализован (rustls, ALPN `smp/1`, pin по keyHash).
+  sessionId = "" (tls-unique пуст для TLS 1.3, как в оригинале); клиентская
+  assert-проверка sessionId и X25519 box-auth для обычных очередей — в плане (v0.16).
+- PQDR: реализован KEM-слой SNTRUP761 + гибридный секрет + kemParams; сам
+  PQ double ratchet — нет.
+- `xftp-h2` — probe с permissive verify сертификата, не для production.
+- Снапшот `--store` не шифруется. Подробнее: `docs/SECURITY.md`.
+- Для внешнего аудита: `docs/AUDIT.md` и `docs/AUDITOR-LETTER.md`.
 
 ## Структура
 
