@@ -1,0 +1,104 @@
+# AUDIT REPORT — smp-rs (RustSimplex)
+
+**Дата аудита:** 2026-11-12 · **Ревизия:** `4e28bd3` (+2 fix-коммита) · **Репозиторий:** https://github.com/PerfectFriend/RustSimplex
+**Объём:** 4 964 строк Rust (src 2 618 / tests 1 523 / бинарники 623), 29 коммитов, 20 прямых зависимостей.
+
+## 1. Что это за проект
+
+Чистая Rust-реализация wire-протокола **SimpleX Messaging Protocol** (SMP) +
+XFTP (file transfer) + SMP Agent/Chat подмножества — цель: доказуемая,
+протестированная реализация, **wire-совместимая с Haskell-оригиналом
+`simplex-chat/simplexmq` v6.5.0** (клон в `./simplexmq`, спецификации в `./spec/`).
+
+## 2. Архитектура (карта модулей)
+
+```
+src/encoding.rs   shortString/largeString/pad, Reader — Simplex.Messaging.Encoding
+src/crypto.rs     X25519/Ed25519 (dalek), SPKI-DER 44B шаблоны, HSalsa20 (ручной,
+                  сверенный с PyNaCl), XSalsa20-Poly1305 secretbox, SHA-256/512
+src/protocol.rs   команды SMP (NEW/IDS/SUB/SEND/MSG/ACK/KEY/SKEY/DEL/PING/NKEY…),
+                  transmission, блок 16384B, auth_sign/auth_box/verify_*
+src/transport.rs  handshake hello-блоки, plain TCP + TLS 1.3 (rustls, ALPN smp/1)
+src/server.rs     роутер: очереди, auth-проверка, push MSG, персистентность hook
+src/client.rs     клиент: handshake + request/response по блокам
+src/store.rs      atomic снапшот (tmp+rename), length-prefixed BE
+src/identity.rs   keyHash = SHA-256(SPKI), smp:// адрес, PinVerifier
+src/proxy.rs      SMP proxy сессии (PRXY/PKEY/PFWD/RFWD/PRES/RRES)
+src/xftp.rs       XFTP-style пакеты FNEW/FPUT/FGET/FDEL→FID/FDATA
+src/agent.rs      agent protocol: link create/join, D/HELLO, A_MSG/A_RCVD
+src/chat.rs       chat JSON (x.msg.new / x.info) поверх agent
+src/pq.rs         PQDR KEM: SNTRUP761, kemHybridSecret=SHA3-256(dh‖kem),
+                  kemParams/e2eRatchetParams wire, kcb box
+src/bin/          smp-server, smp-client, xftp-h2 (HTTP/2 XFTP probe)
+tests/            13 test-бинарников, 33 теста
+```
+
+## 3. Криптография (инвентарь)
+
+| Примитив | Реализация | Проверка |
+|---|---|---|
+| X25519 DH | x25519-dalek 2 (static_secrets) | e2e MSG decrypt vs real server |
+| Ed25519 | ed25519-dalek 2 | wire golden + ERR AUTH test |
+| NaCl crypto_box | ручной HSalsa20 + xsalsa20poly1305 0.9 (mac‖ct) | `tests/xcheck.rs` vs PyNaCl `crypto_box_beforenm` |
+| secretbox (raw) | XSalsa20-Poly1305, ключ напрямую | XFTP roundtrip |
+| SHA-256/512, SHA3-256 | sha2 / sha3 | KAT `127eebf5…` (python hashlib) |
+| SNTRUP761 KEM | crate sntrup761 0.4 (pk 1158/ct 1039/ss 32) | roundtrip + tamper test; KAT vs SUPERCOP — рекомендовано аудитору |
+| TLS 1.3 | rustls 0.23 (aws_lc_rs), pin по keyHash | `tls_wrong_keyhash_rejected` |
+
+## 4. Аудит безопасности — находки
+
+| # | Severity | Находка | Статус |
+|---|---|---|---|
+| 1 | LOW (fixed) | Hardcoded `/home/thomas/...` пути в debug-dump (`client.rs`, `xftp_h2.rs`) | исправлено: пути из env (`SMP_DUMP_RAW`/`XFTP_DUMP`), default — `temp_dir()` |
+| 2 | MEDIUM | 153 `unwrap()/expect()/panic!` в `src/` (83 в `server.rs`) — потенциальный DoS на malformed wire-входе | открыто; рекомендация: парс-ошибки → `ERR` вместо panic (постепенно) |
+| 3 | LOW | `xftp-h2` probe: permissive verify сертификата | задокументировано (probe only, не production) |
+| 4 | INFO | sessionId = "" (tls-unique пуст для TLS 1.3, как в оригинале); привязка — pin сертификата | задокументировано; assert sessionId — в плане v0.16 |
+| 5 | INFO | снапшот `--store` не шифруется, без MAC | задокументировано |
+| 6 | — | секреты/токены/приватные ключи в репо | **не найдено** (grep по паттернам ghp_/AKIA/sk-/PRIVATE KEY — чисто) |
+| 7 | — | `unsafe` блоков | **0** |
+| 8 | — | TODO/FIXME/HACK | **0** |
+| 9 | — | clippy --all-targets | 0 ошибок, ~20 style warnings (unused imports/mut, doc indent) |
+| 10 | LOW | один flaky-тест (`chat_text_over_agent_connection`) при параллельном прогоне | задокументировано; `cargo test -- --test-threads=1` стабилен |
+
+## 5. Доказательства работоспособности
+
+- `cargo test -- --test-threads=1` → **33 passed, 0 failed** (после fix-коммита аудита).
+- Golden-векторы байтов (`tests/wire.rs`, 8 шт.), cross-check крипто с PyNaCl
+  (`tests/xcheck.rs`), KAT SHA3-256 (`tests/pqdr.rs`), tamper-тесты.
+- **Live interop vs настоящих simplexmq v6.5.0.17** (документировано по коммитам):
+  SMP over TLS: PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG (тело расшифровано,
+  rcvMeta разобран), ACK→OK, DEL; NTF: NKEY→NID, NSUB→SOK, SEND(notify)→NMSG
+  (мета расшифрована, msg_id совпадает). XFTP over HTTP/2: handshake v3,
+  PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (расшифровка байт-в-байт,
+  sha256 `fee47b1f…`).
+
+## 6. Зависимости (20 прямых)
+
+dalek крипто (x25519/ed25519), xsalsa20poly1305+aead, sha2/sha3, rand, rustls
+0.23 + tokio-rustls + h2 + http (XFTP), rcgen (self-signed цепочки),
+serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
+лицензии MIT/Apache — совместимы с MIT проекта.
+
+## 7. План эволюции (куда дальше)
+
+1. **v0.16 — channel binding**: клиентская assert `serverHello.sessionId ==
+   tls-unique` (пуст для TLS 1.3) + X25519 crypto_box-authenticator для обычных
+   очередей поверх TLS (сейчас — Ed25519 sig; box реализован, но не включён).
+2. **v0.17 — PQDR double ratchet**: полный ratchet с KEM по `pqdr.md`
+   (сейчас — только KEM-слой и kemParams в connInfo).
+3. **v0.18 — robustness**: убрать panic-пути в server.rs (153 unwrap), все
+   parse-ошибки → `ERR`; clippy style warnings; flaky chat-тест (ретраи/таймауты).
+4. **v0.19 — XFTP v7+**: публичный relay `xftp1.simplex.im` отдаёт версию 7
+   (протокол новее v6.5.0.17) — интероп с ним.
+5. **v0.20 — store hardening**: шифрование/MAC снапшота, WAL.
+6. **Аудитору**: прогнать SNTRUP761 KAT против SUPERCOP-векторов; проверить
+   ручной HSalsa20 ещё раз; fuzz wire-парсеры (`cargo fuzz`).
+
+## 8. Как воспроизвести
+
+```bash
+git clone https://github.com/PerfectFriend/RustSimplex.git && cd RustSimplex
+cargo test -- --test-threads=1     # 33/33
+cargo clippy --all-targets         # 0 ошибок
+# live interop: нужны бинарники simplexmq v6.5.0.17 (smp-server/xftp-server)
+```

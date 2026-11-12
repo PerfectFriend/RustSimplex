@@ -302,12 +302,16 @@ async fn main() {
         let shared = smp_rs::crypto::x25519_dh(&r_dh_secret, &smp_rs::crypto::x25519_public(sdh_raw));
         let enc_packet = &gr[BLOCK..]; // packet body streamed after the command block
         println!("  FILE sDhKey={} nonce={} enc_packet={} bytes", hex(&sdh_raw), hex(&nonce), enc_packet.len());
-        // dump for python cross-check
-        let dump = format!(
-            "{{\"r_priv\":\"{}\",\"r_pub\":\"{}\",\"sdh\":\"{}\",\"nonce\":\"{}\",\"enc\":\"{}\"}}",
-            hex(r_dh_secret.as_bytes()), hex(r_dh_pub.as_bytes()), hex(&sdh_raw), hex(&nonce), hex(enc_packet)
-        );
-        std::fs::write("/home/thomas/.hermes/cache/scratch/fget_dump.json", dump).unwrap();
+        // dump for python cross-check (only when XFTP_DUMP is set; path from env, default = temp dir)
+        if std::env::var("XFTP_DUMP").is_ok() {
+            let dump = format!(
+                "{{\"r_priv\":\"{}\",\"r_pub\":\"{}\",\"sdh\":\"{}\",\"nonce\":\"{}\",\"enc\":\"{}\"}}",
+                hex(r_dh_secret.as_bytes()), hex(r_dh_pub.as_bytes()), hex(&sdh_raw), hex(&nonce), hex(enc_packet)
+            );
+            let p = std::env::var("XFTP_DUMP").unwrap_or_default();
+            let p = if p.is_empty() || p == "1" { std::env::temp_dir().join("fget_dump.json") } else { std::path::PathBuf::from(p) };
+            let _ = std::fs::write(p, dump);
+        }
         // server: LC.cbInit(dhSecret) where DhSecret is the crypto_box beforenm key (HSalsa20(shared, 0^16)),
         // streamed XSalsa20-Poly1305 with TAIL tag -> reorder ct||mac to mac||ct for NaCl-order decrypt
         let reordered = [&enc_packet[enc_packet.len() - 16..], &enc_packet[..enc_packet.len() - 16]].concat();

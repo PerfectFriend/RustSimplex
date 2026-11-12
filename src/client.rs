@@ -60,9 +60,14 @@ impl Client {
     /// Read one block and parse all broker messages in it (responses + pushed MSG).
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
         let rb = read_block(&mut self.stream).map_err(map_e)?;
-        if std::env::var("SMP_DUMP_RAW").is_ok() {
+        if let Ok(path) = std::env::var("SMP_DUMP_RAW") {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/home/thomas/.hermes/cache/scratch/raw_blocks.hex") {
+            let p = if path.is_empty() || path == "1" {
+                std::env::temp_dir().join("raw_blocks.hex") // TMPDIR points at the hermes scratch dir
+            } else {
+                std::path::PathBuf::from(path)
+            };
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
                 let _ = writeln!(f, "{}", rb.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
         }
