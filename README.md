@@ -44,7 +44,9 @@ cargo test --test-threads=1   # 33 теста, все зелёные (2026-11-12
 
 - TLS 1.3 транспорт реализован (rustls, ALPN `smp/1`, pin по keyHash).
   sessionId = "" (tls-unique пуст для TLS 1.3, как в оригинале); клиентская
-  assert-проверка sessionId и X25519 box-auth для обычных очередей — в плане (v0.16).
+  assert-проверка sessionId (v0.16, `check_session_binding`) и X25519 box-auth
+  для обычных очередей (v0.16, `request_box`/`verify_box` + ALG1 в снапшоте) —
+  реализованы, покрыты e2e-тестом `tls_x25519_box_auth_roundtrip`.
 - PQDR: реализован KEM-слой SNTRUP761 + гибридный секрет + kemParams; сам
   PQ double ratchet — нет.
 - `xftp-h2` — probe с permissive verify сертификата, не для production.

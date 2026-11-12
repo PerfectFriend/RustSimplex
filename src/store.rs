@@ -15,7 +15,7 @@ pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
     let mut out = Vec::new();
     let qs: Vec<&Queue> = st.by_rcv.values().collect();
     out.extend_from_slice(&(qs.len() as u32).to_be_bytes());
-    for q in qs {
+    for q in &qs {
         put_bytes(&mut out, &q.rcv_id);
         put_bytes(&mut out, &q.snd_id);
         out.extend_from_slice(&q.rcv_auth_raw);
@@ -59,6 +59,12 @@ pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
             put_bytes(&mut out, ch);
         }
     }
+    // ALG1 trailer: per-queue auth algorithm (same order as `qs`), backward-compatible
+    out.extend_from_slice(b"ALG1");
+    out.extend_from_slice(&(qs.len() as u32).to_be_bytes());
+    for q in &qs {
+        out.push(if q.rcv_auth_x { 1 } else { 0 });
+    }
     out
 }
 
@@ -93,6 +99,7 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
     let mut r = Reader { buf, pos: 0 };
     let count = r.u32()? as usize;
     let mut st = ServerState::new();
+    let mut order: Vec<Vec<u8>> = Vec::new(); // rcv_ids in snapshot order (for ALG1 trailer)
     for _ in 0..count {
         let rcv_id = r.bytes()?;
         let snd_id = r.bytes()?;
@@ -125,12 +132,14 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
             st.by_ntf.insert(nid.clone(), rcv_id.clone());
         }
         st.by_snd.insert(snd_id.clone(), rcv_id.clone());
+        order.push(rcv_id.clone());
         st.by_rcv.insert(
             rcv_id.clone(),
             Queue {
                 rcv_id,
                 snd_id,
                 rcv_auth_raw,
+                rcv_auth_x: false, // may be overridden by ALG1 trailer below
                 snd_auth,
                 rcv_dh_secret,
                 messages,
@@ -161,6 +170,19 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
                 pid,
                 crate::xftp::XftpPacket { size, digest, sender_raw, chunks },
             );
+        }
+    }
+    // optional ALG1 trailer (absent in older snapshots): per-queue rcv_auth_x flags
+    if r.pos + 4 <= buf.len() && &buf[r.pos..r.pos + 4] == b"ALG1" {
+        r.pos += 4;
+        let n = r.u32()? as usize;
+        for i in 0..n {
+            let flag = r.take(1)?[0];
+            if let Some(rcv_id) = order.get(i) {
+                if let Some(q) = st.by_rcv.get_mut(rcv_id) {
+                    q.rcv_auth_x = flag == 1;
+                }
+            }
         }
     }
     Some(st)

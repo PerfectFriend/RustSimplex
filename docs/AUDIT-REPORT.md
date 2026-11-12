@@ -52,7 +52,7 @@ tests/            13 test-бинарников, 33 теста
 | 1 | LOW (fixed) | Hardcoded `/home/thomas/...` пути в debug-dump (`client.rs`, `xftp_h2.rs`) | исправлено: пути из env (`SMP_DUMP_RAW`/`XFTP_DUMP`), default — `temp_dir()` |
 | 2 | MEDIUM | 153 `unwrap()/expect()/panic!` в `src/` (83 в `server.rs`) — потенциальный DoS на malformed wire-входе | открыто; рекомендация: парс-ошибки → `ERR` вместо panic (постепенно) |
 | 3 | LOW | `xftp-h2` probe: permissive verify сертификата | задокументировано (probe only, не production) |
-| 4 | INFO | sessionId = "" (tls-unique пуст для TLS 1.3, как в оригинале); привязка — pin сертификата | задокументировано; assert sessionId — в плане v0.16 |
+| 4 | INFO→RESOLVED | sessionId = "" (tls-unique пуст для TLS 1.3); assert sessionId + X25519 box-auth | реализовано в v0.16: `check_session_binding`, `qauth`/`verify_box`, тесты green |
 | 5 | INFO | снапшот `--store` не шифруется, без MAC | задокументировано |
 | 6 | — | секреты/токены/приватные ключи в репо | **не найдено** (grep по паттернам ghp_/AKIA/sk-/PRIVATE KEY — чисто) |
 | 7 | — | `unsafe` блоков | **0** |
@@ -81,9 +81,14 @@ serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
 
 ## 7. План эволюции (куда дальше)
 
-1. **v0.16 — channel binding**: клиентская assert `serverHello.sessionId ==
-   tls-unique` (пуст для TLS 1.3) + X25519 crypto_box-authenticator для обычных
-   очередей поверх TLS (сейчас — Ed25519 sig; box реализован, но не включён).
+1. **v0.16 — channel binding: ✅ реализовано (2026-11-12)**: клиентская assert
+   `check_session_binding(serverHello.sessionId)` (пуст для TLS 1.3/plain) +
+   X25519 crypto_box-authenticator для обычных очередей (`dhSecret = DH(queue
+   auth priv, server eph pub)`, nonce cbNonce(corrId), msg sha512(authorized)).
+   Сервер: `qauth()` + флаг `rcv_auth_x` + трейлер `ALG1` в снапшоте (совместим
+   со старыми). Тесты: `tls_x25519_box_auth_roundtrip` (NEW/SUB/ACK через box,
+   негативный wrong-secret → ERR AUTH), `session_binding_rejects_nonempty_sid`.
+   Всего 35/35 green.
 2. **v0.17 — PQDR double ratchet**: полный ratchet с KEM по `pqdr.md`
    (сейчас — только KEM-слой и kemParams в connInfo).
 3. **v0.18 — robustness**: убрать panic-пути в server.rs (153 unwrap), все

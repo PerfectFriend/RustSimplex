@@ -33,9 +33,13 @@
 1. **sessionId = "" на обеих сторонах** (plain и TLS 1.3). По RFC 5929
    tls-unique для TLS 1.3 пуст, и Haskell-имплементация simplexmq ведёт себя
    так же; привязка к каналу обеспечивается pinning сертификата, а не
-   tls-unique. **Не реализовано**: клиентская assert-проверка
-   `serverHello.sessionId == tls-unique` и X25519 box-auth для обычных
-   (не proxy) очередей поверх TLS — запланировано как v0.16.
+   tls-unique. **Реализовано в v0.16**: клиентская assert-проверка
+   `check_session_binding(serverHello.sessionId)` (должен быть пуст) и
+   X25519 box-auth для обычных очередей: authenticator =
+   `secretbox(dhSecret, cbNonce(corrId), sha512(authorized))`, где
+   `dhSecret = DH(queue auth priv, server per-connection eph pub)` из
+   server hello (C.cbVerify / C.cbAuthenticate). Тест:
+   `tls_x25519_box_auth_roundtrip`, `session_binding_rejects_nonempty_sid`.
 2. **PQDR**: реализован KEM-слой (SNTRUP761, гибридный секрет, wire-формат
    kemParams/e2eRatchetParams). **Сам double-ratchet с KEM (pqdr.md) не
    реализован** — агентский слой объявляет `pq_support` и обменивается

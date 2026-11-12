@@ -9,6 +9,16 @@ use crate::transport::*;
 
 pub type ClResult<T> = Result<T, String>;
 
+/// Channel binding (spec appendix A): client asserts sessionIdentifier == tls-unique.
+/// TLS 1.3 has empty tls-unique (RFC 5929) and plain TCP uses "" — so sessionId must be empty.
+pub fn check_session_binding(sid: &[u8]) -> ClResult<()> {
+    if sid.is_empty() {
+        Ok(())
+    } else {
+        Err("SESSION: unexpected non-empty sessionId in server hello".into())
+    }
+}
+
 fn map_e<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -17,27 +27,39 @@ pub struct Client {
     stream: BoxStream,
     session_id: Vec<u8>,
     pub server_key_hash: Vec<u8>,
+    /// per-connection ephemeral X25519 pub from server hello (authPubKey), used for box auth
+    pub server_eph_pub: Option<[u8; 32]>,
 }
 
 impl Client {
-    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<Vec<u8>> {
+    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<(Vec<u8>, Option<[u8; 32]>)> {
         let sh = read_block(stream).map_err(map_e)?;
-        let (_min, _max, sid) = parse_server_hello(&sh).map_err(map_e)?;
+        let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+        // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
+        check_session_binding(&sid)?;
         let ch = client_hello_block(SMP_VERSION, key_hash, false).map_err(map_e)?;
         write_block(stream, &ch).map_err(map_e)?;
-        Ok(sid)
+        let eph = auth_spki.and_then(|der| parse_spki(&der).ok()).map(|(_a, raw)| raw);
+        Ok((sid, eph))
     }
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
-        let sid = Self::handshake(&mut s, key_hash)?;
-        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec() })
+        let (sid, eph) = Self::handshake(&mut s, key_hash)?;
+        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
         let mut s = connect_tls(addr, host, key_hash).map_err(map_e)?;
-        let sid = Self::handshake(&mut s, &key_hash)?;
-        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec() })
+        let (sid, eph) = Self::handshake(&mut s, &key_hash)?;
+        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+    }
+
+    /// X25519 box-auth shared secret for a queue whose auth key is `qauth_kp`:
+    /// dhSecret = DH(queue auth priv, server per-connection eph pub) — C.cbAuthenticate k pk.
+    pub fn box_secret(&self, qauth_kp: &X25519Keypair) -> Option<[u8; 32]> {
+        let srv = self.server_eph_pub?;
+        Some(x25519_dh(&qauth_kp.secret, &x25519_public(srv)))
     }
 
     /// Send one command transmission (signed if `auth` given) and read one response block.
@@ -51,6 +73,22 @@ impl Client {
         if let Some(kp) = auth {
             auth_sign(&self.session_id, &mut t, kp).map_err(map_e)?;
         }
+        let wire = encode_transmission(&t).map_err(map_e)?;
+        let blk = encode_block(&[wire]).map_err(map_e)?;
+        write_block(&mut self.stream, &blk).map_err(map_e)?;
+        self.recv_block()
+    }
+
+    /// Send one command authorized with the X25519 crypto_box authenticator
+    /// (secretbox(dhSecret, cbNonce(corrId), sha512(authorized)) = 80 bytes) and read one response block.
+    pub fn request_box(&mut self, cmd: Command, entity_id: Vec<u8>, dh_secret: &[u8; 32]) -> ClResult<Vec<BrokerMsg>> {
+        let mut t = Transmission {
+            authenticator: Vec::new(),
+            corr_id: random_bytes(24),
+            entity_id,
+            command: encode_command(&cmd).map_err(map_e)?,
+        };
+        auth_box(&self.session_id, &mut t, dh_secret).map_err(map_e)?;
         let wire = encode_transmission(&t).map_err(map_e)?;
         let blk = encode_block(&[wire]).map_err(map_e)?;
         write_block(&mut self.stream, &blk).map_err(map_e)?;

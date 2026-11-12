@@ -113,3 +113,67 @@ fn auth_rejected_for_wrong_key() {
     let s = rcv.request(Command::Sub, rcv_id, Some(&other)).unwrap();
     assert!(matches!(&s[0], BrokerMsg::Err(e) if e.contains("AUTH")), "got {s:?}");
 }
+
+#[test]
+fn tls_x25519_box_auth_roundtrip() {
+    // v0.16: queue created with X25519 auth key, all commands authorized with the
+    // crypto_box authenticator (secretbox(dhSecret, cbNonce(corrId), sha512(authorized))).
+    let (addr, kh) = start_tls();
+    let mut rcv = Client::connect_tls(addr, "127.0.0.1", kh).unwrap();
+    assert!(rcv.server_eph_pub.is_some(), "server hello must carry ephemeral X25519 authPubKey");
+    let qauth = x25519_keypair();
+    let secret = rcv.box_secret(&qauth).expect("box secret from server eph pub");
+    let dh = x25519_keypair();
+    let resp = rcv
+        .request_box(
+            Command::New {
+                rcv_auth_key: spki_x25519(&qauth.public.to_bytes()),
+                rcv_dh_key: spki_x25519(&dh.public.to_bytes()),
+                basic_auth: None,
+                sub_mode: b'S',
+                queue_req_data: None,
+                ntf_creds: None,
+            },
+            vec![],
+            &secret,
+        )
+        .expect("NEW box");
+    let (rcv_id, snd_id, srv_dh) = match &resp[0] {
+        BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, .. } => {
+            let (_a, raw) = parse_spki(rcv_dh_key).unwrap();
+            (rcv_id.clone(), snd_id.clone(), raw)
+        }
+        other => panic!("expected IDS, got {other:?}"),
+    };
+    let shared = x25519_dh(&dh.secret, &x25519_public(srv_dh));
+    // SUB with box auth
+    let s = rcv.request_box(Command::Sub, rcv_id.clone(), &secret).unwrap();
+    assert!(matches!(&s[0], BrokerMsg::Sok(_)), "SUB -> {s:?}");
+    // sender sends (sender side has no auth by default)
+    let mut snd = Client::connect_tls(addr, "127.0.0.1", kh).unwrap();
+    let body = b"box-auth body".to_vec();
+    let ok = snd
+        .request(Command::Send { flags: false, body: body.clone() }, snd_id.clone(), None)
+        .unwrap();
+    assert!(matches!(&ok[0], BrokerMsg::Ok), "SEND -> {ok:?}");
+    let pushed = rcv.recv_block().unwrap();
+    let (msg_id, enc_body) = match &pushed[0] {
+        BrokerMsg::Msg { msg_id, body } => (msg_id.clone(), body.clone()),
+        other => panic!("expected MSG, got {other:?}"),
+    };
+    let plain = decrypt_for_recipient(&shared, &msg_id, &enc_body).expect("decrypt MSG");
+    assert_eq!(plain, body);
+    let ack = rcv.request_box(Command::Ack(msg_id), rcv_id.clone(), &secret).unwrap();
+    assert!(matches!(&ack[0], BrokerMsg::Ok), "ACK -> {ack:?}");
+    // negative: wrong dhSecret must be rejected
+    let bad = [0xABu8; 32];
+    let r = rcv.request_box(Command::Sub, rcv_id.clone(), &bad).unwrap();
+    assert!(matches!(&r[0], BrokerMsg::Err(e) if e.contains("AUTH")), "got {r:?}");
+}
+
+#[test]
+fn session_binding_rejects_nonempty_sid() {
+    use smp_rs::client::check_session_binding;
+    assert!(check_session_binding(b"").is_ok());
+    assert!(check_session_binding(b"tls-unique-value").is_err());
+}

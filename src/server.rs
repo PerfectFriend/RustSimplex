@@ -23,6 +23,7 @@ pub struct Queue {
     pub rcv_id: Vec<u8>,
     pub snd_id: Vec<u8>,
     pub rcv_auth_raw: [u8; 32],
+    pub rcv_auth_x: bool, // true = X25519 crypto_box authenticator (needs server eph key), false = Ed25519 signature
     pub snd_auth: Option<[u8; 32]>,
     pub rcv_dh_secret: [u8; 32],
     pub messages: VecDeque<(Vec<u8>, Vec<u8>)>, // (msg_id, body)
@@ -96,6 +97,19 @@ pub fn hsalsa20_pub(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     crate::crypto::hsalsa20_pub(key, nonce)
 }
 
+/// Recipient-side auth check: Ed25519 signature, or X25519 crypto_box authenticator
+/// keyed by DH(server per-connection eph priv, queue X25519 auth pub) when rcv_auth_x.
+fn qauth(session_id: &[u8], t: &Transmission, q: &Queue, ctx: &ConnCtx) -> bool {
+    if q.rcv_auth_x {
+        match &ctx.server_eph_priv {
+            Some(eph) => verify_box(session_id, t, &x25519_dh(eph, &x25519_public(q.rcv_auth_raw))),
+            None => false,
+        }
+    } else {
+        verify_sign(session_id, t, &q.rcv_auth_raw)
+    }
+}
+
 fn dispatch(
     t: &Transmission,
     st: &Arc<Mutex<ServerState>>,
@@ -139,7 +153,12 @@ fn dispatch_cmd(
             };
             let ok = match alg {
                 AuthAlg::Ed25519 => verify_sign(session_id, t, &raw),
-                AuthAlg::X25519 => false, // needs router session key (TLS); not in plain mode
+                // X25519 queue auth: crypto_box authenticator with dhSecret = DH(server eph priv, queue auth pub)
+                // (C.cbVerify k pk (cbNonce corrId) authenticator authorized, Server.hs verifyCmdAuth)
+                AuthAlg::X25519 => match &ctx.server_eph_priv {
+                    Some(eph) => verify_box(session_id, t, &x25519_dh(eph, &x25519_public(raw))),
+                    None => false,
+                },
             };
             if !ok {
                 return vec![err_resp(t.corr_id.clone(), vec![], "AUTH").unwrap()];
@@ -160,6 +179,7 @@ fn dispatch_cmd(
                     rcv_id: rcv_id.clone(),
                     snd_id: snd_id.clone(),
                     rcv_auth_raw: raw,
+                    rcv_auth_x: matches!(alg, AuthAlg::X25519),
                     snd_auth: None,
                     rcv_dh_secret,
                     messages: VecDeque::new(),
@@ -182,7 +202,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             q.subscriber = Some(outbox.clone());
@@ -199,7 +219,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             match q.messages.pop_front() {
@@ -269,7 +289,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             q.messages.retain(|(m, _)| *m != msg_id);
@@ -283,7 +303,7 @@ fn dispatch_cmd(
             };
             let is_recipient = tag_of(&t.command) == "KEY";
             let key_ok = if is_recipient {
-                verify_sign(session_id, t, &q.rcv_auth_raw)
+                qauth(session_id, t, q, ctx)
             } else {
                 q.snd_auth.map(|r| verify_sign(session_id, t, &r)).unwrap_or(true)
             };
@@ -301,7 +321,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             let snd = q.snd_id.clone();
@@ -439,7 +459,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             let (_alg, ntf_raw) = match parse_spki(&ntf_key) {
@@ -487,7 +507,7 @@ fn dispatch_cmd(
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             };
-            if !verify_sign(session_id, t, &q.rcv_auth_raw) {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
             }
             if let Some(nid) = q.ntf_id.take() {
