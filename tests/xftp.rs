@@ -49,3 +49,24 @@ fn xftp_file_roundtrip() {
     );
     assert!(matches!(r.unwrap()[0], smp_rs::protocol::BrokerMsg::Err(_)), "FGET after FDEL must fail");
 }
+
+#[test]
+fn xftp_packets_survive_snapshot() {
+    let mut st = smp_rs::server::ServerState::new();
+    let pid = vec![7u8; 16];
+    let mut chunks = std::collections::BTreeMap::new();
+    chunks.insert(0u32, vec![1u8; 100]);
+    chunks.insert(1u32, vec![2u8; 50]);
+    st.xftp.insert(
+        pid.clone(),
+        XftpPacket { size: 46080, digest: vec![9u8; 32], sender_raw: [3u8; 32], chunks },
+    );
+    let snap = smp_rs::store::snapshot_bytes(&st);
+    let st2 = smp_rs::store::parse_snapshot(&snap).expect("parse");
+    let p = st2.xftp.get(&pid).expect("packet present after reload");
+    assert_eq!(p.size, 46080);
+    assert_eq!(p.digest, vec![9u8; 32]);
+    assert_eq!(p.sender_raw, [3u8; 32]);
+    assert_eq!(p.chunks.len(), 2);
+    assert_eq!(p.chunks[&1], vec![2u8; 50]);
+}

@@ -46,6 +46,19 @@ pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
             put_bytes(&mut out, body);
         }
     }
+    // XFTP packets (appended; old snapshots simply lack this section)
+    out.extend_from_slice(&(st.xftp.len() as u32).to_be_bytes());
+    for (pid, p) in &st.xftp {
+        put_bytes(&mut out, pid);
+        out.extend_from_slice(&p.size.to_be_bytes());
+        put_bytes(&mut out, &p.digest);
+        out.extend_from_slice(&p.sender_raw);
+        out.extend_from_slice(&(p.chunks.len() as u32).to_be_bytes());
+        for (off, ch) in &p.chunks {
+            out.extend_from_slice(&off.to_be_bytes());
+            put_bytes(&mut out, ch);
+        }
+    }
     out
 }
 
@@ -128,6 +141,27 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
                 ntf_subscriber: None,
             },
         );
+    }
+    // optional XFTP section (absent in older snapshots)
+    if r.pos < buf.len() {
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let pid = r.bytes()?;
+            let size = u64::from_be_bytes(r.take(8)?.try_into().ok()?);
+            let digest = r.bytes()?;
+            let sender_raw: [u8; 32] = r.take(32)?.try_into().ok()?;
+            let nc = r.u32()? as usize;
+            let mut chunks = std::collections::BTreeMap::new();
+            for _ in 0..nc {
+                let off = u32::from_be_bytes(r.take(4)?.try_into().ok()?);
+                let ch = r.bytes()?;
+                chunks.insert(off, ch);
+            }
+            st.xftp.insert(
+                pid,
+                crate::xftp::XftpPacket { size, digest, sender_raw, chunks },
+            );
+        }
     }
     Some(st)
 }

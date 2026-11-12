@@ -111,6 +111,7 @@ fn dispatch(
         cmd,
         Command::New { .. } | Command::Send { .. } | Command::Ack(_) | Command::Key(_) | Command::Skey(_) | Command::Del
             | Command::Nkey { .. } | Command::Nsub | Command::Ndel
+            | Command::Fnew { .. } | Command::Fput { .. } | Command::Fdel { .. }
     );
     let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
     if dirty {
