@@ -59,6 +59,9 @@ pub struct ConnInfo {
     pub profile: String,
     #[serde(default)]
     pub pq_support: bool,
+    /// e2eRatchetParams wire bytes (spec/agent-protocol.md), when PQ is negotiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e: Option<Vec<u8>>,
 }
 
 pub fn encode_agent(m: &AgentMsg, msg_id: i64, prev_hash: &[u8]) -> Vec<u8> {
@@ -200,6 +203,8 @@ pub struct Agent {
     pub host: String,
     pub port: u16,
     pub key_hash: Vec<u8>,
+    /// SNTRUP761 KEM keypair for PQDR (Some when pq negotiated).
+    pub kem: Option<crate::pq::KemKeypair>,
 }
 
 impl Agent {
@@ -230,7 +235,24 @@ impl Agent {
             BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, .. } => (rcv_id.clone(), snd_id.clone(), rcv_dh_key.clone()),
             other => return Err(format!("expected IDS, got {other:?}")),
         };
-        let conn_info = serde_json::to_vec(&ConnInfo { profile: profile.into(), pq_support: false }).map_err(|e| e.to_string())?;
+        // PQDR: generate SNTRUP761 keypair, advertise kemParams "P" (public key only)
+        let kem = crate::pq::kem_keypair();
+        let e2e = {
+            let mut o = Vec::new();
+            crate::pq::encode_e2e_ratchet_params(
+                &mut o,
+                &crate::pq::E2eRatchetParams {
+                    v_min: SMP_VERSION,
+                    v_max: SMP_VERSION,
+                    snd_dh_spki: spki_x25519(&rcv_dh.public.to_bytes()),
+                    rcv_dh_spki: spki_x25519(&rcv_dh.public.to_bytes()),
+                    kem: crate::pq::KemParams::Pk(kem.ek.as_ref().to_vec()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            o
+        };
+        let conn_info = serde_json::to_vec(&ConnInfo { profile: profile.into(), pq_support: true, e2e: Some(e2e) }).map_err(|e| e.to_string())?;
         // subscribe immediately so the joiner's confirmation MSG is not missed
         let sub = client.request(Command::Sub, rcv_id.clone(), Some(&rcv_auth)).map_err(|e| e.to_string())?;
         if !matches!(sub[0], BrokerMsg::Sok(_)) {
@@ -260,6 +282,7 @@ impl Agent {
                 host: host.to_string(),
                 port,
                 key_hash: key_hash.to_vec(),
+                kem: Some(kem),
             },
             link,
         ))
@@ -316,7 +339,23 @@ impl Agent {
             dh_pub: spki_x25519(&rcv_dh.public.to_bytes()),
             queue_mode: b'C',
         };
-        let ci_reply = serde_json::to_vec(&ConnInfo { profile: "joiner".into(), pq_support: false }).map_err(|e| e.to_string())?;
+        let kem = crate::pq::kem_keypair();
+        let e2e_reply = {
+            let mut o = Vec::new();
+            crate::pq::encode_e2e_ratchet_params(
+                &mut o,
+                &crate::pq::E2eRatchetParams {
+                    v_min: SMP_VERSION,
+                    v_max: SMP_VERSION,
+                    snd_dh_spki: spki_x25519(&rcv_dh.public.to_bytes()),
+                    rcv_dh_spki: spki_x25519(&rcv_dh.public.to_bytes()),
+                    kem: crate::pq::KemParams::Pk(kem.ek.as_ref().to_vec()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            o
+        };
+        let ci_reply = serde_json::to_vec(&ConnInfo { profile: "joiner".into(), pq_support: true, e2e: Some(e2e_reply) }).map_err(|e| e.to_string())?;
         let body = encode_agent(&AgentMsg::ConnInfoReply(vec![qi], ci_reply), 1, &[0u8; 32]);
         client
             .request(Command::Send { flags: false, body }, init_snd.clone(), None)
@@ -339,6 +378,7 @@ impl Agent {
             host: host.to_string(),
             port,
             key_hash,
+            kem: Some(kem),
         })
     }
 

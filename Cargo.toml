@@ -39,6 +39,8 @@ h2 = "0.4"
 http = "1"
 bytes = "1"
 futures = "0.3"
+sha3 = "0.10"
+sntrup761 = "0.4"
 
 [profile.release]
 opt-level = 2

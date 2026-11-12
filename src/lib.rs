@@ -16,6 +16,7 @@ pub mod chat;
 pub mod crypto;
 pub mod encoding;
 pub mod protocol;
+pub mod pq;
 pub mod proxy;
 pub mod server;
 pub mod store;
