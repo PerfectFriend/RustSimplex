@@ -302,14 +302,19 @@ async fn main() {
         let shared = smp_rs::crypto::x25519_dh(&r_dh_secret, &smp_rs::crypto::x25519_public(sdh_raw));
         let enc_packet = &gr[BLOCK..]; // packet body streamed after the command block
         println!("  FILE sDhKey={} nonce={} enc_packet={} bytes", hex(&sdh_raw), hex(&nonce), enc_packet.len());
-        match smp_rs::crypto::secretbox_decrypt(&shared, &nonce, enc_packet) {
-            Some(pt) => {
-                println!("  [beforenm] decrypted {} bytes, matches uploaded: {}", pt.len(), pt == file);
-            }
-            None => match smp_rs::crypto::raw_secretbox_decrypt(&shared, &nonce, enc_packet) {
-                Some(pt) => println!("  [raw] decrypted {} bytes, matches uploaded: {}, sha256={}", pt.len(), pt == file, hex(&smp_rs::crypto::sha256(&pt))),
-                None => println!("  DECRYPT FAILED (both)"),
-            },
+        // dump for python cross-check
+        let dump = format!(
+            "{{\"r_priv\":\"{}\",\"r_pub\":\"{}\",\"sdh\":\"{}\",\"nonce\":\"{}\",\"enc\":\"{}\"}}",
+            hex(r_dh_secret.as_bytes()), hex(r_dh_pub.as_bytes()), hex(&sdh_raw), hex(&nonce), hex(enc_packet)
+        );
+        std::fs::write("/home/thomas/.hermes/cache/scratch/fget_dump.json", dump).unwrap();
+        // server: LC.cbInit(dhSecret) where DhSecret is the crypto_box beforenm key (HSalsa20(shared, 0^16)),
+        // streamed XSalsa20-Poly1305 with TAIL tag -> reorder ct||mac to mac||ct for NaCl-order decrypt
+        let reordered = [&enc_packet[enc_packet.len() - 16..], &enc_packet[..enc_packet.len() - 16]].concat();
+        if let Some(pt) = smp_rs::crypto::secretbox_decrypt(&shared, &nonce, &reordered) {
+            println!("  [tail-tag raw box] decrypted {} bytes, matches uploaded: {}, sha256={}", pt.len(), pt == file, hex(&smp_rs::crypto::sha256(&pt)));
+        } else {
+            println!("  DECRYPT FAILED (tail-tag raw)");
         }
     } else if let Some(pos) = gp.windows(3).position(|w| w == b"ERR") {
         println!("  ERR: {:?}", String::from_utf8_lossy(&gp[pos..(pos + 40).min(gp.len())]));
