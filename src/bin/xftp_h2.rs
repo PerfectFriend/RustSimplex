@@ -50,13 +50,28 @@ async fn main() {
             .body(())
             .unwrap();
         let (resp, mut stream) = h2.send_request(req, false).expect("send");
+        eprintln!("  [dbg] request sent, sending {} bytes", body.len());
         stream.send_data(body.clone(), true).expect("send_data");
-        let resp = resp.await.expect("resp");
+        eprintln!("  [dbg] body sent, awaiting response");
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(20), resp).await.expect("resp timeout").expect("resp");
         let status = resp.status();
+        eprintln!("  [dbg] got response {status}");
         let mut rbody = resp.into_body();
         let mut data = Vec::new();
-        while let Some(chunk) = rbody.data().await {
-            data.extend_from_slice(&chunk.expect("chunk"));
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(15), rbody.data()).await {
+                Ok(Some(chunk)) => {
+                    let chunk = chunk.expect("chunk");
+                    let n = chunk.len();
+                    data.extend_from_slice(&chunk);
+                    let _ = rbody.flow_control().release_capacity(n);
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    eprintln!("  [dbg] body read timeout after {} bytes", data.len());
+                    break;
+                }
+            }
         }
         let data = Bytes::from(data);
         println!("  POST {} bytes -> HTTP {status}, {} bytes", body.len(), data.len());
@@ -184,10 +199,120 @@ async fn main() {
     let fp = &fr[2..(2 + fl).min(fr.len())];
     println!("FNEW -> {} bytes", fr.len());
     println!("  payload hex: {}", hex(&fp[..fp.len().min(80)]));
-    if let Some(pos) = fp.windows(4).position(|w| w == b"SIDS") {
-        println!("  SIDS at {pos}: {:?}", String::from_utf8_lossy(&fp[pos..(pos + 80).min(fp.len())]));
-    } else if let Some(pos) = fp.windows(3).position(|w| w == b"ERR") {
+    let pos = fp.windows(4).position(|w| w == b"SIDS").expect("SIDS");
+    if let Some(pos) = fp.windows(3).position(|w| w == b"ERR") {
         println!("  ERR: {:?}", String::from_utf8_lossy(&fp[pos..(pos + 40).min(fp.len())]));
+        return;
+    }
+    // parse SIDS: "SIDS " + senderId short + count + recipientId short ...
+    let mut p = pos + 5;
+    let sidl2 = fp[p] as usize; p += 1;
+    let sender_id = fp[p..p + sidl2].to_vec(); p += sidl2;
+    let nrcv = fp[p] as usize; p += 1;
+    let ridl = fp[p] as usize; p += 1;
+    let rcv_id = fp[p..p + ridl].to_vec();
+    println!("  senderId({})={} nRcv={nrcv} rcvId({})={}", sidl2, hex(&sender_id), ridl, hex(&rcv_id));
+
+    // helper: send signed command, optional extra body bytes (file chunk)
+    async fn send_cmd(
+        h2: &mut h2::client::SendRequest<Bytes>,
+        host: &str,
+        sid: &[u8],
+        corr: &[u8],
+        entity: &[u8],
+        cmd: &[u8],
+        sig: &[u8],
+        extra: &[u8],
+    ) -> Bytes {
+        let mut t = Vec::new();
+        t.push(sid.len() as u8);
+        t.extend_from_slice(sid);
+        t.push(corr.len() as u8);
+        t.extend_from_slice(&corr);
+        t.push(entity.len() as u8);
+        t.extend_from_slice(entity);
+        t.extend_from_slice(cmd);
+        let mut inner = Vec::new();
+        inner.push(sig.len() as u8);
+        inner.extend_from_slice(sig);
+        inner.extend_from_slice(&t);
+        let mut batch = vec![1u8];
+        batch.extend_from_slice(&(inner.len() as u16).to_be_bytes());
+        batch.extend_from_slice(&inner);
+        let mut blk = Vec::new();
+        blk.extend_from_slice(&(batch.len() as u16).to_be_bytes());
+        blk.extend_from_slice(&batch);
+        blk.resize(BLOCK, 0x23);
+        blk.extend_from_slice(extra); // file chunk streamed after the command block
+        post(h2, Bytes::from(blk), host).await
+    }
+
+    // 5. FPUT: entity = senderId, cmd "FPUT", body = block + packet bytes (the exact bytes hashed in FNEW)
+    let corr: Vec<u8> = (0..24).map(|_| rand::random::<u8>()).collect();
+    let mut t = Vec::new();
+    t.push(sid.len() as u8); t.extend_from_slice(&sid);
+    t.push(corr.len() as u8); t.extend_from_slice(&corr);
+    t.push(sender_id.len() as u8); t.extend_from_slice(&sender_id);
+    t.extend_from_slice(b"FPUT");
+    let sig = snd.sign(&t);
+    let pr = send_cmd(&mut h2, &host, &sid, &corr, &sender_id, b"FPUT", &sig.to_bytes(), &file).await;
+    let pl = u16::from_be_bytes([pr[0], pr[1]]) as usize;
+    let pp = &pr[2..(2 + pl).min(pr.len())];
+    println!("FPUT -> {} bytes (block) + {} chunk; resp tail: {:?}", BLOCK, file.len(), String::from_utf8_lossy(&pp[pp.len().saturating_sub(24)..]));
+
+    // 6. FGET as recipient: entity = rcvId, cmd "FGET " + rDhKey(X25519 SPKI), signed with rcv Ed25519 key
+    let (r_dh_secret, r_dh_pub) = {
+        let sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pk = x25519_dalek::PublicKey::from(&sk);
+        (sk, pk)
+    };
+    let rdh_spki = smp_rs::crypto::spki_x25519(r_dh_pub.as_bytes());
+    let mut gcmd = b"FGET ".to_vec();
+    gcmd.push(rdh_spki.len() as u8);
+    gcmd.extend_from_slice(&rdh_spki);
+    let corr: Vec<u8> = (0..24).map(|_| rand::random::<u8>()).collect();
+    let mut t = Vec::new();
+    t.push(sid.len() as u8); t.extend_from_slice(&sid);
+    t.push(corr.len() as u8); t.extend_from_slice(&corr);
+    t.push(rcv_id.len() as u8); t.extend_from_slice(&rcv_id);
+    t.extend_from_slice(&gcmd);
+    let sig = rcv.sign(&t);
+    // send_cmd rebuilds corr — so do it manually here to keep sig consistent
+    let mut inner = Vec::new();
+    inner.push(64u8); inner.extend_from_slice(&sig.to_bytes()); inner.extend_from_slice(&t);
+    let mut batch = vec![1u8];
+    batch.extend_from_slice(&(inner.len() as u16).to_be_bytes());
+    batch.extend_from_slice(&inner);
+    let mut blk = Vec::new();
+    blk.extend_from_slice(&(batch.len() as u16).to_be_bytes());
+    blk.extend_from_slice(&batch);
+    blk.resize(BLOCK, 0x23);
+    let gr = post(&mut h2, Bytes::from(blk), &host).await;
+    println!("FGET -> {} bytes total", gr.len());
+    let gl = u16::from_be_bytes([gr[0], gr[1]]) as usize;
+    let gp = &gr[2..(2 + gl).min(gr.len())];
+    if let Some(pos) = gp.windows(4).position(|w| w == b"FILE") {
+        println!("  FILE raw: {}", hex(&gp[pos..(pos + 90).min(gp.len())]));
+        // "FILE " + sDhKey short(SPKI) + nonce 24B raw
+        let mut q = pos + 5;
+        let kl = gp[q] as usize; q += 1;
+        let sdh_spki = &gp[q..q + kl]; q += kl;
+        let nonce: [u8; 24] = gp[q..q + 24].try_into().unwrap();
+        let (_, sdh_raw) = smp_rs::crypto::parse_spki(sdh_spki).expect("sDhKey");
+        let shared = smp_rs::crypto::x25519_dh(&r_dh_secret, &smp_rs::crypto::x25519_public(sdh_raw));
+        let enc_packet = &gr[BLOCK..]; // packet body streamed after the command block
+        println!("  FILE sDhKey={} nonce={} enc_packet={} bytes", hex(&sdh_raw), hex(&nonce), enc_packet.len());
+        match smp_rs::crypto::secretbox_decrypt(&shared, &nonce, enc_packet) {
+            Some(pt) => {
+                println!("  [beforenm] decrypted {} bytes, matches uploaded: {}", pt.len(), pt == file);
+            }
+            None => match smp_rs::crypto::raw_secretbox_decrypt(&shared, &nonce, enc_packet) {
+                Some(pt) => println!("  [raw] decrypted {} bytes, matches uploaded: {}, sha256={}", pt.len(), pt == file, hex(&smp_rs::crypto::sha256(&pt))),
+                None => println!("  DECRYPT FAILED (both)"),
+            },
+        }
+    } else if let Some(pos) = gp.windows(3).position(|w| w == b"ERR") {
+        println!("  ERR: {:?}", String::from_utf8_lossy(&gp[pos..(pos + 40).min(gp.len())]));
     }
 }
 
