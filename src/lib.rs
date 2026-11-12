@@ -12,6 +12,7 @@
 pub mod client;
 pub mod identity;
 pub mod agent;
+pub mod chat;
 pub mod crypto;
 pub mod encoding;
 pub mod protocol;
