@@ -191,3 +191,35 @@ fn hkdf_pub(salt: &[u8], ikm: &[u8], info: &[u8], n: usize) -> Vec<u8> {
     out
 }
 
+
+#[test]
+fn v0_24_out_of_order_across_dh_ratchet_steps() {
+    // v0.24: after a DH ratchet step, undelivered messages from the PREVIOUS epoch must
+    // still decrypt (stored as skipped keys keyed by the old DH pub).
+    let sk = [0x24u8; 32];
+    let (mut a, mut b) = pair(&sk, b"ad");
+    let w0 = a.encrypt(b"epoch0-msg0");
+    let w1 = a.encrypt(b"epoch0-msg1");
+    // b receives epoch0 first (establishes the receiving chain), then a ratchet happens
+    assert_eq!(b.decrypt(&w0).unwrap(), b"epoch0-msg0");
+    let wb = b.encrypt(b"b-hello");
+    assert_eq!(a.decrypt(&wb).unwrap(), b"b-hello"); // a ratchets to a new DH epoch
+    let w2 = a.encrypt(b"epoch1-msg0");
+    let w3 = a.encrypt(b"epoch1-msg1");
+    // deliver newest first, then the skipped old-epoch message, then current out of order
+    assert_eq!(b.decrypt(&w3).unwrap(), b"epoch1-msg1");
+    assert_eq!(b.decrypt(&w1).unwrap(), b"epoch0-msg1"); // skipped key from epoch0
+    assert_eq!(b.decrypt(&w2).unwrap(), b"epoch1-msg0");
+}
+
+#[test]
+fn v0_24_skipped_key_removed_after_use() {
+    let sk = [0x25u8; 32];
+    let (mut a, mut b) = pair(&sk, b"ad");
+    let w0 = a.encrypt(b"m0");
+    let w1 = a.encrypt(b"m1");
+    assert_eq!(b.decrypt(&w1).unwrap(), b"m1"); // stores key for m0
+    assert_eq!(b.decrypt(&w0).unwrap(), b"m0"); // consumes skipped key
+    // replaying w0 must now fail (key was removed)
+    assert!(b.decrypt(&w0).is_err());
+}

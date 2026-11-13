@@ -349,7 +349,12 @@ impl PqdrRatchet {
         if nr + MAX_SKIP < until {
             return Err("too many skipped messages".into());
         }
-        if self.ckr.is_none() || nr == until {
+        if self.ckr.is_none() {
+            // v0.24: no receiving chain yet (e.g. first message after a DH ratchet on the
+            // sender side) — nothing to skip, the incoming ns indexes the fresh chain.
+            return Ok(());
+        }
+        if nr == until {
             return Ok(());
         }
         let dh_raw = self.dh_r.to_bytes();
