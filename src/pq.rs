@@ -25,6 +25,7 @@ pub const KEM_SK_LEN: usize = sntrup761::SECRET_KEY_SIZE; // 1763
 pub const KEM_CT_LEN: usize = sntrup761::CIPHERTEXT_SIZE; // 1039
 pub const KEM_SS_LEN: usize = sntrup761::SHARED_SECRET_SIZE; // 32
 
+#[derive(Clone)]
 pub struct KemKeypair {
     pub ek: EncapsulationKey,
     pub dk: DecapsulationKey,

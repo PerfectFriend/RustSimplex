@@ -89,8 +89,13 @@ serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
    со старыми). Тесты: `tls_x25519_box_auth_roundtrip` (NEW/SUB/ACK через box,
    негативный wrong-secret → ERR AUTH), `session_binding_rejects_nonempty_sid`.
    Всего 35/35 green.
-2. **v0.17 — PQDR double ratchet**: полный ratchet с KEM по `pqdr.md`
-   (сейчас — только KEM-слой и kemParams в connInfo).
+2. **v0.17 — PQDR double ratchet: ✅ реализовано (2026-11-12)**: `src/pqdr.rs` —
+   HKDF-SHA512 KDF дословно из Ratchet.hs (`"SimpleXRootRatchet"`/`"SimpleXChainRatchet"`),
+   DH-ратчет X25519 + два KEM-раунда (SNTRUP761) на шаг, skipped message keys,
+   wire-хедер `msgHeader` (maxVersion, dhPub SPKI, kemParams, pn, ns).
+   Отклонения: хедер plaintext, тело XSalsa20-Poly1305 вместо AES-256-GCM, X25519 вместо Curve448.
+   Тесты `tests/pqdr_ratchet.rs`: 8/8 (conversation, out-of-order, tamper body/header,
+   wrong SK, wire roundtrip, ratchet advance). Всего 43/33→43 теста green, clippy 0 errors.
 3. **v0.18 — robustness**: убрать panic-пути в server.rs (153 unwrap), все
    parse-ошибки → `ERR`; clippy style warnings; flaky chat-тест (ретраи/таймауты).
 4. **v0.19 — XFTP v7+**: публичный relay `xftp1.simplex.im` отдаёт версию 7

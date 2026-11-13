@@ -41,9 +41,13 @@
    server hello (C.cbVerify / C.cbAuthenticate). Тест:
    `tls_x25519_box_auth_roundtrip`, `session_binding_rejects_nonempty_sid`.
 2. **PQDR**: реализован KEM-слой (SNTRUP761, гибридный секрет, wire-формат
-   kemParams/e2eRatchetParams). **Сам double-ratchet с KEM (pqdr.md) не
-   реализован** — агентский слой объявляет `pq_support` и обменивается
-   kemParams, но ratchet остаётся классическим DH.
+   kemParams/e2eRatchetParams) **и полный double ratchet v0.17** (`src/pqdr.rs`):
+   KDF дословно из `Ratchet.hs` (HKDF-SHA512, info `"SimpleXRootRatchet"` /
+   `"SimpleXChainRatchet"`, 96 байт → RK/CK/NHK и CK/MK/IV), DH-ratchet +
+   "parallel ping-pong" из двух KEM-раундов на каждый шаг (KEM #1 encaps, KEM #2
+   decaps), skipped message keys. **Отклонение от wire-спеки** (задокументировано):
+   X25519 вместо Curve448, хедер в plaintext (не AES-256-GCM), тело —
+   XSalsa20-Poly1305 вместо AES-GCM. Тесты: `tests/pqdr_ratchet.rs` (8 тестов).
 3. **`xftp-h2` probe-бинарник** использует permissive проверку сертификата
    (только для локального интероп-теста). Не для production.
 4. **In-memory + опциональный снапшот** (`--store`): снапшот пишется

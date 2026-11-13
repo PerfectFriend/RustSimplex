@@ -12,7 +12,8 @@ use aead::{Aead, KeyInit};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256, Sha512};
-use x25519_dalek::{PublicKey as XPublic, StaticSecret};
+pub use x25519_dalek::PublicKey as XPublic;
+use x25519_dalek::StaticSecret;
 use xsalsa20poly1305::{Nonce, XSalsa20Poly1305};
 
 use crate::encoding::{w_short, EncodeError, Reader};
@@ -72,6 +73,7 @@ pub fn decode_pubkey(r: &mut Reader) -> Result<(AuthAlg, [u8; 32]), EncodeError>
 }
 
 // ---------- X25519 ----------
+#[derive(Clone)]
 pub struct X25519Keypair {
     pub secret: StaticSecret,
     pub public: XPublic,

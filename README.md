@@ -47,8 +47,9 @@ cargo test --test-threads=1   # 33 теста, все зелёные (2026-11-12
   assert-проверка sessionId (v0.16, `check_session_binding`) и X25519 box-auth
   для обычных очередей (v0.16, `request_box`/`verify_box` + ALG1 в снапшоте) —
   реализованы, покрыты e2e-тестом `tls_x25519_box_auth_roundtrip`.
-- PQDR: реализован KEM-слой SNTRUP761 + гибридный секрет + kemParams; сам
-  PQ double ratchet — нет.
+- PQDR: KEM-слой SNTRUP761 + полный double ratchet (v0.17, `src/pqdr.rs`) — KDF как в
+  оригинале (HKDF-SHA512, `SimpleXRootRatchet`/`SimpleXChainRatchet`), два KEM-раунда
+  на DH-ratchet шаг; отклонения wire-формата задокументированы в SECURITY.md.
 - `xftp-h2` — probe с permissive verify сертификата, не для production.
 - Снапшот `--store` не шифруется. Подробнее: `docs/SECURITY.md`.
 - Для внешнего аудита: `docs/AUDIT.md` и `docs/AUDITOR-LETTER.md`.
