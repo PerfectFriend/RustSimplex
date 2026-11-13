@@ -51,7 +51,8 @@ cargo test --test-threads=1   # 33 теста, все зелёные (2026-11-12
   оригинале (HKDF-SHA512, `SimpleXRootRatchet`/`SimpleXChainRatchet`), два KEM-раунда
   на DH-ratchet шаг; отклонения wire-формата задокументированы в SECURITY.md.
 - `xftp-h2` — probe с permissive verify сертификата, не для production.
-- Снапшот `--store` не шифруется. Подробнее: `docs/SECURITY.md`.
+- Снапшот `--store`: при env `SMP_STORE_KEY` (hex 32B) шифруется XSalsa20-Poly1305
+  (`SMP1` magic + nonce), без ключа — plaintext (legacy). Подробнее: `docs/SECURITY.md`.
 - Для внешнего аудита: `docs/AUDIT.md` и `docs/AUDITOR-LETTER.md`.
 
 ## Структура

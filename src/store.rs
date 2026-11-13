@@ -3,13 +3,56 @@
 //!   u32 rcv_id_len, rcv_id, u32 snd_id_len, snd_id,
 //!   32B rcv_auth_raw, u8 snd_auth_present + 32B, 32B rcv_dh_secret,
 //!   u32 msg_count, per msg: u32 msg_id_len, msg_id, u32 body_len, body
-//! All integers big-endian.
+//! All integers big-endian. Optional XFTP section and ALG1 auth-alg trailer follow.
+//!
+//! v0.20 hardening: when env `SMP_STORE_KEY` holds a 64-hex-char 32-byte key, the
+//! snapshot is written as `SMP1` magic + 24B nonce + XSalsa20-Poly1305(key, nonce,
+//! snapshot) — authenticated encryption (MAC built in). Without the key the legacy
+//! plaintext format is written/read (backward compatible).
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::crypto::{random_bytes, secretbox_decrypt, secretbox_encrypt};
 use crate::server::{Queue, ServerState};
+
+const ENC_MAGIC: &[u8; 4] = b"SMP1";
+
+/// Store encryption key from env `SMP_STORE_KEY` (hex-encoded 32 bytes).
+pub fn store_key() -> Option<[u8; 32]> {
+    let hex_key = std::env::var("SMP_STORE_KEY").ok()?;
+    let bytes = hex::decode(hex_key.trim()).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Some(arr)
+}
+
+fn seal(plain: Vec<u8>) -> Vec<u8> {
+    match store_key() {
+        Some(k) => {
+            let nonce: [u8; 24] = random_bytes(24).try_into().unwrap();
+            let mut out = Vec::with_capacity(4 + 24 + plain.len() + 16);
+            out.extend_from_slice(ENC_MAGIC);
+            out.extend_from_slice(&nonce);
+            out.extend_from_slice(&secretbox_encrypt(&k, &nonce, &plain));
+            out
+        }
+        None => plain,
+    }
+}
+
+fn unseal(buf: &[u8]) -> Option<Vec<u8>> {
+    if buf.len() >= 4 && &buf[..4] == ENC_MAGIC {
+        let k = store_key()?;
+        if buf.len() < 4 + 24 {
+            return None;
+        }
+        let nonce: [u8; 24] = buf[4..28].try_into().ok()?;
+        secretbox_decrypt(&k, &nonce, &buf[28..])
+    } else {
+        Some(buf.to_vec()) // legacy plaintext snapshot
+    }
+}
 
 pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
     let mut out = Vec::new();
@@ -193,7 +236,7 @@ pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&snapshot_bytes(st))?;
+        f.write_all(&seal(snapshot_bytes(st)))?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
@@ -201,7 +244,7 @@ pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
 
 pub fn load(path: &Path) -> Option<ServerState> {
     let buf = fs::read(path).ok()?;
-    parse_snapshot(&buf)
+    parse_snapshot(&unseal(&buf)?)
 }
 
 pub fn default_store_path() -> PathBuf {

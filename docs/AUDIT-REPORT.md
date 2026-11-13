@@ -53,7 +53,7 @@ tests/            13 test-бинарников, 33 теста
 | 2 | MEDIUM→MITIGATED | 153 `unwrap()/expect()/panic!` в `src/` (83 в `server.rs`) — DoS на malformed wire-входе | v0.18: dispatch в `catch_unwind` → `ERR INTERNAL`, соединение не падает; тест garbage-block green. TODO: убрать сами unwrap |
 | 3 | LOW | `xftp-h2` probe: permissive verify сертификата | задокументировано (probe only, не production) |
 | 4 | INFO→RESOLVED | sessionId = "" (tls-unique пуст для TLS 1.3); assert sessionId + X25519 box-auth | реализовано в v0.16: `check_session_binding`, `qauth`/`verify_box`, тесты green |
-| 5 | INFO | снапшот `--store` не шифруется, без MAC | задокументировано |
+| 5 | INFO→RESOLVED | снапшот `--store` не шифруется, без MAC | v0.20: `SMP1`+nonce+XSalsa20-Poly1305 при `SMP_STORE_KEY`, legacy plaintext иначе; тесты green |
 | 6 | — | секреты/токены/приватные ключи в репо | **не найдено** (grep по паттернам ghp_/AKIA/sk-/PRIVATE KEY — чисто) |
 | 7 | — | `unsafe` блоков | **0** |
 | 8 | — | TODO/FIXME/HACK | **0** |
@@ -104,7 +104,11 @@ serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
    `dispatch` (сейчас перехвачены, но не устранены) — долгосрочно. Всего 44/44 green.
 4. **v0.19 — XFTP v7+**: публичный relay `xftp1.simplex.im` отдаёт версию 7
    (протокол новее v6.5.0.17) — интероп с ним.
-5. **v0.20 — store hardening**: шифрование/MAC снапшота, WAL.
+5. **v0.20 — store hardening: ✅ реализовано (2026-11-12)**: при наличии env
+   `SMP_STORE_KEY` (hex 32B) снапшот пишется как `SMP1` + nonce24 +
+   XSalsa20-Poly1305 (AEAD, MAC встроен); без ключа — legacy plaintext (обратная
+   совместимость). Тесты: roundtrip, tamper → reject, wrong key → reject, legacy load.
+   Всего 47/47 green, clippy 0 errors.
 6. **Аудитору**: прогнать SNTRUP761 KAT против SUPERCOP-векторов; проверить
    ручной HSalsa20 ещё раз; fuzz wire-парсеры (`cargo fuzz`).
 
