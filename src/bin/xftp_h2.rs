@@ -78,71 +78,57 @@ async fn main() {
         data
     }
 
-    // 1. empty POST -> paddedRouterHello
-    // wire block = u16 BE unpadded-length + payload + 0x23 padding to 16384
-    // payload (stable v6.5): versionRange(min u16, max u16) + sessionId(shortString) + authPubKey + ...
-    let hello = post(&mut h2, Bytes::new(), &host).await;
-    println!("routerHello ({} bytes): {}...", hello.len(), hex(&hello[..hello.len().min(96)]));
-    // v0.19: public relay (v7+) may answer an error block (e.g. "SESSION") instead of
-    // a routerHello to a v6.5-style empty probe — parse defensively.
-    if hello.len() < 6 {
-        println!("short/err response, not a routerHello — stop");
-        return;
-    }
-    let hlen = u16::from_be_bytes([hello[0], hello[1]]) as usize;
-    if hello.len() < 2 + hlen || hlen < 5 {
-        println!("not a routerHello block (len {hlen}) — likely ERR: {}", String::from_utf8_lossy(&hello[2..hello.len().min(2 + hlen)]));
-        return;
-    }
-    let hp = &hello[2..2 + hlen];
-    let vmin = u16::from_be_bytes([hp[0], hp[1]]);
-    let vmax = u16::from_be_bytes([hp[2], hp[3]]);
+    // 1. handshake starts with clientHello on v7+ (sessionIdentifier negotiated after clientHello)
+    //    wire block = u16 BE unpadded-length + payload + 0x23 padding to 16384
+    //    payload (xftp v7): xftpVersion(u16) + keyHash(shortString 32B)
+    //    -> server answers paddedRouterHello = versionRange(min,max) + sessionId(short) + authPubKey + ...
+    let mut ch = Vec::new();
+    let vmin = 7u16; let vmax = 7u16;
+    ch.extend_from_slice(&vmin.to_be_bytes());
+    ch.extend_from_slice(&vmax.to_be_bytes());
+    // xftp v7 clientHello: version + keyHash + entitlementProof('0' = nothing) + ignored
+    ch.push(32u8);
+    ch.extend_from_slice(&[0u8; 32]);
+    ch.push(b'0'); // entitlementProof = Nothing
+    let ca = smp_rs::crypto::x25519_keypair();
+    let ca_spki = smp_rs::crypto::spki_x25519(ca.public.as_bytes());
+    ch.push(ca_spki.len() as u8);
+    ch.extend_from_slice(&ca_spki);
+    ch.resize(BLOCK, 0x23);
+    let hello = post(&mut h2, Bytes::from(ch), &host).await;
+    println!("clientHello v{vmin}..v{vmax} -> routerHello {} bytes", hello.len());
+    let hp = &hello[2..hello.len().min(96 + 2)];
+    let vmin_srv = u16::from_be_bytes([hp[0], hp[1]]);
+    let vmax_srv = u16::from_be_bytes([hp[2], hp[3]]);
     let sidl = hp[4] as usize;
     if hp.len() < 5 + sidl {
         println!("routerHello truncated sessionId — stop");
         return;
     }
     let sid = hp[5..5 + sidl].to_vec();
-    println!("server xftp version range {vmin}..{vmax} sessionId({sidl})={}", hex(&sid));
-    let v = vmax.min(3); // stable supports up to 3
+    let sid_use: Vec<u8> = Vec::new(); // TLS 1.3: sessionId = tls-unique = ""
+    println!("server xftp version range {vmin_srv}..{vmax_srv} sessionId(73)={}; transmission uses empty sessionId (tls-unique)", hex(&sid));
 
     // keyHash = SHA-256 of CA certificate DER (arg 3 = path to ca.crt PEM, optional)
     let key_hash: [u8; 32] = match std::env::args().nth(3) {
         Some(p) => {
             use sha2::Digest;
-            let pem = std::fs::read_to_string(&p).expect("ca cert");
-            let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-            let der = base64_decode(&b64);
+            let b = std::fs::read(&p).expect("ca cert");
             let mut h = sha2::Sha256::new();
-            h.update(&der);
+            h.update(&b);
             h.finalize().into()
         }
-        None => [0u8; 32], // live probe: echo not possible, use zeros only if server accepts (it won't) — pass ca path
+        None => [0u8; 32],
     };
 
-    // 2. paddedClientHello = u16 len + xftpVersion(2B) + keyHash(shortString 32B), padded with 0x23
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&v.to_be_bytes());
-    payload.push(32u8);
-    payload.extend_from_slice(&key_hash);
-    let mut ch = Vec::new();
-    ch.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    ch.extend_from_slice(&payload);
-    ch.resize(BLOCK, 0x23);
-    let r = post(&mut h2, Bytes::from(ch), &host).await;
-    println!("clientHello v{v} -> response {} bytes (expect 0)", r.len());
-    if !r.is_empty() {
-        let rl = u16::from_be_bytes([r[0], r[1]]) as usize;
-        println!("  handshake NOT finalized: {}", String::from_utf8_lossy(&r[2..2 + rl.min(64)]));
-        return;
-    }
+    // 2. handshake finalized with empty response (clientHello first) — PING next.
 
     // 3. PING: block = u16 len + tEncodeBatch1 = 01 + Large(u16 + auth(0x00) + transmission)
     //    transmission = short(sessionId 32B) + short(corrId 24B) + short(entityId "") + "PING"
     let corr: Vec<u8> = (0..24).map(|_| rand::random::<u8>()).collect();
     let mut t = Vec::new();
-    t.push(sid.len() as u8);
-    t.extend_from_slice(&sid);
+    t.push(sid_use.len() as u8);
+    t.extend_from_slice(&sid_use);
     t.push(corr.len() as u8);
     t.extend_from_slice(&corr);
     t.push(0u8); // empty entity
@@ -189,8 +175,8 @@ async fn main() {
 
     let corr: Vec<u8> = (0..24).map(|_| rand::random::<u8>()).collect();
     let mut t = Vec::new();
-    t.push(sid.len() as u8);
-    t.extend_from_slice(&sid);
+    t.push(sid_use.len() as u8);
+    t.extend_from_slice(&sid_use);
     t.push(corr.len() as u8);
     t.extend_from_slice(&corr);
     t.push(0u8); // empty entity (FNEW must have empty entity)

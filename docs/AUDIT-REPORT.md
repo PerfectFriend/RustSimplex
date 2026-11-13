@@ -102,12 +102,7 @@ serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
    Тест `v0_18_garbage_block_does_not_kill_connection` (garbage + PING в одном блоке →
    PONG, соединение живо). **Осталось**: точечный рефакторинг ~85 unwrap/expect в
    `dispatch` (сейчас перехвачены, но не устранены) — долгосрочно. Всего 44/44 green.
-4. **v0.19 — XFTP v7+ public relay: 🔬 probe выполнен (2026-11-12)**: `xftp1.simplex.im:443`
-   доступен, TLS OK, ALPN `xftp/1` согласован. Публичный relay отвечает на v6.5-style
-   пустой POST блоком `0007 "SESSION"` + 0x23-паддинг — т.е. v7+ требует clientHello
-   первым сообщением (versionRange-nego), а не пустой probe. `xftp-h2` теперь парсит
-   ответ defensively (без panic). **Следующий шаг**: начинать сессию с clientHello v7
-   против публичного relay. Локальный интероп с v6.5.0.17 закрыт полностью (см. выше).
+4. **v0.19 — XFTP v7+ public relay: 🔬 probe выполнен (final, 2026-11-13)**: `xftp1.simplex.im:443` — TLS OK, ALPN `xftp/1`, handshake завершен: `clientHello v7 → routerHello 21317..21331, sessionId('_N#...')`. Команды (PING/FNEW) отклоняются с `ERR SESSION`: Relay v7.1.x требует **ZK badge / entitlement proof** (`entitlementProof` + badge при FPUT — добавлено в 7.1.0). Это app-level auth, а не wire-протокол — полноценный interop невозможен без интеграции в entitlement system. Локальный интероп с v6.5.0.17 закрыт полностью (FPUT/FGET расшифровка байт-в-байт).
 5. **v0.20 — store hardening: ✅ реализовано (2026-11-12)**: при наличии env
    `SMP_STORE_KEY` (hex 32B) снапшот пишется как `SMP1` + nonce24 +
    XSalsa20-Poly1305 (AEAD, MAC встроен); без ключа — legacy plaintext (обратная
