@@ -126,3 +126,8 @@ cargo clippy --all-targets         # 0 ошибок
    `lock_state()` — poison-tolerant mutex lock; `server.rs` — **0 unwrap/expect**.
    `proxy.rs`/`crypto.rs`/`pq.rs` — unwrap заменены на non-panicking fallback.
    **47/47 green**, clippy 0 errors (chat-тест flaky 1 из 4 прогонов — тайминг, не регрессия).
+
+7. **v0.23 — flaky chat e2e fixed by root cause (2026-11-13)**: poll pump теперь drains
+   outbox повторно после dispatch блока — push, пришедший mid-dispatch, уходит в том же
+   цикле (раньше peer получал EOF → "failed to fill whole buffer"). Chat 14/14 + suite 6/6
+   прогонов 47/47 green. xcheck skip при pruned fixture.
