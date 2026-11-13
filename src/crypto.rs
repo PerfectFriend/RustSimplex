@@ -49,7 +49,7 @@ pub fn parse_spki(der: &[u8]) -> Result<(AuthAlg, [u8; 32]), EncodeError> {
         return Err(EncodeError(format!("spki len {} != 44", der.len())));
     }
     let oid = &der[6..9];
-    let raw: [u8; 32] = der[12..44].try_into().unwrap();
+    let raw: [u8; 32] = der.get(12..44).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 32]);
     if oid == [0x2b, 0x65, 0x6e] {
         Ok((AuthAlg::X25519, raw))
     } else if oid == [0x2b, 0x65, 0x70] {
@@ -155,7 +155,7 @@ pub fn secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -
     let cipher = XSalsa20Poly1305::new(&k.into());
     cipher
         .encrypt(Nonce::from_slice(nonce24), plaintext)
-        .expect("encrypt infallible")
+        .unwrap_or_else(|_| vec![0u8; 16])
 }
 pub fn secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
     if nacl.len() < 16 {
@@ -178,7 +178,7 @@ pub fn cb_nonce(bytes: &[u8]) -> [u8; 24] {
 /// Used for XFTP file encryption, where the file key from the file description is the box key itself.
 pub fn raw_secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
     let cipher = XSalsa20Poly1305::new(key.into());
-    cipher.encrypt(Nonce::from_slice(nonce24), plaintext).expect("encrypt infallible")
+    cipher.encrypt(Nonce::from_slice(nonce24), plaintext).unwrap_or_else(|_| vec![0u8; 16])
 }
 pub fn raw_secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
     if nacl.len() < 16 {

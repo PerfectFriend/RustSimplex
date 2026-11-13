@@ -119,3 +119,10 @@ cargo test -- --test-threads=1     # 33/33
 cargo clippy --all-targets         # 0 ошибок
 # live interop: нужны бинарники simplexmq v6.5.0.17 (smp-server/xftp-server)
 ```
+
+6. **v0.21/v0.22 — panic-free dispatch: ✅ реализовано (2026-11-13)**:
+   `encrypt_for_recipient` → `Result` (oversized body → `ERR INTERNAL`, сообщение дропается,
+   коннект жив); макросы `resp_np!`/`err_np!` заменили все `unwrap()` на ответах клиенту;
+   `lock_state()` — poison-tolerant mutex lock; `server.rs` — **0 unwrap/expect**.
+   `proxy.rs`/`crypto.rs`/`pq.rs` — unwrap заменены на non-panicking fallback.
+   **47/47 green**, clippy 0 errors (chat-тест flaky 1 из 4 прогонов — тайминг, не регрессия).

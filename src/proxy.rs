@@ -62,7 +62,7 @@ pub fn open_proxy_session(dest_host: &str, dest_port: u16, dest_key_hash: &[u8])
 /// Proxy router: handle PFWD — wrap the client-encrypted transmission into RFWD and relay.
 /// Returns the client-encrypted response (PRES payload).
 pub fn relay_pfwd(conn: &Arc<Mutex<ProxyConn>>, pfwd_corr: &[u8], version: u16, command_key: &[u8], client_enc: &[u8]) -> Result<Vec<u8>, String> {
-    let mut g = conn.lock().unwrap();
+    let mut g = conn.lock().unwrap_or_else(|e| e.into_inner());
     let rfwd_corr = random_bytes(24);
     let mut fwd = Vec::new();
     w_short(&mut fwd, pfwd_corr).map_err(|e| e.to_string())?;

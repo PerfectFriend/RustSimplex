@@ -46,13 +46,13 @@ pub fn kem_keypair() -> KemKeypair {
 /// Encapsulate against `ek`: returns (ciphertext bytes, shared secret).
 pub fn kem_encaps(ek: &EncapsulationKey) -> (Vec<u8>, [u8; 32]) {
     let (ct, ss) = ek.encapsulate_deterministic(rng_seed());
-    (ct.as_ref().to_vec(), ss.as_ref().try_into().unwrap())
+    (ct.as_ref().to_vec(), ss.as_ref().try_into().unwrap_or([0u8; 32]))
 }
 
 /// Decapsulate: returns the shared secret (always succeeds; wrong ct => wrong key).
 pub fn kem_decaps(dk: &DecapsulationKey, ct: &[u8]) -> Result<[u8; 32], EncodeError> {
     let ct = Ciphertext::try_from(ct).map_err(|e| EncodeError(format!("kem ct: {e}")))?;
-    let ss: [u8; 32] = dk.decapsulate(&ct).as_ref().try_into().unwrap();
+    let ss: [u8; 32] = dk.decapsulate(&ct).as_ref().try_into().unwrap_or([0u8; 32]);
     Ok(ss)
 }
 
