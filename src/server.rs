@@ -83,6 +83,31 @@ fn err_resp(corr_id: Vec<u8>, entity_id: Vec<u8>, e: &str) -> Result<Transmissio
     resp(corr_id, entity_id, BrokerMsg::Err(e.to_string()))
 }
 
+/// Never-panicking response builders (v0.22): on encode failure return a minimal raw
+/// `ERR INTERNAL` transmission instead of unwrapping.
+macro_rules! resp_np {
+    ($c:expr, $e:expr, $m:expr) => {
+        resp($c, $e, $m).unwrap_or_else(|_| Transmission {
+            authenticator: Vec::new(),
+            corr_id: Vec::new(),
+            entity_id: Vec::new(),
+            command: b"ERR INTERNAL".to_vec(),
+        })
+    };
+}
+macro_rules! err_np {
+    ($c:expr, $e:expr, $s:expr) => {
+        err_resp($c, $e, $s).unwrap_or_else(|_| Transmission {
+            authenticator: Vec::new(),
+            corr_id: Vec::new(),
+            entity_id: Vec::new(),
+            command: b"ERR INTERNAL".to_vec(),
+        })
+    };
+}
+use resp_np;
+use err_np;
+
 pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN)?;
     Ok(secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded))
@@ -119,7 +144,7 @@ fn dispatch(
 ) -> Vec<Transmission> {
     let cmd = match parse_command(&t.command) {
         Ok(c) => c,
-        Err(e) => return vec![err_resp(t.corr_id.clone(), t.entity_id.clone(), &format!("CMD {e}")).unwrap()],
+        Err(e) => return vec![err_np!(t.corr_id.clone(), t.entity_id.clone(), &format!("CMD {e}"))],
     };
     let dirty = matches!(
         cmd,
@@ -145,11 +170,11 @@ fn dispatch_cmd(
     match cmd {
         Command::New { rcv_auth_key, rcv_dh_key, .. } => {
             if !t.entity_id.is_empty() {
-                return vec![err_resp(t.corr_id.clone(), vec![], "CMD HAS_AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "CMD HAS_AUTH")];
             }
             let (alg, raw) = match parse_spki(&rcv_auth_key) {
                 Ok(x) => x,
-                Err(_) => return vec![err_resp(t.corr_id.clone(), vec![], "AUTH").unwrap()],
+                Err(_) => return vec![err_np!(t.corr_id.clone(), vec![], "AUTH")],
             };
             let ok = match alg {
                 AuthAlg::Ed25519 => verify_sign(session_id, t, &raw),
@@ -161,11 +186,11 @@ fn dispatch_cmd(
                 },
             };
             if !ok {
-                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "AUTH")];
             }
             let (_dh_alg, dh_raw) = match parse_spki(&rcv_dh_key) {
                 Ok(x) => x,
-                Err(_) => return vec![err_resp(t.corr_id.clone(), vec![], "CMD SYNTAX").unwrap()],
+                Err(_) => return vec![err_np!(t.corr_id.clone(), vec![], "CMD SYNTAX")],
             };
             let client_dh_pub = x25519_public(dh_raw);
             let srv = x25519_keypair();
@@ -191,32 +216,32 @@ fn dispatch_cmd(
                 });
                 s.by_snd.insert(snd_id.clone(), rcv_id.clone());
             }
-            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Ids {
+            vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ids {
                 rcv_id, snd_id, rcv_dh_key: srv_dh_der,
                 queue_mode: None, link_id: None, service_id: None, ntf_creds: None,
-            }).unwrap()]
+            })]
         }
         Command::Sub => {
             let rcv_id = t.entity_id.clone();
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             q.subscriber = Some(outbox.clone());
-            let mut out = vec![resp(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Sok(None)).unwrap()];
+            let mut out = vec![resp_np!(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Sok(None))];
             while let Some((mid, body)) = q.messages.pop_front() {
                 let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
                     Ok(e) => e,
                     Err(_) => {
                         // v0.21: oversized msg breaks the queue — drop it, reply ERR to client
                         let _ = q.messages.clear();
-                        return vec![err_resp(t.corr_id.clone(), rcv_id, "INTERNAL").unwrap()]
+                        return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")]
                     }
                 };
-                out.push(resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid, body: enc }).unwrap());
+                out.push(resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid, body: enc }));
             }
             out
         }
@@ -224,20 +249,20 @@ fn dispatch_cmd(
             let rcv_id = t.entity_id.clone();
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             match q.messages.pop_front() {
                 Some((mid, body)) => {
                     let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
                         Ok(e) => e,
-                        Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "INTERNAL").unwrap()]
+                        Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")]
                     };
-                    vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Msg { msg_id: mid, body: enc }).unwrap()]
+                    vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Msg { msg_id: mid, body: enc })]
                 }
-                None => vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Sok(None)).unwrap()],
+                None => vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Sok(None))],
             }
         }
         Command::Send { flags, body } => {
@@ -247,17 +272,17 @@ fn dispatch_cmd(
             let rcv_id = {
                 let s = st.lock().unwrap();
                 let Some(rcv_id) = s.by_snd.get(&snd_id).cloned() else {
-                    return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
+                    return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
                 };
                 rcv_id
             };
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
             };
             if let Some(snd_raw) = &q.snd_auth {
                 if !verify_sign(session_id, t, snd_raw) {
-                    return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+                    return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
                 }
             }
             let msg_id = random_bytes(16);
@@ -266,7 +291,7 @@ fn dispatch_cmd(
                 // v0.21: oversized message — drop it, deliver ERR INTERNAL via push pipe (no panic)
                 match encrypt_for_recipient(&q.rcv_dh_secret, &msg_id, &body) {
                     Ok(enc) => {
-                        if let Ok(msg_t) = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
+                        if let msg_t = resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
                             if let Ok(wire) = encode_transmission(&msg_t) {
                                 let _ = sub.send(wire);
                             }
@@ -276,7 +301,7 @@ fn dispatch_cmd(
                         // v0.21: oversized message — drop it, deliver ERR INTERNAL via push pipe (no panic)
                         let _ = q.messages.pop_back();
                         if let Ok(w) = encode_transmission(
-                            &err_resp(random_bytes(24), rcv_id.clone(), "INTERNAL").unwrap(),
+                            &err_np!(random_bytes(24), rcv_id.clone(), "INTERNAL"),
                         ) {
                             let _ = sub.send(w);
                         }
@@ -288,7 +313,7 @@ fn dispatch_cmd(
                 if let (Some(ntf_secret), Some(ntf_sub)) = (&q.rcv_ntf_dh_secret, &q.ntf_subscriber) {
                     let nonce = random_bytes(24);
                     let mut meta = Vec::new();
-                    crate::encoding::w_short(&mut meta, &msg_id).unwrap();
+                    crate::encoding::w_short(&mut meta, &msg_id);
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -298,7 +323,7 @@ fn dispatch_cmd(
                         let mut n24 = [0u8; 24];
                         n24.copy_from_slice(&nonce);
                         let enc_meta = secretbox_encrypt(ntf_secret, &n24, &padded);
-                        if let Ok(ntf_t) = resp(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta }) {
+                        if let ntf_t = resp_np!(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta }) {
                             if let Ok(wire) = encode_transmission(&ntf_t) {
                                 let _ = ntf_sub.send(wire);
                             }
@@ -306,25 +331,25 @@ fn dispatch_cmd(
                     }
                 }
             }
-            vec![resp(t.corr_id.clone(), snd_id, BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), snd_id, BrokerMsg::Ok)]
         }
         Command::Ack(msg_id) => {
             let rcv_id = t.entity_id.clone();
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             q.messages.retain(|(m, _)| *m != msg_id);
-            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
         }
         Command::Key(k) | Command::Skey(k) => {
             let rcv_id = t.entity_id.clone();
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             let is_recipient = tag_of(&t.command) == "KEY";
             let key_ok = if is_recipient {
@@ -333,21 +358,21 @@ fn dispatch_cmd(
                 q.snd_auth.map(|r| verify_sign(session_id, t, &r)).unwrap_or(true)
             };
             if !key_ok {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             if let Ok((_alg, raw)) = parse_spki(&k) {
                 q.snd_auth = Some(raw);
             }
-            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
         }
         Command::Del => {
             let rcv_id = t.entity_id.clone();
             let mut s = st.lock().unwrap();
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             let snd = q.snd_id.clone();
             if let Some(nid) = q.ntf_id.take() {
@@ -360,42 +385,42 @@ fn dispatch_cmd(
                 s.by_rcv.remove(&rcv_id);
                 s.by_snd.remove(&snd);
             }
-            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Deld).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Deld)]
         }
-        Command::Off => vec![resp(t.corr_id.clone(), t.entity_id.clone(), BrokerMsg::Ok).unwrap()],
-        Command::Ping => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Pong).unwrap()],
+        Command::Off => vec![resp_np!(t.corr_id.clone(), t.entity_id.clone(), BrokerMsg::Ok)],
+        Command::Ping => vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Pong)],
         Command::Fnew { size, digest, sender_key } => {
             let (_alg, sender_raw) = match parse_spki(&sender_key) {
                 Ok(v) => v,
-                Err(e) => return vec![err_resp(t.corr_id.clone(), vec![], &format!("AUTH {e}")).unwrap()],
+                Err(e) => return vec![err_np!(t.corr_id.clone(), vec![], &format!("AUTH {e}"))],
             };
             if !verify_sign(session_id, t, &sender_raw) {
-                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
             let packet_id = random_bytes(16);
             st.lock().unwrap().xftp.insert(
                 packet_id.clone(),
                 crate::xftp::XftpPacket { size, digest, sender_raw, chunks: Default::default() },
             );
-            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Fid { packet_id }).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fid { packet_id })]
         }
         Command::Fput { packet_id, offset, chunk } => {
             let mut g = st.lock().unwrap();
             let Some(p) = g.xftp.get(&packet_id) else {
-                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
             if !verify_sign(session_id, t, &p.sender_raw) {
-                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
             let p = g.xftp.get_mut(&packet_id).unwrap();
             p.chunks.insert(offset, chunk);
             drop(g);
-            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ok)]
         }
         Command::Fget { packet_id, offset } => {
             let g = st.lock().unwrap();
             let Some(p) = g.xftp.get(&packet_id) else {
-                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
             // as many chunks as fit into one 16KB block starting at `offset` (15KB chunk -> 1 per block)
             let mut out = Vec::new();
@@ -406,26 +431,26 @@ fn dispatch_cmd(
                     break;
                 }
                 size += need;
-                if let Ok(r) = resp(t.corr_id.clone(), vec![], BrokerMsg::Fdata { offset: *off, chunk: ch.clone() }) {
+                if let r = resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fdata { offset: *off, chunk: ch.clone() }) {
                     out.push(r);
                 }
             }
             if out.is_empty() {
-                out.push(err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap());
+                out.push(err_np!(t.corr_id.clone(), vec![], "NO_FILE"));
             }
             out
         }
         Command::Fdel { packet_id } => {
             let mut g = st.lock().unwrap();
             let Some(p) = g.xftp.get(&packet_id) else {
-                return vec![err_resp(t.corr_id.clone(), vec![], "NO_FILE").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
             if !verify_sign(session_id, t, &p.sender_raw) {
-                return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
             g.xftp.remove(&packet_id);
             drop(g);
-            vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ok)]
         }
         Command::Proxy { host, port, .. } => {
             let host = String::from_utf8_lossy(&host).to_string();
@@ -442,28 +467,28 @@ fn dispatch_cmd(
                         cert_key: spki_x25519(&conn.dest_session_pub),
                     };
                     st.lock().unwrap().proxies.insert(proxy_id.clone(), Arc::new(Mutex::new(conn)));
-                    vec![resp(t.corr_id.clone(), vec![], pkey).unwrap()]
+                    vec![resp_np!(t.corr_id.clone(), vec![], pkey)]
                 }
-                Err(e) => vec![err_resp(t.corr_id.clone(), vec![], &format!("PROXY {e}")).unwrap()],
+                Err(e) => vec![err_np!(t.corr_id.clone(), vec![], &format!("PROXY {e}"))],
             }
         }
         Command::Pfwd { version, command_key, enc } => {
             let proxy_id = t.entity_id.clone();
             let conn = st.lock().unwrap().proxies.get(&proxy_id).cloned();
             let Some(conn) = conn else {
-                return vec![err_resp(t.corr_id.clone(), proxy_id, "NO_AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), proxy_id, "NO_AUTH")];
             };
             match crate::proxy::relay_pfwd(&conn, &t.corr_id, version, &command_key, &enc) {
-                Ok(client_enc_resp) => vec![resp(t.corr_id.clone(), proxy_id, BrokerMsg::Pres { enc: client_enc_resp }).unwrap()],
-                Err(e) => vec![err_resp(t.corr_id.clone(), proxy_id, &format!("PROXY {e}")).unwrap()],
+                Ok(client_enc_resp) => vec![resp_np!(t.corr_id.clone(), proxy_id, BrokerMsg::Pres { enc: client_enc_resp })],
+                Err(e) => vec![err_np!(t.corr_id.clone(), proxy_id, &format!("PROXY {e}"))],
             }
         }
         Command::Rfwd { enc } => {
             let Some(sess) = ctx.sess_secret else {
-                return vec![err_resp(t.corr_id.clone(), vec![], "NO_AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_AUTH")];
             };
             let Some(eph_priv) = &ctx.server_eph_priv else {
-                return vec![err_resp(t.corr_id.clone(), vec![], "NO_AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_AUTH")];
             };
             let st2 = st.clone();
             let sid = session_id.to_vec();
@@ -472,8 +497,8 @@ fn dispatch_cmd(
             match crate::proxy::handle_rfwd(&enc, &t.corr_id, &sess, eph_priv, session_id, &move |inner| {
                 dispatch(inner, &st2, &sid, &outbox2, &ctx2)
             }) {
-                Ok(rres_enc) => vec![resp(t.corr_id.clone(), vec![], BrokerMsg::Rres { enc: rres_enc }).unwrap()],
-                Err(e) => vec![err_resp(t.corr_id.clone(), vec![], &format!("CRYPTO {e}")).unwrap()],
+                Ok(rres_enc) => vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Rres { enc: rres_enc })],
+                Err(e) => vec![err_np!(t.corr_id.clone(), vec![], &format!("CRYPTO {e}"))],
             }
         }
         Command::Nkey { ntf_key, rcv_ntf_dh_key } => {
@@ -482,18 +507,18 @@ fn dispatch_cmd(
             let mut g = st.lock().unwrap();
             let s = &mut *g;
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             let (_alg, ntf_raw) = match parse_spki(&ntf_key) {
                 Ok(x) => x,
-                Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()],
+                Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")],
             };
             let (_dh_alg, rcv_ntf_dh_raw) = match parse_spki(&rcv_ntf_dh_key) {
                 Ok(x) => x,
-                Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "CMD SYNTAX").unwrap()],
+                Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "CMD SYNTAX")],
             };
             let srv_ntf = x25519_keypair();
             let rcv_ntf_dh_secret = x25519_dh(&srv_ntf.secret, &x25519_public(rcv_ntf_dh_raw));
@@ -503,7 +528,7 @@ fn dispatch_cmd(
             q.ntf_auth_raw = Some(ntf_raw);
             q.rcv_ntf_dh_secret = Some(rcv_ntf_dh_secret);
             s.by_ntf.insert(ntf_id.clone(), rcv_id.clone());
-            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Nid { ntf_id, srv_ntf_dh: srv_ntf_dh_der }).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Nid { ntf_id, srv_ntf_dh: srv_ntf_dh_der })]
         }
         Command::Nsub => {
             // notifier-key-signed, entity = ntf_id
@@ -511,29 +536,29 @@ fn dispatch_cmd(
             let mut s = st.lock().unwrap();
             let rcv_id = match s.by_ntf.get(&ntf_id) {
                 Some(r) => r.clone(),
-                None => return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()],
+                None => return vec![err_np!(t.corr_id.clone(), ntf_id, "AUTH")],
             };
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), ntf_id, "AUTH")];
             };
             let Some(ntf_raw) = q.ntf_auth_raw else {
-                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), ntf_id, "AUTH")];
             };
             if !verify_sign(session_id, t, &ntf_raw) {
-                return vec![err_resp(t.corr_id.clone(), ntf_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), ntf_id, "AUTH")];
             }
             q.ntf_subscriber = Some(outbox.clone());
-            vec![resp(t.corr_id.clone(), ntf_id, BrokerMsg::Sok(None)).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), ntf_id, BrokerMsg::Sok(None))]
         }
         Command::Ndel => {
             let rcv_id = t.entity_id.clone();
             let mut g = st.lock().unwrap();
             let s = &mut *g;
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
             if !qauth(session_id, t, q, ctx) {
-                return vec![err_resp(t.corr_id.clone(), rcv_id, "AUTH").unwrap()];
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
             if let Some(nid) = q.ntf_id.take() {
                 s.by_ntf.remove(&nid);
@@ -541,7 +566,7 @@ fn dispatch_cmd(
             q.ntf_auth_raw = None;
             q.rcv_ntf_dh_secret = None;
             q.ntf_subscriber = None;
-            vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Ok).unwrap()]
+            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
         }
     }
 }
