@@ -682,6 +682,19 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                             break;
                         }
                     }
+                    // v0.23: flush pushes that arrived while we were dispatching — otherwise a
+                    // peer blocked in recv_block can starve (flaky "failed to fill whole buffer").
+                    let mut late: Vec<Vec<u8>> = Vec::new();
+                    while let Ok(w) = rx.try_recv() {
+                        late.push(w);
+                    }
+                    if !late.is_empty() {
+                        if let Ok(lb) = encode_block(&late) {
+                            if write_block(&mut stream, &lb).is_err() {
+                                break;
+                            }
+                        }
+                    }
                     rpos = 0;
                 }
             }
