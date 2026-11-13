@@ -549,9 +549,10 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
         return Err(io_err(format!("version {v} != {SMP_VERSION}")));
     }
     let ctx = ConnCtx {
-        sess_secret: client_auth.map(|der| {
-            let (_a, raw) = parse_spki(&der).map_err(io_err).unwrap();
-            x25519_dh(&eph.secret, &x25519_public(raw))
+        sess_secret: client_auth.and_then(|der| {
+            parse_spki(&der)
+                .ok()
+                .map(|(_a, raw)| x25519_dh(&eph.secret, &x25519_public(raw)))
         }),
         server_eph_priv: Some(eph.secret),
     };
@@ -591,9 +592,28 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                             Ok(t) => t,
                             Err(_) => continue,
                         };
-                        for r in dispatch(&t, &st, &session_id, &tx, &ctx) {
-                            if let Ok(enc) = encode_transmission(&r) {
-                                responses.push(enc);
+                        // v0.18 robustness: a malformed command must never kill the
+                        // connection — a panic inside dispatch becomes ERR INTERNAL.
+                        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            dispatch(&t, &st, &session_id, &tx, &ctx)
+                        }));
+                        match dispatched {
+                            Ok(rs) => {
+                                for r in rs {
+                                    if let Ok(enc) = encode_transmission(&r) {
+                                        responses.push(enc);
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                if let Ok(enc) = encode_transmission(
+                                    &err_resp(t.corr_id.clone(), t.entity_id.clone(), "INTERNAL").unwrap_or_else(|_| {
+                                        // err_resp is infallible for reasonable sizes; fall back to empty
+                                        Transmission { authenticator: vec![], corr_id: t.corr_id.clone(), entity_id: t.entity_id.clone(), command: b"ERR INTERNAL".to_vec() }
+                                    }),
+                                ) {
+                                    responses.push(enc);
+                                }
                             }
                         }
                     }

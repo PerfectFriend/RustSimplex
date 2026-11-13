@@ -50,7 +50,7 @@ tests/            13 test-бинарников, 33 теста
 | # | Severity | Находка | Статус |
 |---|---|---|---|
 | 1 | LOW (fixed) | Hardcoded `/home/thomas/...` пути в debug-dump (`client.rs`, `xftp_h2.rs`) | исправлено: пути из env (`SMP_DUMP_RAW`/`XFTP_DUMP`), default — `temp_dir()` |
-| 2 | MEDIUM | 153 `unwrap()/expect()/panic!` в `src/` (83 в `server.rs`) — потенциальный DoS на malformed wire-входе | открыто; рекомендация: парс-ошибки → `ERR` вместо panic (постепенно) |
+| 2 | MEDIUM→MITIGATED | 153 `unwrap()/expect()/panic!` в `src/` (83 в `server.rs`) — DoS на malformed wire-входе | v0.18: dispatch в `catch_unwind` → `ERR INTERNAL`, соединение не падает; тест garbage-block green. TODO: убрать сами unwrap |
 | 3 | LOW | `xftp-h2` probe: permissive verify сертификата | задокументировано (probe only, не production) |
 | 4 | INFO→RESOLVED | sessionId = "" (tls-unique пуст для TLS 1.3); assert sessionId + X25519 box-auth | реализовано в v0.16: `check_session_binding`, `qauth`/`verify_box`, тесты green |
 | 5 | INFO | снапшот `--store` не шифруется, без MAC | задокументировано |
@@ -96,8 +96,12 @@ serde/serde_json, tokio, bytes/futures, hex, sntrup761. Все из crates.io,
    Отклонения: хедер plaintext, тело XSalsa20-Poly1305 вместо AES-256-GCM, X25519 вместо Curve448.
    Тесты `tests/pqdr_ratchet.rs`: 8/8 (conversation, out-of-order, tamper body/header,
    wrong SK, wire roundtrip, ratchet advance). Всего 43/33→43 теста green, clippy 0 errors.
-3. **v0.18 — robustness**: убрать panic-пути в server.rs (153 unwrap), все
-   parse-ошибки → `ERR`; clippy style warnings; flaky chat-тест (ретраи/таймауты).
+3. **v0.18 — robustness: ✅ частично закрыто (2026-11-12)**: `dispatch` обёрнут в
+   `catch_unwind` — panic в обработке команды теперь даёт `ERR INTERNAL`, а не роняет
+   соединение; unwrap в handshake (parse_spki client auth) заменён на graceful None.
+   Тест `v0_18_garbage_block_does_not_kill_connection` (garbage + PING в одном блоке →
+   PONG, соединение живо). **Осталось**: точечный рефакторинг ~85 unwrap/expect в
+   `dispatch` (сейчас перехвачены, но не устранены) — долгосрочно. Всего 44/44 green.
 4. **v0.19 — XFTP v7+**: публичный relay `xftp1.simplex.im` отдаёт версию 7
    (протокол новее v6.5.0.17) — интероп с ним.
 5. **v0.20 — store hardening**: шифрование/MAC снапшота, WAL.

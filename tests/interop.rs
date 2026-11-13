@@ -177,3 +177,49 @@ fn session_binding_rejects_nonempty_sid() {
     assert!(check_session_binding(b"").is_ok());
     assert!(check_session_binding(b"tls-unique-value").is_err());
 }
+
+#[test]
+fn v0_18_garbage_block_does_not_kill_connection() {
+    // raw-socket robustness: malformed transmissions get no crash; a valid PING
+    // in the same batch still gets PONG.
+    use smp_rs::protocol::{decode_block, encode_block, encode_command, encode_transmission, Command, Transmission, SMP_VERSION};
+    use smp_rs::transport::{client_hello_block, connect_plain, read_block, write_block};
+    let addr = start_plain();
+    let mut s = connect_plain(addr).unwrap();
+    let sh = read_block(&mut s).unwrap();
+    let _ = smp_rs::transport::parse_server_hello_key(&sh).unwrap();
+    let kh = [0xEFu8; 32];
+    write_block(&mut s, &client_hello_block(SMP_VERSION, &kh, false).unwrap()).unwrap();
+
+    let ping = Transmission {
+        authenticator: vec![],
+        corr_id: smp_rs::crypto::random_bytes(24),
+        entity_id: vec![],
+        command: encode_command(&Command::Ping).unwrap(),
+    };
+    let garbage = vec![0xff, 0x00, 0x13, 0x37]; // undecodable transmission
+    let blk = encode_block(&[garbage, encode_transmission(&ping).unwrap()]).unwrap();
+    write_block(&mut s, &blk).unwrap();
+    let resp = read_block(&mut s).unwrap();
+    let msgs = decode_block(&resp).unwrap();
+    let mut saw_pong = false;
+    for w in &msgs {
+        if let Ok(t) = smp_rs::protocol::decode_transmission(w) {
+            if t.command.starts_with(b"PONG") {
+                saw_pong = true;
+            }
+        }
+    }
+    assert!(saw_pong, "PING must be answered even after garbage in the same block");
+    // connection still alive: one more PING
+    let ping2 = Transmission {
+        authenticator: vec![],
+        corr_id: smp_rs::crypto::random_bytes(24),
+        entity_id: vec![],
+        command: encode_command(&Command::Ping).unwrap(),
+    };
+    write_block(&mut s, &encode_block(&[encode_transmission(&ping2).unwrap()]).unwrap()).unwrap();
+    let resp2 = read_block(&mut s).unwrap();
+    let msgs2 = decode_block(&resp2).unwrap();
+    assert!(msgs2.iter().any(|w| smp_rs::protocol::decode_transmission(w).map(|t| t.command.starts_with(b"PONG")).unwrap_or(false)));
+}
