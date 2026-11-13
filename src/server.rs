@@ -79,6 +79,13 @@ fn resp(corr_id: Vec<u8>, entity_id: Vec<u8>, m: BrokerMsg) -> Result<Transmissi
         command: encode_broker(&m)?,
     })
 }
+
+/// Poison-tolerant state lock (v0.22): a panicked writer must not take the whole
+/// server down — recover the inner state from a poisoned mutex.
+fn lock_state(st: &Arc<Mutex<ServerState>>) -> std::sync::MutexGuard<'_, ServerState> {
+    st.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn err_resp(corr_id: Vec<u8>, entity_id: Vec<u8>, e: &str) -> Result<Transmission, EncodeError> {
     resp(corr_id, entity_id, BrokerMsg::Err(e.to_string()))
 }
@@ -154,7 +161,7 @@ fn dispatch(
     );
     let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
     if dirty {
-        st.lock().unwrap().persist_now();
+        lock_state(st).persist_now();
     }
     out
 }
@@ -199,7 +206,7 @@ fn dispatch_cmd(
             let snd_id = random_bytes(24);
             let srv_dh_der = spki_x25519(&srv.public.to_bytes());
             {
-                let mut s = st.lock().unwrap();
+                let mut s = lock_state(st);
                 s.by_rcv.insert(rcv_id.clone(), Queue {
                     rcv_id: rcv_id.clone(),
                     snd_id: snd_id.clone(),
@@ -223,7 +230,7 @@ fn dispatch_cmd(
         }
         Command::Sub => {
             let rcv_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
@@ -247,7 +254,7 @@ fn dispatch_cmd(
         }
         Command::Get => {
             let rcv_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
@@ -270,13 +277,13 @@ fn dispatch_cmd(
             // instead of panic; the actual size validation happens on encrypt_for_recipient.
             let snd_id = t.entity_id.clone();
             let rcv_id = {
-                let s = st.lock().unwrap();
+                let s = lock_state(st);
                 let Some(rcv_id) = s.by_snd.get(&snd_id).cloned() else {
                     return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
                 };
                 rcv_id
             };
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
             };
@@ -335,7 +342,7 @@ fn dispatch_cmd(
         }
         Command::Ack(msg_id) => {
             let rcv_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
@@ -347,7 +354,7 @@ fn dispatch_cmd(
         }
         Command::Key(k) | Command::Skey(k) => {
             let rcv_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
@@ -367,7 +374,7 @@ fn dispatch_cmd(
         }
         Command::Del => {
             let rcv_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
@@ -398,27 +405,29 @@ fn dispatch_cmd(
                 return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
             let packet_id = random_bytes(16);
-            st.lock().unwrap().xftp.insert(
+            lock_state(st).xftp.insert(
                 packet_id.clone(),
                 crate::xftp::XftpPacket { size, digest, sender_raw, chunks: Default::default() },
             );
             vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fid { packet_id })]
         }
         Command::Fput { packet_id, offset, chunk } => {
-            let mut g = st.lock().unwrap();
+            let mut g = lock_state(st);
             let Some(p) = g.xftp.get(&packet_id) else {
                 return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
             if !verify_sign(session_id, t, &p.sender_raw) {
                 return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
-            let p = g.xftp.get_mut(&packet_id).unwrap();
+            let Some(p) = g.xftp.get_mut(&packet_id) else {
+                return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
+            };
             p.chunks.insert(offset, chunk);
             drop(g);
             vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ok)]
         }
         Command::Fget { packet_id, offset } => {
-            let g = st.lock().unwrap();
+            let g = lock_state(st);
             let Some(p) = g.xftp.get(&packet_id) else {
                 return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
@@ -441,7 +450,7 @@ fn dispatch_cmd(
             out
         }
         Command::Fdel { packet_id } => {
-            let mut g = st.lock().unwrap();
+            let mut g = lock_state(st);
             let Some(p) = g.xftp.get(&packet_id) else {
                 return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
@@ -466,7 +475,7 @@ fn dispatch_cmd(
                         v_max: conn.v_max,
                         cert_key: spki_x25519(&conn.dest_session_pub),
                     };
-                    st.lock().unwrap().proxies.insert(proxy_id.clone(), Arc::new(Mutex::new(conn)));
+                    lock_state(st).proxies.insert(proxy_id.clone(), Arc::new(Mutex::new(conn)));
                     vec![resp_np!(t.corr_id.clone(), vec![], pkey)]
                 }
                 Err(e) => vec![err_np!(t.corr_id.clone(), vec![], &format!("PROXY {e}"))],
@@ -474,7 +483,7 @@ fn dispatch_cmd(
         }
         Command::Pfwd { version, command_key, enc } => {
             let proxy_id = t.entity_id.clone();
-            let conn = st.lock().unwrap().proxies.get(&proxy_id).cloned();
+            let conn = lock_state(st).proxies.get(&proxy_id).cloned();
             let Some(conn) = conn else {
                 return vec![err_np!(t.corr_id.clone(), proxy_id, "NO_AUTH")];
             };
@@ -504,7 +513,7 @@ fn dispatch_cmd(
         Command::Nkey { ntf_key, rcv_ntf_dh_key } => {
             // recipient-signed, entity = rcv_id
             let rcv_id = t.entity_id.clone();
-            let mut g = st.lock().unwrap();
+            let mut g = lock_state(st);
             let s = &mut *g;
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
@@ -533,7 +542,7 @@ fn dispatch_cmd(
         Command::Nsub => {
             // notifier-key-signed, entity = ntf_id
             let ntf_id = t.entity_id.clone();
-            let mut s = st.lock().unwrap();
+            let mut s = lock_state(st);
             let rcv_id = match s.by_ntf.get(&ntf_id) {
                 Some(r) => r.clone(),
                 None => return vec![err_np!(t.corr_id.clone(), ntf_id, "AUTH")],
@@ -552,7 +561,7 @@ fn dispatch_cmd(
         }
         Command::Ndel => {
             let rcv_id = t.entity_id.clone();
-            let mut g = st.lock().unwrap();
+            let mut g = lock_state(st);
             let s = &mut *g;
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
