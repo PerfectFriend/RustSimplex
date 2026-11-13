@@ -131,3 +131,7 @@ cargo clippy --all-targets         # 0 ошибок
    outbox повторно после dispatch блока — push, пришедший mid-dispatch, уходит в том же
    цикле (раньше peer получал EOF → "failed to fill whole buffer"). Chat 14/14 + suite 6/6
    прогонов 47/47 green. xcheck skip при pruned fixture.
+
+8. **v0.24 — PQDR skipped message keys across DH epochs: ✅ (2026-11-13)**: out-of-order
+   доставка из предыдущей эпохи (skipped keys keyed by old DH pub), replay отклоняется,
+   `skip_message_keys` tolerates `ckr=None`. 49/49 green, clippy 0.
