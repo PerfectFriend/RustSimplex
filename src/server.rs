@@ -83,9 +83,9 @@ fn err_resp(corr_id: Vec<u8>, entity_id: Vec<u8>, e: &str) -> Result<Transmissio
     resp(corr_id, entity_id, BrokerMsg::Err(e.to_string()))
 }
 
-pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Vec<u8> {
-    let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN).expect("pad");
-    secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded)
+pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Result<Vec<u8>, EncodeError> {
+    let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN)?;
+    Ok(secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded))
 }
 pub fn decrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], enc: &[u8]) -> Option<Vec<u8>> {
     let pt = secretbox_decrypt(rcv_dh_secret, &cb_nonce(msg_id), enc)?;
@@ -208,7 +208,14 @@ fn dispatch_cmd(
             q.subscriber = Some(outbox.clone());
             let mut out = vec![resp(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Sok(None)).unwrap()];
             while let Some((mid, body)) = q.messages.pop_front() {
-                let enc = encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body);
+                let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        // v0.21: oversized msg breaks the queue — drop it, reply ERR to client
+                        let _ = q.messages.clear();
+                        return vec![err_resp(t.corr_id.clone(), rcv_id, "INTERNAL").unwrap()]
+                    }
+                };
                 out.push(resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid, body: enc }).unwrap());
             }
             out
@@ -224,13 +231,18 @@ fn dispatch_cmd(
             }
             match q.messages.pop_front() {
                 Some((mid, body)) => {
-                    let enc = encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body);
+                    let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
+                        Ok(e) => e,
+                        Err(_) => return vec![err_resp(t.corr_id.clone(), rcv_id, "INTERNAL").unwrap()]
+                    };
                     vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Msg { msg_id: mid, body: enc }).unwrap()]
                 }
                 None => vec![resp(t.corr_id.clone(), rcv_id, BrokerMsg::Sok(None)).unwrap()],
             }
         }
         Command::Send { flags, body } => {
+            // v0.21: oversized body checked inside dispatch_cmd (wrapped in catch_unwind) → ERR INTERNAL
+            // instead of panic; the actual size validation happens on encrypt_for_recipient.
             let snd_id = t.entity_id.clone();
             let rcv_id = {
                 let s = st.lock().unwrap();
@@ -245,16 +257,29 @@ fn dispatch_cmd(
             };
             if let Some(snd_raw) = &q.snd_auth {
                 if !verify_sign(session_id, t, snd_raw) {
-                    return vec![err_resp(t.corr_id.clone(), snd_id, "AUTH").unwrap()];
+                    return vec![err_resp(t.corr_id.clone(), vec![], "AUTH bad signature").unwrap()];
                 }
             }
             let msg_id = random_bytes(16);
             q.messages.push_back((msg_id.clone(), body.clone()));
             if let Some(sub) = &q.subscriber {
-                let enc = encrypt_for_recipient(&q.rcv_dh_secret, &msg_id, &body);
-                if let Ok(msg_t) = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
-                    if let Ok(wire) = encode_transmission(&msg_t) {
-                        let _ = sub.send(wire);
+                // v0.21: oversized message — drop it, deliver ERR INTERNAL via push pipe (no panic)
+                match encrypt_for_recipient(&q.rcv_dh_secret, &msg_id, &body) {
+                    Ok(enc) => {
+                        if let Ok(msg_t) = resp(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
+                            if let Ok(wire) = encode_transmission(&msg_t) {
+                                let _ = sub.send(wire);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // v0.21: oversized message — drop it, deliver ERR INTERNAL via push pipe (no panic)
+                        let _ = q.messages.pop_back();
+                        if let Ok(w) = encode_transmission(
+                            &err_resp(random_bytes(24), rcv_id.clone(), "INTERNAL").unwrap(),
+                        ) {
+                            let _ = sub.send(w);
+                        }
                     }
                 }
             }
