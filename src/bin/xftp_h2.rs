@@ -83,11 +83,25 @@ async fn main() {
     // payload (stable v6.5): versionRange(min u16, max u16) + sessionId(shortString) + authPubKey + ...
     let hello = post(&mut h2, Bytes::new(), &host).await;
     println!("routerHello ({} bytes): {}...", hello.len(), hex(&hello[..hello.len().min(96)]));
+    // v0.19: public relay (v7+) may answer an error block (e.g. "SESSION") instead of
+    // a routerHello to a v6.5-style empty probe — parse defensively.
+    if hello.len() < 6 {
+        println!("short/err response, not a routerHello — stop");
+        return;
+    }
     let hlen = u16::from_be_bytes([hello[0], hello[1]]) as usize;
+    if hello.len() < 2 + hlen || hlen < 5 {
+        println!("not a routerHello block (len {hlen}) — likely ERR: {}", String::from_utf8_lossy(&hello[2..hello.len().min(2 + hlen)]));
+        return;
+    }
     let hp = &hello[2..2 + hlen];
     let vmin = u16::from_be_bytes([hp[0], hp[1]]);
     let vmax = u16::from_be_bytes([hp[2], hp[3]]);
     let sidl = hp[4] as usize;
+    if hp.len() < 5 + sidl {
+        println!("routerHello truncated sessionId — stop");
+        return;
+    }
     let sid = hp[5..5 + sidl].to_vec();
     println!("server xftp version range {vmin}..{vmax} sessionId({sidl})={}", hex(&sid));
     let v = vmax.min(3); // stable supports up to 3
