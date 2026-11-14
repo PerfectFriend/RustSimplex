@@ -291,6 +291,43 @@ fn main() {
     println!("MSG decrypted: msg_id={} body={:?}", b64url_nopad(&msg_id), String::from_utf8_lossy(rcv_body));
     assert_eq!(rcv_body, body.as_slice(), "decrypted rcv body mismatch");
     println!("ACK -> {:?}", request(&mut stream, &sid, Command::Ack(msg_id.to_vec()), rcv_id.clone(), Some(&rcv_auth)));
+    // NTF chain on the same public connection: NKEY -> NID, NSUB -> SOK, SEND(notify) -> NMSG decrypted
+    if std::env::var("SMP_NTF").as_deref() == Ok("1") {
+        let ntf_auth = ed25519_keypair();
+        let rcv_ntf_dh = x25519_keypair();
+        let nkey = request(&mut stream, &sid, Command::Nkey {
+            ntf_key: spki_ed25519(&ntf_auth.verifying.to_bytes()),
+            rcv_ntf_dh_key: spki_x25519(&rcv_ntf_dh.public.to_bytes()),
+        }, rcv_id.clone(), Some(&rcv_auth));
+        println!("NKEY -> {:?}", nkey);
+        let (ntf_id, srv_ntf_dh) = match &nkey[0] {
+            BrokerMsg::Nid { ntf_id, srv_ntf_dh } => (ntf_id.clone(), srv_ntf_dh.clone()),
+            other => panic!("expected NID, got {other:?}"),
+        };
+        let nsub = request(&mut stream, &sid, Command::Nsub, ntf_id.clone(), Some(&ntf_auth));
+        println!("NSUB -> {:?}", nsub);
+        let s2 = request(&mut stream, &sid, Command::Send { flags: true, body: b"ntf probe".to_vec() }, snd_id.clone(), None);
+        println!("SEND(notify) -> {:?}", s2);
+        let srv_raw = parse_spki(&srv_ntf_dh).unwrap().1;
+        let sec = x25519_dh(&rcv_ntf_dh.secret, &x25519_public(srv_raw));
+        let mut got_n = false;
+        for _ in 0..50 {
+            let rb = read_block(&mut stream).expect("recv NTF block");
+            for w in decode_block(&rb).unwrap() {
+                let t = decode_transmission(&w).unwrap();
+                if let BrokerMsg::Nmsg { nonce, enc_meta } = parse_broker(&t.command).unwrap() {
+                    match decrypt_for_recipient(&sec, &nonce, &enc_meta) {
+                        Some(pt) => println!("NMSG meta decrypted OK: {}B {:02x?}...", pt.len(), &pt[..pt.len().min(24)]),
+                        None => println!("NMSG meta decrypt FAILED"),
+                    }
+                    got_n = true;
+                }
+            }
+            if got_n { break; }
+        }
+        assert!(got_n, "no NMSG received");
+        println!("LIVE SMP NTF OK: NKEY/NID, NSUB/SOK, SEND->NMSG decrypted");
+    }
     println!("DEL -> {:?}", request(&mut stream, &sid, Command::Del, rcv_id.clone(), Some(&rcv_auth)));
     println!("LIVE SMP FULL ROUND-TRIP OK: NEW/SUB/SEND/MSG/ACK/DEL against {}", addr);
 }
