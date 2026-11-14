@@ -174,8 +174,9 @@ fn tls_x25519_box_auth_roundtrip() {
 #[test]
 fn session_binding_rejects_nonempty_sid() {
     use smp_rs::client::check_session_binding;
+    // v0.26: non-empty sessionId (TLS 1.3 Finished) is valid; assertion vs tls-unique happens in handshake
     assert!(check_session_binding(b"").is_ok());
-    assert!(check_session_binding(b"tls-unique-value").is_err());
+    assert!(check_session_binding(b"tls-finished-32B-value............").is_ok());
 }
 
 #[test]
