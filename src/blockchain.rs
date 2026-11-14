@@ -9,6 +9,7 @@ use aead::{Aead, KeyInit};
 use hkdf::Hkdf;
 use sha2::Sha512;
 use xsalsa20poly1305::{Key, Nonce, XSalsa20Poly1305};
+use std::io::{Read, Write};
 
 pub const BLOCK_SIZE: usize = 16384;
 pub const TAG_SIZE: usize = 16;
@@ -82,6 +83,22 @@ pub fn decrypt_block(ck: &[u8; 32], block: &[u8]) -> Result<([u8; 32], Vec<u8>),
     Ok((ck2, unpad(pt)))
 }
 
+/// Wire-level strict block I/O: on the wire a strict block is exactly BLOCK_SIZE ciphertext (no u16 prefix).
+pub fn write_block_encrypted<W: Write>(w: &mut W, ck: &mut [u8; 32], encoded_block: &[u8]) -> std::io::Result<()> {
+    let (next, ct) = encrypt_block(ck, encoded_block);
+    *ck = next;
+    w.write_all(&ct)?;
+    w.flush()
+}
+
+pub fn read_block_encrypted<R: Read>(r: &mut R, ck: &mut [u8; 32]) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    r.read_exact(&mut buf)?;
+    let (next, pt) = decrypt_block(ck, &buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    *ck = next;
+    Ok(pt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +132,32 @@ mod tests {
         assert_ne!(ck2, a);
         assert_eq!(key.len(), 32);
         assert_eq!(nonce.len(), 24);
+    }
+
+    #[test]
+    fn strict_block_io_over_tcp() {
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let (c0, _) = sbc_init(b"sid", b"secret");
+            let mut ck = c0;
+            let a = read_block_encrypted(&mut s, &mut ck).unwrap();
+            let b = read_block_encrypted(&mut s, &mut ck).unwrap();
+            write_block_encrypted(&mut s, &mut ck, b"PONG").unwrap();
+            (a, b)
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        let (c0, _) = sbc_init(b"sid", b"secret");
+        let mut ck = c0;
+        write_block_encrypted(&mut c, &mut ck, b"PING-1").unwrap();
+        write_block_encrypted(&mut c, &mut ck, b"PING-2").unwrap();
+        let pong = read_block_encrypted(&mut c, &mut ck).unwrap();
+        let (a, b) = h.join().unwrap();
+        assert_eq!(a, b"PING-1");
+        assert_eq!(b, b"PING-2");
+        assert_eq!(pong, b"PONG");
     }
 }

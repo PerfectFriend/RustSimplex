@@ -186,3 +186,7 @@ cargo clippy --all-targets         # 0 ошибок
 ## 19. v0.37 — strict v23 block-chain primitive (2026-11-14)
 - Added `src/blockchain.rs`: HKDF-SHA512 chain exactly per simplexmq (`sbcInit` info `SimpleXSbChainInit` 64B; `sbcHkdf` info `SimpleXSbChain` 88B = ck'32|key32|nonce24), XSalsa20-Poly1305 secretbox over `'#'`-padded block (`blockSize-16` + 16B tag = 16384). Unit tests: chain advance, round-trip, tag failure on wrong chain. Suite now **51/51**, clippy 0 errors.
 - Public relay with empty `authPubKey` still runs plaintext v17..v23 (verified matrix); this module is the strict path for relays/servers that enable `encryptBlock` at v>=`encryptedBlockSMPVersion`.
+
+
+## 20. v0.38 — strict block wire I/O integrated (2026-11-14)
+- `blockchain.rs` now has generic wire helpers `write_block_encrypted`/`read_block_encrypted`: strict wire block = exactly 16384B ciphertext, no u16 prefix; chain advances per block. Added TCP loopback test (PING-1/PING-2 -> PONG). Suite **52/52**, clippy 0 errors.
