@@ -83,16 +83,14 @@ pub fn client_hello_block_key(version: u16, key_hash: &[u8], proxy: bool, auth_p
             w_short(&mut c, k)?;
         }
         None => {
-            if version < 7 {
-                w_short(&mut c, &[])?;
-            }
+            c.push(b'0'); // authPubKey = Nothing (Maybe tag, all versions)
         }
     }
-    if version >= 14 {
-        w_bool(&mut c, proxy);
-    }
+    // v0.26: SMP clients MUST send authPubKey (X25519) — agreeSecret=True in defaultSMPClientConfig
+    // proxyServer :: Bool — 'T'/'F' chars at ALL versions (v14+ gate was wrong)
+    c.push(if proxy { b'T' } else { b'F' });
     if version >= 16 {
-        c.push(b'0');
+        c.push(b'0'); // clientService = Nothing (ifHasService v>=16)
     }
     pad(&c, BLOCK_SIZE)
 }

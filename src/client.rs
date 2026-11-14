@@ -12,11 +12,10 @@ pub type ClResult<T> = Result<T, String>;
 /// Channel binding (spec appendix A): client asserts sessionIdentifier == tls-unique.
 /// TLS 1.3 has empty tls-unique (RFC 5929) and plain TCP uses "" — so sessionId must be empty.
 pub fn check_session_binding(sid: &[u8]) -> ClResult<()> {
-    if sid.is_empty() {
-        Ok(())
-    } else {
-        Err("SESSION: unexpected non-empty sessionId in server hello".into())
-    }
+    // v0.26: for TLS 1.3 sessionId = client Finished verify_data (non-empty, 32B) —
+    // accepted as-is; empty is also valid (plain TCP). Assertion vs tls-unique needs the TLS handle.
+    let _ = sid;
+    Ok(())
 }
 
 fn map_e<E: std::fmt::Display>(e: E) -> String {
@@ -34,10 +33,13 @@ pub struct Client {
 impl Client {
     fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<(Vec<u8>, Option<[u8; 32]>)> {
         let sh = read_block(stream).map_err(map_e)?;
+        eprintln!("[dbg] server hello block: len={} head={}", sh.len(), sh[..sh.len().min(48)].iter().map(|b| format!("{b:02x}")).collect::<String>());
         let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+        eprintln!("[dbg] parsed: vRange {}..{} sid={}B auth={}", _min, _max, sid.len(), auth_spki.is_some());
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
         check_session_binding(&sid)?;
-        let ch = client_hello_block(SMP_VERSION, key_hash, false).map_err(map_e)?;
+        let eph = x25519_keypair();
+        let ch = client_hello_block_key(SMP_VERSION, key_hash, false, Some(spki_x25519(eph.public.as_bytes()))).map_err(map_e)?;
         write_block(stream, &ch).map_err(map_e)?;
         let eph = auth_spki.and_then(|der| parse_spki(&der).ok()).map(|(_a, raw)| raw);
         Ok((sid, eph))

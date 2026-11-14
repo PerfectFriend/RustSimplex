@@ -11,7 +11,7 @@
 use crate::crypto::*;
 use crate::encoding::*;
 
-pub const SMP_VERSION: u16 = 17;
+pub const SMP_VERSION: u16 = 23; // currentServerSMPRelayVersion (server range 15..23)
 pub const MAX_RCV_MSG_LEN: usize = 16104; // MaxMessageLen(16088) + 16
 
 #[derive(Debug, Clone)]
