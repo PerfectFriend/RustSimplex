@@ -173,3 +173,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 16. v0.34 — live version matrix on public SMP relay (2026-11-14)
 - `scripts/live_public_smp.sh` now runs the full round-trip for SMP v17..v23 against `smp11.simplex.im:5223`. Result: **v17, v18, v19, v20, v21, v22, v23 → FULL ROUND-TRIP OK**; v15/v16 are rejected by the relay handshake (expected: pre-v17 clientHello differs). NTF/proxy probes stay off on public relay; both are covered by local tests (ntf.rs, proxy.rs), total 49/49.
+
+
+## 17. v0.35 — combined live interop harness (2026-11-14)
+- `scripts/live_interop.sh`: SMP v17..v23 full round-trip matrix on `smp11.simplex.im:5223` is a hard assert; XFTP v4 on `xftp1.simplex.im:443` hard-asserts transport `PONG`, and reports `FNEW(SIDS)/FPUT(64KB)->OK` when the public relay accepts them (they were verified live in v0.25; current runs are entitlement-dependent). Latest default run passed; suite 49/49.
