@@ -161,3 +161,7 @@ cargo clippy --all-targets         # 0 ошибок
 ## 13. v0.29 — public relay negotiated at v23 (2026-11-14)
 - Same openssl+SNI+port 5223 path, but clientHello **v23 with authPubKey EMPTY** is accepted and the full plaintext round-trip still works: PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG decrypted, ACK→OK, DEL→OK. (authPubKey=Just Large-SPKI is rejected by the public relay; empty is the working form.)
 - `smp-v71` default version is now 23 (`SMP_V` override). Tests 49/49, clippy 0 errors.
+
+
+## 14. v0.32 — live public SMP regression harness (2026-11-14)
+- Added `scripts/live_public_smp.sh`: builds `smp-v71` if needed and asserts `LIVE SMP FULL ROUND-TRIP OK` on `smp11.simplex.im:5223` (v23, NTF probe off). NTF on the public relay remains disabled server-side (`NKEY→OK`, empty `serverNtfCreds`); NTF crypto is covered locally by `tests/ntf.rs` (49/49).
