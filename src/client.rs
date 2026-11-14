@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use crate::blockchain::{read_block_encrypted, strict_keys, write_block_encrypted};
 use crate::crypto::*;
 use crate::encoding::{pad, unpad};
 use crate::protocol::*;
@@ -25,6 +26,9 @@ fn map_e<E: std::fmt::Display>(e: E) -> String {
 pub struct Client {
     stream: BoxStream,
     session_id: Vec<u8>,
+    /// strict v23 block-chain keys (Some => encryptBlock enabled); client side is swapped vs server
+    strict_snd: Option<[u8; 32]>,
+    strict_rcv: Option<[u8; 32]>,
     pub server_key_hash: Vec<u8>,
     /// per-connection ephemeral X25519 pub from server hello (authPubKey), used for box auth
     pub server_eph_pub: Option<[u8; 32]>,
@@ -48,7 +52,7 @@ impl Client {
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
         let (sid, eph) = Self::handshake(&mut s, key_hash)?;
-        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+        Ok(Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
@@ -60,7 +64,14 @@ impl Client {
     pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
         let mut s = connect_tls_sni(addr, host, key_hash, with_sni).map_err(map_e)?;
         let (sid, eph) = Self::handshake(&mut s, &key_hash)?;
-        Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+        Ok(Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+    }
+
+    /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
+    pub fn enable_strict(&mut self, dh_secret: &[u8; 32]) {
+        let (snd, rcv) = strict_keys(&self.session_id, dh_secret, true);
+        self.strict_snd = Some(snd);
+        self.strict_rcv = Some(rcv);
     }
 
     /// X25519 box-auth shared secret for a queue whose auth key is `qauth_kp`:
@@ -82,8 +93,13 @@ impl Client {
             auth_sign(&self.session_id, &mut t, kp).map_err(map_e)?;
         }
         let wire = encode_transmission(&t).map_err(map_e)?;
-        let blk = encode_block(&[wire]).map_err(map_e)?;
-        write_block(&mut self.stream, &blk).map_err(map_e)?;
+        if let Some(snd) = self.strict_snd.as_mut() {
+            let raw = encode_block_raw(&[wire]).map_err(map_e)?;
+            write_block_encrypted(&mut self.stream, snd, &raw).map_err(map_e)?;
+        } else {
+            let blk = encode_block(&[wire]).map_err(map_e)?;
+            write_block(&mut self.stream, &blk).map_err(map_e)?;
+        }
         self.recv_block()
     }
 
@@ -98,14 +114,23 @@ impl Client {
         };
         auth_box(&self.session_id, &mut t, dh_secret).map_err(map_e)?;
         let wire = encode_transmission(&t).map_err(map_e)?;
-        let blk = encode_block(&[wire]).map_err(map_e)?;
-        write_block(&mut self.stream, &blk).map_err(map_e)?;
+        if let Some(snd) = self.strict_snd.as_mut() {
+            let raw = encode_block_raw(&[wire]).map_err(map_e)?;
+            write_block_encrypted(&mut self.stream, snd, &raw).map_err(map_e)?;
+        } else {
+            let blk = encode_block(&[wire]).map_err(map_e)?;
+            write_block(&mut self.stream, &blk).map_err(map_e)?;
+        }
         self.recv_block()
     }
 
     /// Read one block and parse all broker messages in it (responses + pushed MSG).
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
-        let rb = read_block(&mut self.stream).map_err(map_e)?;
+        let rb = if let Some(rcv) = self.strict_rcv.as_mut() {
+            read_block_encrypted(&mut self.stream, rcv).map_err(map_e)?
+        } else {
+            read_block(&mut self.stream).map_err(map_e)?
+        };
         if let Ok(path) = std::env::var("SMP_DUMP_RAW") {
             use std::io::Write;
             let p = if path.is_empty() || path == "1" {
@@ -117,7 +142,7 @@ impl Client {
                 let _ = writeln!(f, "{}", rb.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
         }
-        let wires = decode_block(&rb).map_err(map_e)?;
+        let wires = if self.strict_rcv.is_some() { decode_block_raw(&rb).map_err(map_e)? } else { decode_block(&rb).map_err(map_e)? };
         let mut out = Vec::new();
         for w in wires {
             let t = decode_transmission(&w).map_err(map_e)?;
@@ -185,5 +210,27 @@ impl Client {
             }
         }
         Ok(msgs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enable_strict_sets_swapped_client_chain_keys() {
+        let mut c = Client {
+            stream: Box::new(std::io::Cursor::new(Vec::new())),
+            session_id: b"sid".to_vec(),
+            strict_snd: None,
+            strict_rcv: None,
+            server_key_hash: vec![],
+            server_eph_pub: None,
+        };
+        let secret = [7u8; 32];
+        c.enable_strict(&secret);
+        let (a, b) = crate::blockchain::sbc_init(b"sid", &secret);
+        assert_eq!(c.strict_snd.unwrap(), b);
+        assert_eq!(c.strict_rcv.unwrap(), a);
     }
 }

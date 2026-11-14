@@ -194,3 +194,8 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 21. v0.39 — strict directional chain keys (2026-11-14)
 - `blockchain::strict_keys(sessionId, dhSecret, client)`: server snd/rcv = (a,b), client swapped to (b,a), matching Haskell `swap` in `smpTHandleClient`. Test `strict_keys_swap_for_client` pins the swap. Suite **53/53**, clippy 0 errors.
+
+
+## 22. v0.40 — client strict block mode integrated (2026-11-14)
+- `protocol`: `encode_block_raw` / `decode_block_raw` for strict plaintext block content (count + large transmissions, unpadded).
+- `client::Client` gained `strict_snd/strict_rcv` + `enable_strict(dh_secret)` (uses `strict_keys(..., client=true)`); `request/request_box/recv_block` switch to `write/read_block_encrypted` when set. Unit test pins swapped client chain keys. Suite **54/54**, clippy 0 errors.

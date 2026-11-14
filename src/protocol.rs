@@ -479,6 +479,30 @@ pub fn encode_block(transmissions: &[Vec<u8>]) -> Result<Vec<u8>, EncodeError> {
     pad(&content, BLOCK_SIZE)
 }
 
+/// Unpadded block content (count + large transmissions) — used as plaintext input for strict block encryption.
+pub fn encode_block_raw(transmissions: &[Vec<u8>]) -> Result<Vec<u8>, EncodeError> {
+    if transmissions.is_empty() || transmissions.len() > 255 {
+        return Err(EncodeError("bad transmission count".into()));
+    }
+    let mut content = Vec::new();
+    content.push(transmissions.len() as u8);
+    for t in transmissions {
+        w_large(&mut content, t)?;
+    }
+    Ok(content)
+}
+
+/// Decode strict (decrypted, unpadded) block content into wire-transmissions.
+pub fn decode_block_raw(content: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+    let mut r = Reader::new(content);
+    let count = r.u8()? as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        out.push(r.large()?);
+    }
+    Ok(out)
+}
+
 /// Decode a 16384-byte block into wire-transmissions.
 pub fn decode_block(block: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
     if block.len() != BLOCK_SIZE {
