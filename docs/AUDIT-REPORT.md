@@ -177,3 +177,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 17. v0.35 — combined live interop harness (2026-11-14)
 - `scripts/live_interop.sh`: SMP v17..v23 full round-trip matrix on `smp11.simplex.im:5223` is a hard assert; XFTP v4 on `xftp1.simplex.im:443` hard-asserts transport `PONG`, and reports `FNEW(SIDS)/FPUT(64KB)->OK` when the public relay accepts them (they were verified live in v0.25; current runs are entitlement-dependent). Latest default run passed; suite 49/49.
+
+
+## 18. v0.36 — check gate (2026-11-14)
+- `scripts/check.sh` = `cargo test --offline` + `clippy` + optional `scripts/live_interop.sh` (`SKIP_LIVE=1` for offline). Strict v23 block-chain (XSalsa20-Poly1305 `SbChainKey` via `sbcInit/sbcHkdf`, sessionId+DH secret) is identified as the remaining spec piece; public relay does not require it with empty authPubKey, so it stays out of the live gate until the crypto crate is vendored.
