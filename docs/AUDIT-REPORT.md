@@ -181,3 +181,8 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 18. v0.36 — check gate (2026-11-14)
 - `scripts/check.sh` = `cargo test --offline` + `clippy` + optional `scripts/live_interop.sh` (`SKIP_LIVE=1` for offline). Strict v23 block-chain (XSalsa20-Poly1305 `SbChainKey` via `sbcInit/sbcHkdf`, sessionId+DH secret) is identified as the remaining spec piece; public relay does not require it with empty authPubKey, so it stays out of the live gate until the crypto crate is vendored.
+
+
+## 19. v0.37 — strict v23 block-chain primitive (2026-11-14)
+- Added `src/blockchain.rs`: HKDF-SHA512 chain exactly per simplexmq (`sbcInit` info `SimpleXSbChainInit` 64B; `sbcHkdf` info `SimpleXSbChain` 88B = ck'32|key32|nonce24), XSalsa20-Poly1305 secretbox over `'#'`-padded block (`blockSize-16` + 16B tag = 16384). Unit tests: chain advance, round-trip, tag failure on wrong chain. Suite now **51/51**, clippy 0 errors.
+- Public relay with empty `authPubKey` still runs plaintext v17..v23 (verified matrix); this module is the strict path for relays/servers that enable `encryptBlock` at v>=`encryptedBlockSMPVersion`.
