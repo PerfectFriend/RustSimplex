@@ -83,6 +83,12 @@ pub fn decrypt_block(ck: &[u8; 32], block: &[u8]) -> Result<([u8; 32], Vec<u8>),
     Ok((ck2, unpad(pt)))
 }
 
+/// Derive directional chain keys. Server: snd=a, rcv=b. Client: swapped (Haskell `swap` in smpTHandleClient).
+pub fn strict_keys(session_id: &[u8], secret: &[u8], client: bool) -> ([u8; 32], [u8; 32]) {
+    let (a, b) = sbc_init(session_id, secret);
+    if client { (b, a) } else { (a, b) }
+}
+
 /// Wire-level strict block I/O: on the wire a strict block is exactly BLOCK_SIZE ciphertext (no u16 prefix).
 pub fn write_block_encrypted<W: Write>(w: &mut W, ck: &mut [u8; 32], encoded_block: &[u8]) -> std::io::Result<()> {
     let (next, ct) = encrypt_block(ck, encoded_block);
@@ -132,6 +138,15 @@ mod tests {
         assert_ne!(ck2, a);
         assert_eq!(key.len(), 32);
         assert_eq!(nonce.len(), 24);
+    }
+
+    #[test]
+    fn strict_keys_swap_for_client() {
+        let (sa, sb) = strict_keys(b"sid", b"secret", false);
+        let (ca, cb) = strict_keys(b"sid", b"secret", true);
+        assert_eq!(sa, cb);
+        assert_eq!(sb, ca);
+        assert_ne!(sa, sb);
     }
 
     #[test]

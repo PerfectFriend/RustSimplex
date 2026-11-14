@@ -190,3 +190,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 20. v0.38 — strict block wire I/O integrated (2026-11-14)
 - `blockchain.rs` now has generic wire helpers `write_block_encrypted`/`read_block_encrypted`: strict wire block = exactly 16384B ciphertext, no u16 prefix; chain advances per block. Added TCP loopback test (PING-1/PING-2 -> PONG). Suite **52/52**, clippy 0 errors.
+
+
+## 21. v0.39 — strict directional chain keys (2026-11-14)
+- `blockchain::strict_keys(sessionId, dhSecret, client)`: server snd/rcv = (a,b), client swapped to (b,a), matching Haskell `swap` in `smpTHandleClient`. Test `strict_keys_swap_for_client` pins the swap. Suite **53/53**, clippy 0 errors.
