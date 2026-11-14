@@ -156,3 +156,8 @@ cargo clippy --all-targets         # 0 ошибок
 - Same v17 path as v0.27 (openssl+SNI+TLS1.3+ed448, port 5223, short CA keyHash, empty authPubKey, plaintext blocks).
 - Verified live in one connection: `NEW -> IDS`, `SUB -> SOK`, `SEND -> MSG pushed`, `MSG decrypted` (body byte-equal `hello public simplex relay`), `ACK -> OK`, `DEL -> OK`.
 - `smp-v71` prints `LIVE SMP FULL ROUND-TRIP OK`. Tests: 49/49 green; clippy: 0 errors.
+
+
+## 13. v0.29 — public relay negotiated at v23 (2026-11-14)
+- Same openssl+SNI+port 5223 path, but clientHello **v23 with authPubKey EMPTY** is accepted and the full plaintext round-trip still works: PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG decrypted, ACK→OK, DEL→OK. (authPubKey=Just Large-SPKI is rejected by the public relay; empty is the working form.)
+- `smp-v71` default version is now 23 (`SMP_V` override). Tests 49/49, clippy 0 errors.

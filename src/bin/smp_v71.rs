@@ -208,13 +208,16 @@ fn main() {
     println!("sid == client Finished: {}", sid == finished);
 
     // clientHello v23
-    let _eph = x25519_keypair();
-    let v: u16 = std::env::var("SMP_V").ok().and_then(|s| s.parse().ok()).unwrap_or(17);
+    let eph = x25519_keypair();
+    let v: u16 = std::env::var("SMP_V").ok().and_then(|s| s.parse().ok()).unwrap_or(23);
     let mut c = Vec::new();
     w_u16(&mut c, v);
     w_short(&mut c, &key_hash32).unwrap();
     // v>=7 authPubKey = `maybe "" smpEncode authPubKey` — Just is the SPKI shortString with NO '0'/'1' Maybe tag
-    // probe-verified: v17 clientHello sends authPubKey = EMPTY (zero bytes, v>=7)
+    // v17 public relay: authPubKey EMPTY. v23 experiment: SMP_AUTH=1 -> Just = Large(SPKI DER), no Maybe tag
+    if std::env::var("SMP_AUTH").as_deref() == Ok("1") {
+        w_large(&mut c, &spki_x25519(&eph.public.to_bytes())).unwrap();
+    }
     c.push(b'F'); // proxyServer = False
     c.push(b'0'); // clientService = Nothing (v>=16)
     // hello blocks: pad() itself prepends word16BE(len) — do NOT add another prefix
