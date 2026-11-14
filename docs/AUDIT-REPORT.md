@@ -135,3 +135,10 @@ cargo clippy --all-targets         # 0 ошибок
 8. **v0.24 — PQDR skipped message keys across DH epochs: ✅ (2026-11-13)**: out-of-order
    доставка из предыдущей эпохи (skipped keys keyed by old DH pub), replay отклоняется,
    `skip_message_keys` tolerates `ckr=None`. 49/49 green, clippy 0.
+
+9. **v0.25 — LIVE interop with public XFTP relay xftp1.simplex.im (v7.1, protocol v4): ✅ (2026-11-13)**:
+   root causes fixed vs earlier probes — (a) no SNI (relay serves web cert on SNI and answers ERR SESSION
+   otherwise), (b) handshake order empty-POST -> serverHello -> clientHello, (c) sessionId = client TLS
+   Finished (48B) via openssl, asserted equal to serverHello sessionId, (d) keyHash = SHA-256 of relay CA
+   cert DER, (e) negotiated v4 with entitlementProof '0'. Verified live: PING->PONG, FNEW->SIDS,
+   FPUT(64KB)->OK. Suite 49/49 green, clippy 0. Bin: src/bin/xftp_h2_v71.rs.
