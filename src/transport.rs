@@ -242,17 +242,28 @@ impl ServerCertVerifier for PinVerifier {
         )
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // v0.26: no-SNI public relay may serve an ECDSA/RSA cert — widen schemes
         vec![
             SignatureScheme::ED25519,
+            SignatureScheme::ED448,
             SignatureScheme::ECDSA_NISTP256_SHA256,
             SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
             SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
             SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
         ]
     }
 }
 
 pub fn tls_client_config(key_hash: [u8; 32]) -> Arc<ClientConfig> {
+    // v0.26: match simplexmq defaultSupportedParams — CHACHA20-POLY1305 for TLS1.3,
+    // groups X448+X25519 (no-SNI public relay otherwise answers HandshakeFailure)
+    // v0.26: default aws-lc-rs suites work with the public relay (verified via openssl/python:
+    // no-SNI + ALPN smp/1 negotiates TLS_AES_256_GCM_SHA384) — keep provider defaults.
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -281,10 +292,25 @@ pub fn accept_plain(listener: &TcpListener) -> std::io::Result<BoxStream> {
 
 /// Connect over TLS 1.3 to a router, pinning `key_hash`. Client socket stays blocking.
 pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> std::io::Result<BoxStream> {
+    connect_tls_sni(addr, host, key_hash, true)
+}
+
+/// v0.26: `with_sni=false` connects WITHOUT SNI — public simplex relays serve the HTTPS/web
+/// cert on SNI and route those connections to the web handler; no-SNI gets the SMP cert.
+pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<BoxStream> {
     let tcp = TcpStream::connect(addr)?;
-    let name = ServerName::try_from(host.to_string())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let conn = ClientConnection::new(tls_client_config(key_hash), name)
+    let name = if with_sni {
+        ServerName::try_from(host.to_string())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    } else {
+        ServerName::try_from("localhost".to_string())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    };
+    let mut cfg = (*tls_client_config(key_hash)).clone();
+    if !with_sni {
+        cfg.enable_sni = false;
+    }
+    let conn = ClientConnection::new(Arc::new(cfg), name)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Box::new(StreamOwned::new(conn, tcp)))
 }

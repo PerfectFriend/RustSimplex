@@ -24,6 +24,7 @@ fn b64url_dec(s: &str) -> Result<Vec<u8>, String> {
     for c in s.bytes() {
         let v = tbl[c as usize];
         if v == 0xff {
+            if c == b'=' { break; }  // tolerate padding
             return Err(format!("bad b64 char {c}"));
         }
         acc = (acc << 6) | v as u32;
@@ -43,7 +44,7 @@ fn main() {
         let kh = b64url_dec(&args[2]).expect("keyHash b64");
         let kh32: [u8; 32] = kh.try_into().expect("keyHash 32 bytes");
         let addr: SocketAddr = args[3].parse().expect("host:port");
-        (Client::connect_tls(addr, &host, kh32).expect("connect_tls"), kh32)
+        (Client::connect_tls_sni(addr, &host, kh32, false).expect("connect_tls no-SNI"), kh32)
     } else {
         let addr: SocketAddr = args[0].parse().expect("host:port");
         let kh = [0xABu8; 32];
@@ -124,7 +125,7 @@ fn main() {
     // optional NTF interop demo (SMP_DEMO_NTF=1): NKEY -> NID, NSUB on 2nd conn, SEND(notify) -> NMSG
     if std::env::var("SMP_DEMO_NTF").is_ok() {
         let mut c2 = if args.first().map(|a| a == "--tls").unwrap_or(false) {
-            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("c2 connect_tls")
+            Client::connect_tls_sni(args[3].parse().unwrap(), &args[1], key_hash, false).expect("c2 connect_tls no-SNI")
         } else {
             Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("c2 connect_plain")
         };
@@ -167,7 +168,7 @@ fn main() {
         };
         // second connection as notifier: NSUB signed with ntf key
         let mut ntf_conn = if args.first().map(|a| a == "--tls").unwrap_or(false) {
-            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("ntf connect_tls")
+            Client::connect_tls_sni(args[3].parse().unwrap(), &args[1], key_hash, false).expect("ntf connect_tls no-SNI")
         } else {
             Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("ntf connect_plain")
         };
@@ -207,7 +208,7 @@ fn main() {
         let desc_text = desc.encode();
         let desc2 = FileDesc::decode(&desc_text).expect("desc decode");
         let mut c3 = if args.first().map(|a| a == "--tls").unwrap_or(false) {
-            Client::connect_tls(args[3].parse().unwrap(), &args[1], key_hash).expect("c3 connect_tls")
+            Client::connect_tls_sni(args[3].parse().unwrap(), &args[1], key_hash, false).expect("c3 connect_tls no-SNI")
         } else {
             Client::connect_plain(args[0].parse().unwrap(), &[0xABu8; 32]).expect("c3 connect_plain")
         };

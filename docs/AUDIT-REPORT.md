@@ -142,3 +142,11 @@ cargo clippy --all-targets         # 0 ошибок
    Finished (48B) via openssl, asserted equal to serverHello sessionId, (d) keyHash = SHA-256 of relay CA
    cert DER, (e) negotiated v4 with entitlementProof '0'. Verified live: PING->PONG, FNEW->SIDS,
    FPUT(64KB)->OK. Suite 49/49 green, clippy 0. Bin: src/bin/xftp_h2_v71.rs.
+
+
+## 11. v0.27 — LIVE SMP interop with public relay smp11.simplex.im:5223 (simplexmq v7.1, verified 2026-11-14)
+- Real SMP port is **5223** (443 = CDN/web). TLS1.3 + ALPN `smp/1` + sigalgs incl. ed448 + **SNI** on 5223 serves the SMP chain; sessionId = client TLS Finished (32B, asserted equal to serverHello).
+- Working clientHello for the public relay is **v17**: `u16 v | short(keyHash=CA sha256) | authPubKey EMPTY (zero bytes) | 'F' | '0'`; `pad()` already prepends the u16 block length. At v17 there is **no transport block encryption**; plaintext PING → PONG verified live.
+- Client: `src/bin/smp_v71.rs` (bin `smp-v71`). Live output: `response: Pong` / `LIVE SMP INTEROP OK: PING -> PONG against 23.128.248.121:5223`.
+- `cargo test --offline -- --test-threads=1` → 49/49 green; `cargo clippy --offline --all-targets` → 0 errors.
+- Prior rustls no-SNI path remains for 443 probes but public-relay live path uses openssl+SNI+5223+v17.

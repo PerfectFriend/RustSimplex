@@ -52,7 +52,13 @@ impl Client {
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
-        let mut s = connect_tls(addr, host, key_hash).map_err(map_e)?;
+        Self::connect_tls_sni(addr, host, key_hash, true)
+    }
+
+    /// v0.26: with_sni=false — public relays route SNI connections to the web handler;
+    /// no-SNI gets the SMP protocol cert (same trick as XFTP v0.25).
+    pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
+        let mut s = connect_tls_sni(addr, host, key_hash, with_sni).map_err(map_e)?;
         let (sid, eph) = Self::handshake(&mut s, &key_hash)?;
         Ok(Client { stream: s, session_id: sid, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
     }
