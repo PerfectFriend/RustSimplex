@@ -169,3 +169,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 15. v0.33 — public relay PRXY probe (2026-11-14)
 - `SMP_PROXY=1` sends `PRXY host port` right after clientHello to `smp11:5223`: relay answers `ERR CMD SYNTAX` (proxy path not enabled/accepted there). Local proxy chain `PRXY→PKEY→PFWD/RFWD→PRES/RRES→IDS/MSG` remains green in `tests/proxy.rs` (49/49 total).
+
+
+## 16. v0.34 — live version matrix on public SMP relay (2026-11-14)
+- `scripts/live_public_smp.sh` now runs the full round-trip for SMP v17..v23 against `smp11.simplex.im:5223`. Result: **v17, v18, v19, v20, v21, v22, v23 → FULL ROUND-TRIP OK**; v15/v16 are rejected by the relay handshake (expected: pre-v17 clientHello differs). NTF/proxy probes stay off on public relay; both are covered by local tests (ntf.rs, proxy.rs), total 49/49.
