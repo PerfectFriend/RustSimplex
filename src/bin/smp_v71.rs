@@ -249,16 +249,27 @@ fn main() {
     // full queue round-trip on the same public connection
     let rcv_auth = ed25519_keypair();
     let rcv_dh = x25519_keypair();
+    let ntf_on = std::env::var("SMP_NTF").as_deref() == Ok("1");
+    let ntf_auth = ed25519_keypair();
+    let rcv_ntf_dh = x25519_keypair();
+    let ntf_creds = if ntf_on {
+        let mut b = Vec::new();
+        w_short(&mut b, &spki_ed25519(&ntf_auth.verifying.to_bytes())).unwrap();
+        w_short(&mut b, &spki_x25519(&rcv_ntf_dh.public.to_bytes())).unwrap();
+        Some(b)
+    } else {
+        None
+    };
     let new = request(&mut stream, &sid, Command::New {
         rcv_auth_key: spki_ed25519(&rcv_auth.verifying.to_bytes()),
         rcv_dh_key: spki_x25519(&rcv_dh.public.to_bytes()),
         basic_auth: None,
         sub_mode: b'S',
         queue_req_data: None,
-        ntf_creds: None,
+        ntf_creds,
     }, vec![], Some(&rcv_auth));
-    let (rcv_id, snd_id, srv_dh_der) = match &new[0] {
-        BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, .. } => (rcv_id.clone(), snd_id.clone(), rcv_dh_key.clone()),
+    let (rcv_id, snd_id, srv_dh_der, ids_ntf) = match &new[0] {
+        BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, ntf_creds, .. } => (rcv_id.clone(), snd_id.clone(), rcv_dh_key.clone(), ntf_creds.clone()),
         other => panic!("expected IDS, got {other:?}"),
     };
     println!("NEW -> IDS rcv_id={} snd_id={}", b64url_nopad(&rcv_id), b64url_nopad(&snd_id));
@@ -292,18 +303,13 @@ fn main() {
     assert_eq!(rcv_body, body.as_slice(), "decrypted rcv body mismatch");
     println!("ACK -> {:?}", request(&mut stream, &sid, Command::Ack(msg_id.to_vec()), rcv_id.clone(), Some(&rcv_auth)));
     // NTF chain on the same public connection: NKEY -> NID, NSUB -> SOK, SEND(notify) -> NMSG decrypted
-    if std::env::var("SMP_NTF").as_deref() == Ok("1") {
-        let ntf_auth = ed25519_keypair();
-        let rcv_ntf_dh = x25519_keypair();
-        let nkey = request(&mut stream, &sid, Command::Nkey {
-            ntf_key: spki_ed25519(&ntf_auth.verifying.to_bytes()),
-            rcv_ntf_dh_key: spki_x25519(&rcv_ntf_dh.public.to_bytes()),
-        }, rcv_id.clone(), Some(&rcv_auth));
-        println!("NKEY -> {:?}", nkey);
-        let (ntf_id, srv_ntf_dh) = match &nkey[0] {
-            BrokerMsg::Nid { ntf_id, srv_ntf_dh } => (ntf_id.clone(), srv_ntf_dh.clone()),
-            other => panic!("expected NID, got {other:?}"),
-        };
+    if ntf_on {
+        // v>=17: notifier creds come back inside IDS (serverNtfCreds), NKEY is optional/OK
+        let blob = ids_ntf.as_ref().expect("IDS must carry serverNtfCreds when NEW had ntfCreds");
+        let mut rr = Reader::new(blob);
+        let ntf_id = rr.short().expect("ntf id");
+        let srv_ntf_dh = rr.short().expect("srv ntf dh");
+        println!("IDS serverNtfCreds: ntf_id={} srvNtfDh={}B", b64url_nopad(&ntf_id), srv_ntf_dh.len());
         let nsub = request(&mut stream, &sid, Command::Nsub, ntf_id.clone(), Some(&ntf_auth));
         println!("NSUB -> {:?}", nsub);
         let s2 = request(&mut stream, &sid, Command::Send { flags: true, body: b"ntf probe".to_vec() }, snd_id.clone(), None);

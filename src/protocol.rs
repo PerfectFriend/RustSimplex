@@ -99,7 +99,11 @@ pub fn encode_command(c: &Command) -> Result<Vec<u8>, EncodeError> {
             w_maybe(&mut o, basic_auth.as_deref())?;
             o.push(*sub_mode);
             w_maybe(&mut o, queue_req_data.as_deref())?;
-            w_maybe(&mut o, ntf_creds.as_deref())?;
+            // v>=17 ntfCreds = Maybe NewNtfCreds; Some carries the pre-encoded Large(auth SPKI)+Large(dh SPKI)
+            match ntf_creds {
+                None => o.push(b'0'),
+                Some(blob) => { o.push(b'1'); o.extend_from_slice(blob); }
+            }
         }
         Command::Sub => o.extend_from_slice(b"SUB"),
         Command::Key(k) => { o.extend_from_slice(b"KEY "); w_short(&mut o, k)?; }
