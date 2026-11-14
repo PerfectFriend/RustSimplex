@@ -150,3 +150,9 @@ cargo clippy --all-targets         # 0 ошибок
 - Client: `src/bin/smp_v71.rs` (bin `smp-v71`). Live output: `response: Pong` / `LIVE SMP INTEROP OK: PING -> PONG against 23.128.248.121:5223`.
 - `cargo test --offline -- --test-threads=1` → 49/49 green; `cargo clippy --offline --all-targets` → 0 errors.
 - Prior rustls no-SNI path remains for 443 probes but public-relay live path uses openssl+SNI+5223+v17.
+
+
+## 12. v0.28 — FULL live SMP round-trip on public relay smp11.simplex.im:5223 (2026-11-14)
+- Same v17 path as v0.27 (openssl+SNI+TLS1.3+ed448, port 5223, short CA keyHash, empty authPubKey, plaintext blocks).
+- Verified live in one connection: `NEW -> IDS`, `SUB -> SOK`, `SEND -> MSG pushed`, `MSG decrypted` (body byte-equal `hello public simplex relay`), `ACK -> OK`, `DEL -> OK`.
+- `smp-v71` prints `LIVE SMP FULL ROUND-TRIP OK`. Tests: 49/49 green; clippy: 0 errors.
