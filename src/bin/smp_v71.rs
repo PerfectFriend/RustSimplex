@@ -224,6 +224,10 @@ fn main() {
     let ch = pad(&c, BLOCK_SIZE).unwrap();
     write_block(&mut stream, &ch).expect("write clientHello");
     println!("clientHello sent: v{v} keyHash={} authPubKey=EMPTY proxy=F clientService=0", b64url_nopad(&key_hash32));
+    if std::env::var("SMP_PROXY").as_deref() == Ok("1") {
+        let pr = request(&mut stream, &sid, Command::Proxy { host: b"23.128.248.121".to_vec(), port: b"5223".to_vec(), auth: None }, vec![], None);
+        println!("PRXY probe -> {:?}", pr);
+    }
     if std::env::var("SMP_NO_PING").as_deref() == Ok("1") {
         let r = read_block(&mut stream);
         println!("after-hello read: {:?}", r.map(|b| b.len()));

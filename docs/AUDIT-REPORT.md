@@ -165,3 +165,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 14. v0.32 — live public SMP regression harness (2026-11-14)
 - Added `scripts/live_public_smp.sh`: builds `smp-v71` if needed and asserts `LIVE SMP FULL ROUND-TRIP OK` on `smp11.simplex.im:5223` (v23, NTF probe off). NTF on the public relay remains disabled server-side (`NKEY→OK`, empty `serverNtfCreds`); NTF crypto is covered locally by `tests/ntf.rs` (49/49).
+
+
+## 15. v0.33 — public relay PRXY probe (2026-11-14)
+- `SMP_PROXY=1` sends `PRXY host port` right after clientHello to `smp11:5223`: relay answers `ERR CMD SYNTAX` (proxy path not enabled/accepted there). Local proxy chain `PRXY→PKEY→PFWD/RFWD→PRES/RRES→IDS/MSG` remains green in `tests/proxy.rs` (49/49 total).
