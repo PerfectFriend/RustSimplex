@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! xftp-h2: probe client for the real XFTP protocol v7.1 (HTTP/2 + TLS 1.3, ALPN "xftp/1").
 //!   xftp-h2 <host> <port>
 //!

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! xftp-h2: probe client for the real XFTP protocol (HTTP/2 + TLS, ALPN "xftp/1") — v6.5.0 interop.
 //!   xftp-h2 <host> <port>
 //! Handshake: POST empty -> paddedRouterHello block; POST paddedClientHello -> empty response.

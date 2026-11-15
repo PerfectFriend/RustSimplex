@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! smp-server: the Rust SMP router engine.
 //!   smp-server [--bind 127.0.0.1:5223] [--tls <host>]
 //! With --tls it generates a fresh router identity (Ed25519 offline+online certs)

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! smp-v71: minimal live SMP client for public simplexmq v7.1 relays (port 5223).
 //!   smp-v71 [IP:port] [keyHashB64url-no-pad]
 //! Uses openssl (not rustls): hs-tls on v7.1 requires ed448 in signature_algorithms and

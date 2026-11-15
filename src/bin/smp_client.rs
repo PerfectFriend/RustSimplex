@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! smp-client: demo client against the Rust SMP engine (plain or TLS).
 //!   smp-client <host:port>                 -- plain, full round-trip demo
 //!   smp-client --tls <host> <keyHashB64> <host:port>  -- TLS 1.3 pinned by keyHash, full demo
