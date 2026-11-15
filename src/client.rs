@@ -32,10 +32,11 @@ pub struct Client {
     pub server_key_hash: Vec<u8>,
     /// per-connection ephemeral X25519 pub from server hello (authPubKey), used for box auth
     pub server_eph_pub: Option<[u8; 32]>,
+    eph_priv: Option<[u8; 32]>,
 }
 
 impl Client {
-    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<(Vec<u8>, Option<[u8; 32]>)> {
+    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<(Vec<u8>, Option<[u8; 32]>, [u8; 32])> {
         let sh = read_block(stream).map_err(map_e)?;
         eprintln!("[dbg] server hello block: len={} head={}", sh.len(), sh[..sh.len().min(48)].iter().map(|b| format!("{b:02x}")).collect::<String>());
         let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
@@ -43,28 +44,38 @@ impl Client {
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
         check_session_binding(&sid)?;
         let eph = x25519_keypair();
+        let eph_priv = eph.secret.to_bytes();
         let ch = client_hello_block_key(SMP_VERSION, key_hash, false, Some(spki_x25519(eph.public.as_bytes()))).map_err(map_e)?;
         write_block(stream, &ch).map_err(map_e)?;
         let eph = auth_spki.and_then(|der| parse_spki(&der).ok()).map(|(_a, raw)| raw);
-        Ok((sid, eph))
+        Ok((sid, eph, eph_priv))
     }
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
-        let (sid, eph) = Self::handshake(&mut s, key_hash)?;
-        Ok(Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash)?;
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
         Self::connect_tls_sni(addr, host, key_hash, true)
     }
 
+    /// When SMP_STRICT=1 and the server sent authPubKey, derive sessSecret and enable block encryption.
+    pub fn maybe_enable_strict_env(&mut self) {
+        if std::env::var("SMP_STRICT").as_deref() != Ok("1") { return; }
+        if let (Some(p), Some(srv)) = (self.eph_priv, self.server_eph_pub) {
+            let secret = x25519_dh(&p.into(), &x25519_public(srv));
+            self.enable_strict(&secret);
+        }
+    }
+
     /// v0.26: with_sni=false — public relays route SNI connections to the web handler;
     /// no-SNI gets the SMP protocol cert (same trick as XFTP v0.25).
     pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
         let mut s = connect_tls_sni(addr, host, key_hash, with_sni).map_err(map_e)?;
-        let (sid, eph) = Self::handshake(&mut s, &key_hash)?;
-        Ok(Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph })
+        let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash)?;
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
@@ -226,6 +237,7 @@ mod tests {
             strict_rcv: None,
             server_key_hash: vec![],
             server_eph_pub: None,
+            eph_priv: None,
         };
         let secret = [7u8; 32];
         c.enable_strict(&secret);

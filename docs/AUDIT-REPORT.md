@@ -199,3 +199,8 @@ cargo clippy --all-targets         # 0 ошибок
 ## 22. v0.40 — client strict block mode integrated (2026-11-14)
 - `protocol`: `encode_block_raw` / `decode_block_raw` for strict plaintext block content (count + large transmissions, unpadded).
 - `client::Client` gained `strict_snd/strict_rcv` + `enable_strict(dh_secret)` (uses `strict_keys(..., client=true)`); `request/request_box/recv_block` switch to `write/read_block_encrypted` when set. Unit test pins swapped client chain keys. Suite **54/54**, clippy 0 errors.
+
+
+## 23. v0.41 — server-side strict encryptBlock behind SMP_STRICT=1 (2026-11-14)
+- `server::handle_conn`: when `SMP_STRICT=1` and client sent `authPubKey`, server derives `sessSecret = DH(server_eph_priv, client_authPubKey)`, takes `strict_keys(sessionId, secret, client=false)`, and switches the poll pump to `write_block_encrypted` / `decrypt_block+decode_block_raw`. Default remains plaintext; suite **54/54** without the flag.
+- `client::Client` now keeps its ephemeral private key and auto-enables strict (`maybe_enable_strict_env`) under the same flag; `enable_strict` test pins key swap.

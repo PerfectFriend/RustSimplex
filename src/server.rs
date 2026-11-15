@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::blockchain::{decrypt_block, strict_keys, write_block_encrypted};
 use crate::crypto::*;
 use crate::encoding::{EncodeError, BLOCK_SIZE};
 use crate::identity::RouterIdentity;
@@ -615,6 +616,13 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
         }),
         server_eph_priv: Some(eph.secret),
     };
+    // strict v23 transport encryption (encryptBlock) — enabled only when client sent authPubKey
+    let (mut s_snd, mut s_rcv) = if std::env::var("SMP_STRICT").as_deref() == Ok("1") {
+        match ctx.sess_secret {
+            Some(sec) => { let (a, b) = strict_keys(&session_id, &sec, false); (Some(a), Some(b)) }
+            None => (None, None),
+        }
+    } else { (None, None) };
     // --- phase 2: poll pump ---
     ctrl.set_read_timeout(Some(Duration::from_millis(50)))?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -627,10 +635,14 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
             pushes.push(w);
         }
         if !pushes.is_empty() {
-            let blk = encode_block(&pushes).map_err(io_err)?;
-            if write_block(&mut stream, &blk).is_err() {
-                break;
-            }
+            let wr = if let Some(k) = s_snd.as_mut() {
+                let raw = encode_block_raw(&pushes).map_err(io_err)?;
+                write_block_encrypted(&mut stream, k, &raw)
+            } else {
+                let blk = encode_block(&pushes).map_err(io_err)?;
+                write_block(&mut stream, &blk)
+            };
+            if wr.is_err() { break; }
         }
         // one non-blocking read attempt
         match stream.read(&mut rbuf[rpos..]) {
@@ -638,12 +650,13 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
             Ok(n) => {
                 rpos += n;
                 if rpos == BLOCK_SIZE {
-                    let wires = match decode_block(&rbuf) {
-                        Ok(w) => w,
-                        Err(_) => {
-                            rpos = 0;
-                            continue;
+                    let wires = if let Some(k) = s_rcv.as_mut() {
+                        match decrypt_block(k, &rbuf) {
+                            Ok((nk, content)) => { *k = nk; match decode_block_raw(&content) { Ok(w) => w, Err(_) => { rpos = 0; continue; } } }
+                            Err(_) => { rpos = 0; continue; }
                         }
+                    } else {
+                        match decode_block(&rbuf) { Ok(w) => w, Err(_) => { rpos = 0; continue; } }
                     };
                     let mut responses: Vec<Vec<u8>> = Vec::new();
                     for w in &wires {
@@ -677,10 +690,14 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                         }
                     }
                     if !responses.is_empty() {
-                        let out = encode_block(&responses).map_err(io_err)?;
-                        if write_block(&mut stream, &out).is_err() {
-                            break;
-                        }
+                        let wr = if let Some(k) = s_snd.as_mut() {
+                            let raw = encode_block_raw(&responses).map_err(io_err)?;
+                            write_block_encrypted(&mut stream, k, &raw)
+                        } else {
+                            let out = encode_block(&responses).map_err(io_err)?;
+                            write_block(&mut stream, &out)
+                        };
+                        if wr.is_err() { break; }
                     }
                     // v0.23: flush pushes that arrived while we were dispatching — otherwise a
                     // peer blocked in recv_block can starve (flaky "failed to fill whole buffer").
@@ -689,11 +706,12 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                         late.push(w);
                     }
                     if !late.is_empty() {
-                        if let Ok(lb) = encode_block(&late) {
-                            if write_block(&mut stream, &lb).is_err() {
-                                break;
-                            }
-                        }
+                        let wr: std::io::Result<()> = if let Some(k) = s_snd.as_mut() {
+                            encode_block_raw(&late).map_err(io_err).and_then(|raw| write_block_encrypted(&mut stream, k, &raw))
+                        } else {
+                            encode_block(&late).map_err(io_err).and_then(|lb| write_block(&mut stream, &lb))
+                        };
+                        if wr.is_err() { break; }
                     }
                     rpos = 0;
                 }
