@@ -212,3 +212,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 25. v0.43 — full strict block-chain round-trip (2026-11-14)
 - `tests/strict_e2e.rs` now runs the whole flow under `SMP_STRICT=1` over 16384B ciphertext blocks: `PING→PONG`, `NEW→IDS`, `SUB→SOK`, `SEND→OK`, pushed `MSG` decrypted byte-equal, `ACK→OK`, `DEL→DELD`. Strict test green; default suite **55/55**.
+
+
+## 26. v0.44 — strict NTF/proxy verified + check gate (2026-11-14)
+- `scripts/check.sh` gained `STRICT=1` mode (runs `SMP_STRICT=1` over `strict_e2e`, `ntf`, `proxy`). Strict subset verified green: strict_e2e full round-trip, ntf, proxy under 16384B ciphertext blocks. Default suite remains **55/55**, clippy 0.
