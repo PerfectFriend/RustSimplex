@@ -276,3 +276,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 41. v0.62 — E2E roadmap зафиксирован (2026-11-15)
 - `docs/ROADMAP.md`: план подключения PQDR к agent/chat (ConnInfo pq_support/e2e -> init_sender/init_receiver -> Msg body = ratchet wire -> pqdr_e2e тест 20 msg both ways). Статус: библиотека/интероп готовы, E2E в agent — следующий шаг.
+
+
+## 42. v0.63 — PQDR E2E ratchet smoke (2026-11-15)
+- `tests/pqdr_e2e.rs`: init_sender/init_receiver от общего SK, 20 сообщений попеременно в обе стороны, все decrypt сходятся. Это фундамент для обёртки `AgentMsg::Msg` в ratchet wire. Suite **61/61**.
