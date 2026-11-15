@@ -232,3 +232,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 30. v0.50 — SEC-01 strict cert pinning in rustls path (2026-11-15)
 - `PinVerifier::verify_server_cert` больше не принимает совпадение отпечатка с любым сертификатом цепочки. Пиннинг строго по последнему сертификату (`intermediates.last()`, иначе leaf), затем `rustls-webpki` проверяет, что leaf действительно подписан этим CA (`EndEntityCert::verify_for_usage`, serverAuth). Это закрывает MITM `[evil_leaf, pinned_CA]`. Suite **57/57**. OpenSSL probe-бинарники остаются `NoVerify` по design как live-interop probes.
+
+
+## 31. v0.51 — strict block pad uses u16 length prefix (audit SEC-14, 2026-11-15)
+- `sb_chain` теперь паддит strict-блок как `u16 len + payload + '#'`, а `unpad_block` читает длину вместо срезания всех хвостовых `#` — payload, заканчивающийся на `#`, не теряется. Тест `strict_pad_keeps_trailing_hash_bytes`; strict e2e зелёный; suite **58/58**.

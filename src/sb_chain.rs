@@ -58,10 +58,28 @@ pub fn unpad(mut buf: Vec<u8>) -> Vec<u8> {
     buf
 }
 
+/// Length-prefixed pad for strict blocks: u16 BE len + payload + '#' to `len` (avoids trailing-'#' ambiguity).
+pub fn pad_block(buf: &[u8], len: usize) -> Vec<u8> {
+    assert!(buf.len() <= len - 2, "block too large");
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+    out.extend_from_slice(buf);
+    out.resize(len, b'#');
+    out
+}
+
+pub fn unpad_block(buf: &[u8]) -> Vec<u8> {
+    if buf.len() < 2 {
+        return vec![];
+    }
+    let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    buf[2..2 + n].to_vec()
+}
+
 /// Encrypt one encoded block (without outer padding) and advance the chain.
 pub fn encrypt_block(ck: &[u8; 32], encoded_block: &[u8]) -> ([u8; 32], Vec<u8>) {
     let (ck2, key, nonce) = sbc_hkdf(ck);
-    let padded = pad_to(encoded_block, PAD_LEN);
+    let padded = pad_block(encoded_block, PAD_LEN);
     let cipher = XSalsa20Poly1305::new(Key::from_slice(&key));
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce), padded.as_slice())
@@ -70,7 +88,7 @@ pub fn encrypt_block(ck: &[u8; 32], encoded_block: &[u8]) -> ([u8; 32], Vec<u8>)
     (ck2, ct)
 }
 
-/// Decrypt one full block and advance the chain. Returns encoded block without '#' padding.
+/// Decrypt one full block and advance the chain. Returns encoded block without padding.
 pub fn decrypt_block(ck: &[u8; 32], block: &[u8]) -> Result<([u8; 32], Vec<u8>), &'static str> {
     if block.len() != BLOCK_SIZE {
         return Err("bad block size");
@@ -80,7 +98,7 @@ pub fn decrypt_block(ck: &[u8; 32], block: &[u8]) -> Result<([u8; 32], Vec<u8>),
     let pt = cipher
         .decrypt(Nonce::from_slice(&nonce), block)
         .map_err(|_| "bad tag")?;
-    Ok((ck2, unpad(pt)))
+    Ok((ck2, unpad_block(&pt)))
 }
 
 /// Derive directional chain keys. Server: snd=a, rcv=b. Client: swapped (Haskell `swap` in smpTHandleClient).
@@ -138,6 +156,16 @@ mod tests {
         assert_ne!(ck2, a);
         assert_eq!(key.len(), 32);
         assert_eq!(nonce.len(), 24);
+    }
+
+    #[test]
+    fn strict_pad_keeps_trailing_hash_bytes() {
+        let (ck, _b) = sbc_init(b"sid", b"secret");
+        let mut payload = b"data#".to_vec();
+        payload.extend_from_slice(&[b'#'; 5]);
+        let (_ck2, ct) = encrypt_block(&ck, &payload);
+        let (_c3, pt) = decrypt_block(&ck, &ct).unwrap();
+        assert_eq!(pt, payload);
     }
 
     #[test]
