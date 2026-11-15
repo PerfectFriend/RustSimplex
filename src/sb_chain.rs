@@ -68,12 +68,15 @@ pub fn pad_block(buf: &[u8], len: usize) -> Vec<u8> {
     out
 }
 
-pub fn unpad_block(buf: &[u8]) -> Vec<u8> {
+pub fn unpad_block(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     if buf.len() < 2 {
-        return vec![];
+        return Err("short block");
     }
     let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-    buf[2..2 + n].to_vec()
+    if 2 + n > buf.len() {
+        return Err("bad pad length");
+    }
+    Ok(buf[2..2 + n].to_vec())
 }
 
 /// Encrypt one encoded block (without outer padding) and advance the chain.
@@ -98,7 +101,7 @@ pub fn decrypt_block(ck: &[u8; 32], block: &[u8]) -> Result<([u8; 32], Vec<u8>),
     let pt = cipher
         .decrypt(Nonce::from_slice(&nonce), block)
         .map_err(|_| "bad tag")?;
-    Ok((ck2, unpad_block(&pt)))
+    Ok((ck2, unpad_block(&pt)?))
 }
 
 /// Derive directional chain keys. Server: snd=a, rcv=b. Client: swapped (Haskell `swap` in smpTHandleClient).

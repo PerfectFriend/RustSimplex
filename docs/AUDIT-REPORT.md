@@ -316,3 +316,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 51. Final gate (2026-11-15, v0.71)
 - Default **61/61**, STRICT (`strict_e2e+ntf+proxy`) **3/3**, live: `SMP MATRIX v17..v23 OK`, XFTP v4 `PING->PONG` и `FPUT->OK`. E2E chat edge (root chain после HELLO) — единственный известный backlog; на interop не влияет.
+
+
+## 52. v0.72 — external audit (Gemini Hydrogen) ingested; unpad_block panic fixed (2026-11-15)
+- Принят внешний аудит `AUDIT_TO_CODER.md`: 4 блокера (E2E pqdr default-on, openssl-sys out of lib, async/SOCKS5/state, streaming XFTP) + hardening. Сразу закрыт паникующий `unpad_block` (bounds check -> Err). Default **61/61**. План по блокерам — в ROADMAP/backlog.
