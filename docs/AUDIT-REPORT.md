@@ -296,3 +296,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 46. v0.67 — E2E chat edge investigated (2026-11-15)
 - Попытка first-send DH rotation в `pqdr::encrypt` откатена: ломает AUTH первой chat-вepви. `pqdr_e2e` 20 msg both ways зелёный; дефолт **61/61**. Root cause chat-ветки под SMP_E2E — в порядке init ratchet относительно HELLO/info — в backlog.
+
+
+## 47. v0.68 — E2E init moved after HELLO (2026-11-15)
+- Ratchet теперь инициализируется после отправки HELLO с обеих сторон (до первого A_MSG). Default **61/61**, agent под SMP_E2E зелёный. Chat под SMP_E2E всё ещё падает на concurrent first x.info: «no receiving chain» у стороны, которая не получила первый ratchet-кадр peer’а — требуется out-of-order/first-send handling в pqdr (backlog).

@@ -416,12 +416,13 @@ impl Agent {
                             _ => None,
                         }
                     })().unwrap_or_default();
-                    if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
                         .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().unwrap(), None)
                         .map_err(|e| e.to_string())?;
+                    // init E2E only AFTER HELLO is sent (before any A_MSG)
+                    if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
                     return Ok(());
                 }
             }
@@ -443,7 +444,6 @@ impl Agent {
                                 if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
                                     if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
                                         let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk); }
                                     }
                                 }
                             }
@@ -454,6 +454,19 @@ impl Agent {
                     self.client
                         .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().unwrap(), None)
                         .map_err(|e| e.to_string())?;
+                    // init E2E only AFTER HELLO reply is sent
+                    if !self.init_ci.is_empty() {
+                        if let Ok(ci) = serde_json::from_slice::<ConnInfo>(&self.init_ci) {
+                            if let Some(e2e) = ci.e2e {
+                                if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
+                                    if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
+                                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
+                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk); }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     return Ok(());
                 }
             }
