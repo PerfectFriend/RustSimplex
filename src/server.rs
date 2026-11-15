@@ -878,6 +878,9 @@ fn guard_proxy_dest(host: &str, port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// P1: offline queue bound per recipient.
+const MAX_QUEUE_MSGS: usize = 1000;
+
 #[cfg(test)]
 mod proxy_guard_tests {
     use super::guard_proxy_dest;
@@ -892,6 +895,3 @@ mod proxy_guard_tests {
         assert!(guard_proxy_dest("smp11.simplex.im", 5223).is_ok());
     }
 }
-
-/// P1: offline queue bound per recipient.
-const MAX_QUEUE_MSGS: usize = 1000;
