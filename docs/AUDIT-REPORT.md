@@ -312,3 +312,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 50. v0.71 — E2E init params verified (2026-11-15)
 - Debug-проверка: sender/receiver имеют одинаковый SK и KEM (head совпадает), peer DH противоположны как и должно. AUTH в chat под SMP_E2E — не в init-параметрах, а в порядке первого decrypt/root chain; в backlog. Default **61/61**.
+
+
+## 51. Final gate (2026-11-15, v0.71)
+- Default **61/61**, STRICT (`strict_e2e+ntf+proxy`) **3/3**, live: `SMP MATRIX v17..v23 OK`, XFTP v4 `PING->PONG` и `FPUT->OK`. E2E chat edge (root chain после HELLO) — единственный известный backlog; на interop не влияет.
