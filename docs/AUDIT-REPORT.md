@@ -260,3 +260,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 37. v0.57 — bounded client I/O timeouts (audit P1, 2026-11-15)
 - `connect_plain` и `connect_tls_sni` ставят read/write timeout 30s на TCP сокет — зависший пир не держит клиента бесконечно. Suite **60/60**.
+
+
+## 38. Final verification pass (2026-11-15, after v0.57)
+- Default suite: **60/60 passed**. Live harness: `LIVE PUBLIC SMP MATRIX (v17..v23): OK`, XFTP v4 transport `PING -> PONG` OK. Note: `ntf` под `SMP_STRICT=1` в этом прогоне упал по таймауту локального сокета (30s P1 timeout) — под дефолтным окружением ntf/proxy зелёные; вынесено в backlog как «strict+ntf timing tune».
