@@ -377,3 +377,22 @@ pub fn kem_encaps_pub(pk: &[u8]) -> (Vec<u8>, [u8; 32]) {
     let ek = sntrup761::EncapsulationKey::try_from(pk).expect("kem pk len");
     kem_encaps(&ek)
 }
+
+impl Drop for PqdrRatchet {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.ad.zeroize();
+        self.rk.zeroize();
+        self.cks.zeroize();
+        if let Some(c) = &mut self.ckr { c.zeroize(); }
+        self.nhks.zeroize();
+        if let Some(c) = &mut self.nhkr { c.zeroize(); }
+        if let Some((ct, ss, pk)) = &mut self.pending {
+            ct.zeroize(); ss.zeroize(); pk.zeroize();
+        }
+        for (d, _, mk, iv) in &mut self.skipped {
+            d.zeroize(); mk.zeroize(); iv.zeroize();
+        }
+        self.skipped.clear();
+    }
+}

@@ -57,6 +57,7 @@ bytes = "1"
 futures = "0.3"
 sha3 = "0.10"
 sntrup761 = "0.4"
+zeroize = { version = "1", features = ["derive"] }
 openssl = { version = "0.10.82", optional = true }
 tokio-openssl = { version = "0.6.5", optional = true }
 

@@ -328,3 +328,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 54. v0.74 — hardening pass (audit item 5: no panics on wire paths, no dbg spam, 2026-11-15)
 - Убраны `eprintln!("[dbg] ...")` дампы из `client.rs`; `agent.rs` parse/dh_secret/init_e2e_receiver переведены на `Result` (без unwrap/expect на wire-путях); `chat::encode_chat` -> Result. Default **61/61**.
+
+
+## 55. v0.75 — zeroize on PqdrRatchet drop (audit item 5, 2026-11-15)
+- Добавлен `zeroize`; `impl Drop for PqdrRatchet` затирает `rk/cks/ckr/nhks/nhkr/pending/skipped/ad`. Default **61/61**.
