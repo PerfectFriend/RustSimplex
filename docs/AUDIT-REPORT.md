@@ -300,3 +300,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 47. v0.68 — E2E init moved after HELLO (2026-11-15)
 - Ratchet теперь инициализируется после отправки HELLO с обеих сторон (до первого A_MSG). Default **61/61**, agent под SMP_E2E зелёный. Chat под SMP_E2E всё ещё падает на concurrent first x.info: «no receiving chain» у стороны, которая не получила первый ratchet-кадр peer’а — требуется out-of-order/first-send handling в pqdr (backlog).
+
+
+## 48. v0.69 — concurrent-first-msg fallback tried & reverted (2026-11-15)
+- Fallback «derive ckr from RK+DH when same DH and no chain» давал AUTH — откатено. Правильный фикс: полноценный out-of-order в pqdr (skipped message keys + first-header DH ratchet), задача в backlog. Default **61/61**, pqdr_e2e зелёный.
