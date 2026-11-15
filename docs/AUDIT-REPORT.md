@@ -224,3 +224,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 28. v0.48 — module rename blockchain -> sb_chain (2026-11-15)
 - `src/blockchain.rs` переименован в `src/sb_chain.rs` (это SbChainKey transport crypto, не «блокчейн»); `lib.rs` держит compat-alias `pub use sb_chain as blockchain`. Ссылки обновлены. Suite **56/56**, clippy 0 errors.
+
+
+## 29. v0.49 — P0 delivery hardening (audit SEC-03/SEC-08, 2026-11-15)
+- `SUB`/`GET` больше не делают `pop_front`: отдают максимум одно pending-сообщение и хранят его до `ACK`; при ошибке шифрования очередь не очищается. `SEND` с телом >16088 отклоняется сразу как `ERR LARGE_MSG` без сохранения. Регрессионный тест `tests/p0_delivery.rs`: 3 офлайн-сообщения доставляются по одному через SUB/GET+ACK, ни одно не теряется; oversized SEND → LARGE_MSG. Suite **57/57**.

@@ -244,16 +244,12 @@ fn dispatch_cmd(
             }
             q.subscriber = Some(outbox.clone());
             let mut out = vec![resp_np!(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Sok(None))];
-            while let Some((mid, body)) = q.messages.pop_front() {
-                let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
-                    Ok(e) => e,
-                    Err(_) => {
-                        // v0.21: oversized msg breaks the queue — drop it, reply ERR to client
-                        q.messages.clear();
-                        return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")]
-                    }
-                };
-                out.push(resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid, body: enc }));
+            // SEC-03: deliver at most one pending message, keep it until ACK; never clear the queue on encrypt error
+            if let Some((mid, body)) = q.messages.front() {
+                match encrypt_for_recipient(&q.rcv_dh_secret, mid, body) {
+                    Ok(enc) => out.push(resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid.clone(), body: enc })),
+                    Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")],
+                }
             }
             out
         }
@@ -266,13 +262,12 @@ fn dispatch_cmd(
             if !qauth(session_id, t, q, ctx) {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
-            match q.messages.pop_front() {
+            match q.messages.front() {
                 Some((mid, body)) => {
-                    let enc = match encrypt_for_recipient(&q.rcv_dh_secret, &mid, &body) {
-                        Ok(e) => e,
-                        Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")]
-                    };
-                    vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Msg { msg_id: mid, body: enc })]
+                    match encrypt_for_recipient(&q.rcv_dh_secret, mid, body) {
+                        Ok(enc) => vec![resp_np!(t.corr_id.clone(), rcv_id.clone(), BrokerMsg::Msg { msg_id: mid.clone(), body: enc })],
+                        Err(_) => vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")],
+                    }
                 }
                 None => vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Sok(None))],
             }
@@ -296,6 +291,10 @@ fn dispatch_cmd(
                 if !verify_sign(session_id, t, snd_raw) {
                     return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
                 }
+            }
+            // SEC-08: validate on input, never poison the queue with an undeliverable message
+            if body.len() > 16088 {
+                return vec![err_np!(t.corr_id.clone(), snd_id, "LARGE_MSG")];
             }
             let msg_id = random_bytes(16);
             q.messages.push_back((msg_id.clone(), body.clone()));
