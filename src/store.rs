@@ -21,36 +21,50 @@ const ENC_MAGIC: &[u8; 4] = b"SMP1";
 
 /// Store encryption key from env `SMP_STORE_KEY` (hex-encoded 32 bytes).
 pub fn store_key() -> Option<[u8; 32]> {
-    let hex_key = std::env::var("SMP_STORE_KEY").ok()?;
-    let bytes = hex::decode(hex_key.trim()).ok()?;
-    let arr: [u8; 32] = bytes.try_into().ok()?;
-    Some(arr)
+    env_key().ok().flatten()
 }
 
-fn seal(plain: Vec<u8>) -> Vec<u8> {
-    match store_key() {
+/// SEC-10: if the env var is set but invalid, that is a config error — never silently plaintext.
+fn env_key() -> Result<Option<[u8; 32]>, String> {
+    match std::env::var("SMP_STORE_KEY") {
+        Ok(hex_key) => {
+            let bytes = hex::decode(hex_key.trim()).map_err(|e| format!("bad SMP_STORE_KEY hex: {e}"))?;
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| "SMP_STORE_KEY must be 32 bytes".to_string())?;
+            Ok(Some(arr))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn seal(plain: Vec<u8>) -> Result<Vec<u8>, String> {
+    match env_key()? {
         Some(k) => {
             let nonce: [u8; 24] = random_bytes(24).try_into().unwrap();
             let mut out = Vec::with_capacity(4 + 24 + plain.len() + 16);
             out.extend_from_slice(ENC_MAGIC);
             out.extend_from_slice(&nonce);
             out.extend_from_slice(&secretbox_encrypt(&k, &nonce, &plain));
-            out
+            Ok(out)
         }
-        None => plain,
+        None => Ok(plain),
     }
 }
 
 fn unseal(buf: &[u8]) -> Option<Vec<u8>> {
+    let key = env_key().ok()?;
     if buf.len() >= 4 && &buf[..4] == ENC_MAGIC {
-        let k = store_key()?;
+        let k = key?; // encrypted snapshot requires a key — no silent empty state
         if buf.len() < 4 + 24 {
             return None;
         }
         let nonce: [u8; 24] = buf[4..28].try_into().ok()?;
         secretbox_decrypt(&k, &nonce, &buf[28..])
     } else {
-        Some(buf.to_vec()) // legacy plaintext snapshot
+        // SEC-10: when a key is configured, a non-SMP1 file is a downgrade attempt — reject it.
+        if key.is_some() {
+            return None;
+        }
+        Some(buf.to_vec()) // legacy plaintext snapshot only when no key configured
     }
 }
 
@@ -233,13 +247,21 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
 
 /// Atomic save: write to `<path>.tmp` then rename.
 pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let sealed = seal(snapshot_bytes(st)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(&seal(snapshot_bytes(st)))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(&sealed)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 
 pub fn load(path: &Path) -> Option<ServerState> {

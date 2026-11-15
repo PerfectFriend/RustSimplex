@@ -240,3 +240,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 32. v0.52 — honest SEC-02 scope note (2026-11-15)
 - `docs/SECURITY.md` теперь явно говорит: agent/chat — demo, E2E между участниками отсутствует, router→recipient crypto_box не делает «роутер видит только метаданные» для agent payload. Production-цель репозитория — SMP/XFTP interop client/library + исследовательский server.
+
+
+## 33. v0.53 — store fail-closed (audit SEC-10, 2026-11-15)
+- `store`: невалидный `SMP_STORE_KEY` — ошибка, а не тихий plaintext; при заданном ключе файл без магии `SMP1` отклоняется (no downgrade); зашифрованный снимок без ключа не даёт пустое состояние. `save` пишет через `mode 0600`, уникальный tmp, fsync файла и каталога. Suite **58/58**.
