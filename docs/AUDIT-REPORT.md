@@ -320,3 +320,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 52. v0.72 — external audit (Gemini Hydrogen) ingested; unpad_block panic fixed (2026-11-15)
 - Принят внешний аудит `AUDIT_TO_CODER.md`: 4 блокера (E2E pqdr default-on, openssl-sys out of lib, async/SOCKS5/state, streaming XFTP) + hardening. Сразу закрыт паникующий `unpad_block` (bounds check -> Err). Default **61/61**. План по блокерам — в ROADMAP/backlog.
+
+
+## 53. v0.73 — audit blocker #2: openssl optional (2026-11-15)
+- `openssl`/`tokio-openssl` стали optional; feature `v71-probes` включает probe-бины `smp-v71`/`xftp-h2-v71` (`required-features`). `cargo check --no-default-features` чистый — lib для Android без `openssl-sys`. Также откатил receiver-first rotation в pqdr (ломал root chain). Default **61/61**.

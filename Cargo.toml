@@ -24,10 +24,16 @@ path = "src/bin/xftp_h2.rs"
 [[bin]]
 name = "xftp-h2-v71"
 path = "src/bin/xftp_h2_v71.rs"
+required-features = ["v71-probes"]
 
 [[bin]]
 name = "smp-v71"
 path = "src/bin/smp_v71.rs"
+required-features = ["v71-probes"]
+
+[features]
+default = []
+v71-probes = ["dep:openssl", "dep:tokio-openssl"]
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -51,8 +57,8 @@ bytes = "1"
 futures = "0.3"
 sha3 = "0.10"
 sntrup761 = "0.4"
-openssl = "0.10.82"
-tokio-openssl = "0.6.5"
+openssl = { version = "0.10.82", optional = true }
+tokio-openssl = { version = "0.6.5", optional = true }
 
 [profile.release]
 opt-level = 2
