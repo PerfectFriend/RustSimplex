@@ -288,3 +288,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 44. v0.65 — auto E2E negotiation (opt-in SMP_E2E=1, 2026-11-15)
 - `accept_contact` парсит connInfo из «D», вычисляет SK=DH(our rcv_dh, peer rcv_dh), берёт peer KEM pk и зовёт `init_e2e_sender`; `await_hello` зеркально зовёт `init_e2e_receiver` из initiator ci. Авто-E2E включается флагом `SMP_E2E=1`, чтобы дефолтные тесты оставались demo-plaintext. `recv_agent` сохраняет msg_id/prev_hash после decrypt. Suite **61/61**, `pqdr_e2e` зелёный.
+
+
+## 45. v0.66 — chat layer honors E2E ratchet (SMP_E2E=1, 2026-11-15)
+- `chat::recv_text` теперь расшифровывает `A_MSG` body через `agent.ratchet` перед парсингом chat JSON. Default suite **61/61**. Известный edge под `SMP_E2E=1`: первый ответный ratchet-сообщение в длинной chat-цепочке может дать «no receiving chain» — в backlog (нужен явный DH-ratchet на первом send после приёма, как в double-ratchet spec); `pqdr_e2e` 20 msg both ways зелёный.
