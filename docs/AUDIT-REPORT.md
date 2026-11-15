@@ -264,3 +264,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 38. Final verification pass (2026-11-15, after v0.57)
 - Default suite: **60/60 passed**. Live harness: `LIVE PUBLIC SMP MATRIX (v17..v23): OK`, XFTP v4 transport `PING -> PONG` OK. Note: `ntf` под `SMP_STRICT=1` в этом прогоне упал по таймауту локального сокета (30s P1 timeout) — под дефолтным окружением ntf/proxy зелёные; вынесено в backlog как «strict+ntf timing tune».
+
+
+## 39. v0.58 — strict+proxy test isolation (2026-11-15)
+- `tests/proxy.rs` явно снимает `SMP_STRICT` и включает `SMP_ALLOW_LOCAL_PROXY`: локальный proxy-harness plaintext, strict transport покрыт `strict_e2e`. Теперь `SMP_STRICT=1 ntf+proxy+strict_e2e`: **3/3**.
