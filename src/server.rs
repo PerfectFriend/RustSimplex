@@ -468,6 +468,9 @@ fn dispatch_cmd(
         Command::Proxy { host, port, .. } => {
             let host = String::from_utf8_lossy(&host).to_string();
             let port: u16 = String::from_utf8_lossy(&port).parse().unwrap_or(0);
+            if let Err(e) = guard_proxy_dest(&host, port) {
+                return vec![err_np!(t.corr_id.clone(), vec![], &e)];
+            }
             // connect to destination router as a proxy client (plain TCP for now)
             let dest_kh = [0u8; 32]; // plain mode: no keyHash pinning between our engines
             match crate::proxy::open_proxy_session(&host, port, &dest_kh) {
@@ -844,4 +847,44 @@ pub fn run(addr: &str) -> std::io::Result<()> {
     let engine = Engine::bind_plain(addr)?;
     eprintln!("[smp-server] listening on {addr} (SMP v{SMP_VERSION}, plain)");
     engine.serve()
+}
+
+
+/// P1: proxy destination guard — only public routers on standard ports, no local/private targets (SSRF guard).
+fn guard_proxy_dest(host: &str, port: u16) -> Result<(), String> {
+    // tests may explicitly opt into local destinations
+    if std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some() {
+        return Ok(());
+    }
+    let h = host.trim();
+    if h.is_empty() { return Err("PROXY empty host".into()); }
+    if !(port == 5223 || port == 443) { return Err("PROXY port not allowed".into()); }
+    let lower = h.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") { return Err("PROXY local host".into()); }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        let bad = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_multicast() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || v6.is_unicast_link_local() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+        };
+        if bad { return Err("PROXY non-public IP".into()); }
+        return Ok(());
+    }
+    // hostname must look like a domain (no spaces/slashes); actual DNS happens in proxy layer
+    if h.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\') { return Err("PROXY bad host".into()); }
+    Ok(())
+}
+
+#[cfg(test)]
+mod proxy_guard_tests {
+    use super::guard_proxy_dest;
+    #[test]
+    fn rejects_local_and_bad_ports() {
+        assert!(guard_proxy_dest("127.0.0.1", 5223).is_err());
+        assert!(guard_proxy_dest("10.0.0.5", 5223).is_err());
+        assert!(guard_proxy_dest("::1", 5223).is_err());
+        assert!(guard_proxy_dest("localhost", 5223).is_err());
+        assert!(guard_proxy_dest("smp11.simplex.im", 22).is_err());
+        assert!(guard_proxy_dest("", 5223).is_err());
+        assert!(guard_proxy_dest("smp11.simplex.im", 5223).is_ok());
+    }
 }

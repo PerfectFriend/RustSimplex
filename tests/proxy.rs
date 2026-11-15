@@ -7,6 +7,7 @@ use smp_rs::server::{spawn_engine, Engine};
 
 #[test]
 fn proxy_pfwd_roundtrip() {
+    std::env::set_var("SMP_ALLOW_LOCAL_PROXY", "1");
     // destination router
     let dest = Engine::bind_plain("127.0.0.1:0").unwrap();
     let (dest_addr, _st1, _sd1, _h1) = spawn_engine(dest);

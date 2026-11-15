@@ -244,3 +244,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 33. v0.53 — store fail-closed (audit SEC-10, 2026-11-15)
 - `store`: невалидный `SMP_STORE_KEY` — ошибка, а не тихий plaintext; при заданном ключе файл без магии `SMP1` отклоняется (no downgrade); зашифрованный снимок без ключа не даёт пустое состояние. `save` пишет через `mode 0600`, уникальный tmp, fsync файла и каталога. Suite **58/58**.
+
+
+## 34. v0.54 — proxy destination SSRF guard (audit P1, 2026-11-15)
+- `Command::Proxy` теперь отклоняет непубличные IP (loopback/private/link-local/multicast/ULA), `localhost`, нестандартные порты (разрешены 5223/443) и мусорные host-строки. Локальные цели возможны только с явным `SMP_ALLOW_LOCAL_PROXY=1` для тестов. Тест `proxy_guard_tests`; suite **59/59**.
