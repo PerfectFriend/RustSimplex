@@ -216,3 +216,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 26. v0.44 — strict NTF/proxy verified + check gate (2026-11-14)
 - `scripts/check.sh` gained `STRICT=1` mode (runs `SMP_STRICT=1` over `strict_e2e`, `ntf`, `proxy`). Strict subset verified green: strict_e2e full round-trip, ntf, proxy under 16384B ciphertext blocks. Default suite remains **55/55**, clippy 0.
+
+
+## 27. v0.45 — parser negative/fuzz smoke (2026-11-14)
+- `tests/fuzz_parse.rs`: mutated valid SMP blocks + 300 random 16KiB blocks/commands through `decode_block`/`decode_transmission`/`parse_broker` under `catch_unwind` — no panics, errors only. Suite **56/56**.
