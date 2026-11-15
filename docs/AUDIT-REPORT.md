@@ -284,3 +284,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 43. v0.64 — agent E2E hooks (PQDR in AgentMsg::Msg, 2026-11-15)
 - `Agent` получил `ratchet: Option<PqdrRatchet>` + `init_e2e_sender/init_e2e_receiver`. `send_msg` шифрует body через ratchet перед SMP; `recv_agent` расшифровывает `M`-body обратно. Без ratchet поведение прежнее (demo plaintext). Suite **61/61**.
+
+
+## 44. v0.65 — auto E2E negotiation (opt-in SMP_E2E=1, 2026-11-15)
+- `accept_contact` парсит connInfo из «D», вычисляет SK=DH(our rcv_dh, peer rcv_dh), берёт peer KEM pk и зовёт `init_e2e_sender`; `await_hello` зеркально зовёт `init_e2e_receiver` из initiator ci. Авто-E2E включается флагом `SMP_E2E=1`, чтобы дефолтные тесты оставались demo-plaintext. `recv_agent` сохраняет msg_id/prev_hash после decrypt. Suite **61/61**, `pqdr_e2e` зелёный.

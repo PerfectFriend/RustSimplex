@@ -207,6 +207,8 @@ pub struct Agent {
     pub kem: Option<crate::pq::KemKeypair>,
     /// E2E PQDR ratchet (Some once negotiated) — Msg bodies go through it.
     pub ratchet: Option<crate::pqdr::PqdrRatchet>,
+    /// raw initiator connInfo ("I" payload) for the joiner side; used to auto-init E2E.
+    pub init_ci: Vec<u8>,
 }
 
 impl Agent {
@@ -286,6 +288,7 @@ impl Agent {
                 key_hash: key_hash.to_vec(),
                 kem: Some(kem),
                 ratchet: None,
+                init_ci: conn_info.clone(),
             },
             link,
         ))
@@ -301,9 +304,12 @@ impl Agent {
         let (rcv_hex, params) = frag.split_once('?').ok_or("bad link params")?;
         let _rcv_id = crate::xftp::unhex(rcv_hex).ok_or("bad rcv hex")?;
         let mut init_snd = Vec::new();
+        let mut init_ci = Vec::new();
         for kv in params.split('&') {
             if let Some(v) = kv.strip_prefix("snd=") {
                 init_snd = crate::xftp::unhex(v).ok_or("bad snd hex")?;
+            } else if let Some(v) = kv.strip_prefix("ci=") {
+                init_ci = crate::xftp::unhex(v).ok_or("bad ci hex")?;
             }
         }
         if init_snd.is_empty() {
@@ -383,6 +389,7 @@ impl Agent {
             key_hash,
             kem: Some(kem),
             ratchet: None,
+            init_ci,
         })
     }
 
@@ -394,9 +401,22 @@ impl Agent {
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                if let AgentMsg::ConnInfoReply(qs, _ci) = parse_agent(&pt)? {
+                if let AgentMsg::ConnInfoReply(qs, ci) = parse_agent(&pt)? {
                     let peer = qs[0].sender_id.clone();
                     self.peer_snd_id = Some(peer);
+                    // auto-negotiate E2E: SK = DH(our rcv_dh, joiner rcv_dh from queue info)
+                    let peer_dh_raw = parse_spki(&qs[0].dh_pub).map_err(|e| e.to_string())?.1;
+                    let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(peer_dh_raw));
+                    let peer_kem = (|| {
+                        let ci: ConnInfo = serde_json::from_slice(&ci).ok()?;
+                        let e2e = ci.e2e?;
+                        let mut r = Reader::new(&e2e);
+                        match crate::pq::decode_e2e_ratchet_params(&mut r).ok()?.kem {
+                            crate::pq::KemParams::Pk(pk) | crate::pq::KemParams::CtPk(_, pk) => Some(pk),
+                            _ => None,
+                        }
+                    })().unwrap_or_default();
+                    if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
@@ -417,6 +437,18 @@ impl Agent {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                 if matches!(parse_agent(&pt)?, AgentMsg::Hello { .. }) {
+                    if !self.init_ci.is_empty() {
+                        if let Ok(ci) = serde_json::from_slice::<ConnInfo>(&self.init_ci) {
+                            if let Some(e2e) = ci.e2e {
+                                if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
+                                    if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
+                                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
+                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk); }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
@@ -430,11 +462,37 @@ impl Agent {
     }
 
     /// Send an application message (A_MSG). Returns the agent msg id used.
+    /// Negotiate E2E as the sender (initiator): peer DH raw + peer KEM pk from connInfo.
+    pub fn init_e2e_sender(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32], peer_kem_pk: Vec<u8>) {
+        self.ratchet = Some(crate::pqdr::PqdrRatchet::init_sender(
+            sk,
+            self.rcv_id.clone(),
+            x25519_public(peer_dh_raw),
+            peer_kem_pk,
+        ));
+    }
+
+    /// Negotiate E2E as the receiver (joiner): uses own DH + KEM from the link exchange.
+    pub fn init_e2e_receiver(&mut self, sk: &[u8; 32]) {
+        let kem = self.kem.clone().expect("kem");
+        self.ratchet = Some(crate::pqdr::PqdrRatchet::init_receiver(
+            sk,
+            self.rcv_id.clone(),
+            self.rcv_dh.clone(),
+            kem,
+            Vec::new(),
+        ));
+    }
+
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {
         self.msg_counter += 1;
         let id = self.msg_counter;
-        let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: body.to_vec() }, id, &self.prev_hash));
-        let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: body.to_vec() }, id, &self.prev_hash);
+        let payload = match &mut self.ratchet {
+            Some(r) => r.encrypt(body),
+            None => body.to_vec(),
+        };
+        let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
+        let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
@@ -450,10 +508,10 @@ impl Agent {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                 let mut am = parse_agent(&pt)?;
-                if let AgentMsg::Msg { body, .. } = &am {
+                if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
                     if let Some(r) = &mut self.ratchet {
                         let plain = r.decrypt(body)?;
-                        am = AgentMsg::Msg { msg_id: 0, prev_hash: vec![], body: plain };
+                        am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
                     }
                 }
                 return Ok((msg_id.clone(), am));
