@@ -253,6 +253,17 @@ impl PqdrRatchet {
 
     /// Encrypt one message; returns the wire bytes.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Vec<u8> {
+        // Receiver-first send (no pending encapsulation, no receiving chain yet): do a proper
+        // DH ratchet step so the peer derives a receiving chain from this header.
+        if self.pending.is_none() && self.ckr.is_none() {
+            self.dh_s = x25519_keypair();
+            self.kem_s = kem_keypair();
+            let dh1 = x25519_dh(&self.dh_s.secret, &self.dh_r);
+            let (rk, cks, nhks) = root_kdf(&self.rk, &dh1, None);
+            self.rk = rk;
+            self.cks = cks;
+            self.nhks = nhks;
+        }
         let (cks, mk, iv1, _iv2) = chain_kdf(&self.cks);
         self.cks = cks;
         let n = self.ns;

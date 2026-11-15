@@ -461,7 +461,7 @@ impl Agent {
                                 if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
                                     if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
                                         let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk); }
+                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk, dh_raw); }
                                     }
                                 }
                             }
@@ -486,15 +486,17 @@ impl Agent {
     }
 
     /// Negotiate E2E as the receiver (joiner): uses own DH + KEM from the link exchange.
-    pub fn init_e2e_receiver(&mut self, sk: &[u8; 32]) {
+    pub fn init_e2e_receiver(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32]) {
         let kem = self.kem.clone().expect("kem");
-        self.ratchet = Some(crate::pqdr::PqdrRatchet::init_receiver(
+        let mut r = crate::pqdr::PqdrRatchet::init_receiver(
             sk,
             self.rcv_id.clone(),
             self.rcv_dh.clone(),
             kem,
             Vec::new(),
-        ));
+        );
+        r.dh_r = x25519_public(peer_dh_raw);
+        self.ratchet = Some(r);
     }
 
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {

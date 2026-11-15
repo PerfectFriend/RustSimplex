@@ -304,3 +304,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 48. v0.69 — concurrent-first-msg fallback tried & reverted (2026-11-15)
 - Fallback «derive ckr from RK+DH when same DH and no chain» давал AUTH — откатено. Правильный фикс: полноценный out-of-order в pqdr (skipped message keys + first-header DH ratchet), задача в backlog. Default **61/61**, pqdr_e2e зелёный.
+
+
+## 49. v0.70 — receiver-first DH ratchet step (2026-11-15)
+- `PqdrRatchet::encrypt` при первом send свежего receiver теперь делает настоящий DH-ratchet (new dh_s/kem_s, root_kdf -> cks), а `init_e2e_receiver` сразу выставляет peer dh_r. `pqdr_e2e` зелёный, default **61/61**, agent под SMP_E2E зелёный. Chat под SMP_E2E всё ещё AUTH на первом A_MSG — расхождение SK/KEM при извлечении из connInfo в chat-пут vriend; в backlog.
