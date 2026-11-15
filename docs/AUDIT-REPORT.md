@@ -292,3 +292,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 45. v0.66 — chat layer honors E2E ratchet (SMP_E2E=1, 2026-11-15)
 - `chat::recv_text` теперь расшифровывает `A_MSG` body через `agent.ratchet` перед парсингом chat JSON. Default suite **61/61**. Известный edge под `SMP_E2E=1`: первый ответный ratchet-сообщение в длинной chat-цепочке может дать «no receiving chain» — в backlog (нужен явный DH-ratchet на первом send после приёма, как в double-ratchet spec); `pqdr_e2e` 20 msg both ways зелёный.
+
+
+## 46. v0.67 — E2E chat edge investigated (2026-11-15)
+- Попытка first-send DH rotation в `pqdr::encrypt` откатена: ломает AUTH первой chat-вepви. `pqdr_e2e` 20 msg both ways зелёный; дефолт **61/61**. Root cause chat-ветки под SMP_E2E — в порядке init ratchet относительно HELLO/info — в backlog.
