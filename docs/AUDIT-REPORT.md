@@ -308,3 +308,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 49. v0.70 — receiver-first DH ratchet step (2026-11-15)
 - `PqdrRatchet::encrypt` при первом send свежего receiver теперь делает настоящий DH-ratchet (new dh_s/kem_s, root_kdf -> cks), а `init_e2e_receiver` сразу выставляет peer dh_r. `pqdr_e2e` зелёный, default **61/61**, agent под SMP_E2E зелёный. Chat под SMP_E2E всё ещё AUTH на первом A_MSG — расхождение SK/KEM при извлечении из connInfo в chat-пут vriend; в backlog.
+
+
+## 50. v0.71 — E2E init params verified (2026-11-15)
+- Debug-проверка: sender/receiver имеют одинаковый SK и KEM (head совпадает), peer DH противоположны как и должно. AUTH в chat под SMP_E2E — не в init-параметрах, а в порядке первого decrypt/root chain; в backlog. Default **61/61**.
