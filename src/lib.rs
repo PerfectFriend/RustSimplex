@@ -9,7 +9,8 @@
 //!   server    — SMP router (queue store + command handling + auth verification)
 //!   client    — SMP client
 
-pub mod blockchain;
+pub mod sb_chain;
+pub use sb_chain as blockchain;
 pub mod client;
 pub mod identity;
 pub mod agent;

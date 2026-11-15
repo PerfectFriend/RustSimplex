@@ -13,7 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::blockchain::{decrypt_block, strict_keys, write_block_encrypted};
+use crate::sb_chain::{decrypt_block, strict_keys, write_block_encrypted};
 use crate::crypto::*;
 use crate::encoding::{EncodeError, BLOCK_SIZE};
 use crate::identity::RouterIdentity;

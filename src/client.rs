@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use crate::blockchain::{read_block_encrypted, strict_keys, write_block_encrypted};
+use crate::sb_chain::{read_block_encrypted, strict_keys, write_block_encrypted};
 use crate::crypto::*;
 use crate::encoding::{pad, unpad};
 use crate::protocol::*;
@@ -241,7 +241,7 @@ mod tests {
         };
         let secret = [7u8; 32];
         c.enable_strict(&secret);
-        let (a, b) = crate::blockchain::sbc_init(b"sid", &secret);
+        let (a, b) = crate::sb_chain::sbc_init(b"sid", &secret);
         assert_eq!(c.strict_snd.unwrap(), b);
         assert_eq!(c.strict_rcv.unwrap(), a);
     }

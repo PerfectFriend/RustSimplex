@@ -220,3 +220,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 27. v0.45 — parser negative/fuzz smoke (2026-11-14)
 - `tests/fuzz_parse.rs`: mutated valid SMP blocks + 300 random 16KiB blocks/commands through `decode_block`/`decode_transmission`/`parse_broker` under `catch_unwind` — no panics, errors only. Suite **56/56**.
+
+
+## 28. v0.48 — module rename blockchain -> sb_chain (2026-11-15)
+- `src/blockchain.rs` переименован в `src/sb_chain.rs` (это SbChainKey transport crypto, не «блокчейн»); `lib.rs` держит compat-alias `pub use sb_chain as blockchain`. Ссылки обновлены. Suite **56/56**, clippy 0 errors.
