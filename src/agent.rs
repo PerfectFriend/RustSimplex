@@ -205,6 +205,8 @@ pub struct Agent {
     pub key_hash: Vec<u8>,
     /// SNTRUP761 KEM keypair for PQDR (Some when pq negotiated).
     pub kem: Option<crate::pq::KemKeypair>,
+    /// E2E PQDR ratchet (Some once negotiated) — Msg bodies go through it.
+    pub ratchet: Option<crate::pqdr::PqdrRatchet>,
 }
 
 impl Agent {
@@ -283,6 +285,7 @@ impl Agent {
                 port,
                 key_hash: key_hash.to_vec(),
                 kem: Some(kem),
+                ratchet: None,
             },
             link,
         ))
@@ -379,6 +382,7 @@ impl Agent {
             port,
             key_hash,
             kem: Some(kem),
+            ratchet: None,
         })
     }
 
@@ -445,7 +449,13 @@ impl Agent {
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                let am = parse_agent(&pt)?;
+                let mut am = parse_agent(&pt)?;
+                if let AgentMsg::Msg { body, .. } = &am {
+                    if let Some(r) = &mut self.ratchet {
+                        let plain = r.decrypt(body)?;
+                        am = AgentMsg::Msg { msg_id: 0, prev_hash: vec![], body: plain };
+                    }
+                }
                 return Ok((msg_id.clone(), am));
             }
         }
