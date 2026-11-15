@@ -296,6 +296,10 @@ fn dispatch_cmd(
             if body.len() > 16088 {
                 return vec![err_np!(t.corr_id.clone(), snd_id, "LARGE_MSG")];
             }
+            // P1: bounded offline queue — fail closed instead of growing memory unbounded
+            if q.messages.len() >= MAX_QUEUE_MSGS {
+                return vec![err_np!(t.corr_id.clone(), snd_id, "QUEUE_FULL")];
+            }
             let msg_id = random_bytes(16);
             q.messages.push_back((msg_id.clone(), body.clone()));
             if let Some(sub) = &q.subscriber {
@@ -888,3 +892,6 @@ mod proxy_guard_tests {
         assert!(guard_proxy_dest("smp11.simplex.im", 5223).is_ok());
     }
 }
+
+/// P1: offline queue bound per recipient.
+const MAX_QUEUE_MSGS: usize = 1000;

@@ -252,3 +252,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 35. v0.55 — channel binding primitives (audit SEC-04, 2026-11-15)
 - `check_session_binding` теперь валидирует длину sid (0 для plain TCP, 32B для TLS 1.3 Finished). Добавлен `verify_channel_binding(sid, tls_binding)` — равенство sid и живого TLS binding, негативный тест на подменённый sid. Suite **60/60**.
+
+
+## 36. v0.56 — bounded offline queue (audit P1, 2026-11-15)
+- `SEND` отклоняется как `ERR QUEUE_FULL` при `messages.len() >= MAX_QUEUE_MSGS (1000)` — нет неограниченного роста памяти офлайн-очереди. Suite **60/60**.
