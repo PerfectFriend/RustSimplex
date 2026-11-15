@@ -236,3 +236,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 31. v0.51 — strict block pad uses u16 length prefix (audit SEC-14, 2026-11-15)
 - `sb_chain` теперь паддит strict-блок как `u16 len + payload + '#'`, а `unpad_block` читает длину вместо срезания всех хвостовых `#` — payload, заканчивающийся на `#`, не теряется. Тест `strict_pad_keeps_trailing_hash_bytes`; strict e2e зелёный; suite **58/58**.
+
+
+## 32. v0.52 — honest SEC-02 scope note (2026-11-15)
+- `docs/SECURITY.md` теперь явно говорит: agent/chat — demo, E2E между участниками отсутствует, router→recipient crypto_box не делает «роутер видит только метаданные» для agent payload. Production-цель репозитория — SMP/XFTP interop client/library + исследовательский server.
