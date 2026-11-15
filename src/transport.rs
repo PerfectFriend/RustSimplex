@@ -312,6 +312,12 @@ pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> std::io:
 /// v0.26: `with_sni=false` connects WITHOUT SNI — public simplex relays serve the HTTPS/web
 /// cert on SNI and route those connections to the web handler; no-SNI gets the SMP cert.
 pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<BoxStream> {
+    Ok(connect_tls_sni_bound(addr, host, key_hash, with_sni)?.0)
+}
+
+/// TLS connect that also completes the handshake and returns a TLS channel binding
+/// (exporter label) for SEC-04 `verify_channel_binding`.
+pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<(BoxStream, [u8; 32])> {
     let tcp = TcpStream::connect(addr)?;
     // P1: bounded I/O — a stalled peer must not hang the client forever
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
@@ -329,7 +335,14 @@ pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sn
     }
     let conn = ClientConnection::new(Arc::new(cfg), name)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(Box::new(StreamOwned::new(conn, tcp)))
+    let mut stream = StreamOwned::new(conn, tcp);
+    stream.conn.complete_io(&mut stream.sock).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut binding = [0u8; 32];
+    stream
+        .conn
+        .export_keying_material(&mut binding, b"SimpleX-channel-binding", None)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok((Box::new(stream), binding))
 }
 
 /// Connect over plain TCP. Client socket stays blocking.

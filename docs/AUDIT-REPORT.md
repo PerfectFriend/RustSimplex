@@ -268,3 +268,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 39. v0.58 — strict+proxy test isolation (2026-11-15)
 - `tests/proxy.rs` явно снимает `SMP_STRICT` и включает `SMP_ALLOW_LOCAL_PROXY`: локальный proxy-harness plaintext, strict transport покрыт `strict_e2e`. Теперь `SMP_STRICT=1 ntf+proxy+strict_e2e`: **3/3**.
+
+
+## 40. v0.61 — TLS channel binding wired into handshake (SEC-04, 2026-11-15)
+- `connect_tls_sni_bound` завершает TLS handshake и вычисляет exporter binding (`SimpleX-channel-binding`, 32B). `Client::handshake` при непустом serverHello sessionId вызывает `verify_channel_binding`. Plain/local sid пустой — binding не навязывается. Suite **60/60**. Примечание: для публичных реле SimpleX sid = TLS Finished verify_data; rustls наружу отдаёт exporter, поэтому финальная сверка с Finished — в backlog (нужен доступ к Finished, не к exporter).

@@ -48,13 +48,15 @@ pub struct Client {
 }
 
 impl Client {
-    fn handshake(stream: &mut BoxStream, key_hash: &[u8]) -> ClResult<(Vec<u8>, Option<[u8; 32]>, [u8; 32])> {
+    fn handshake(stream: &mut BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<(Vec<u8>, Option<[u8; 32]>, [u8; 32])> {
         let sh = read_block(stream).map_err(map_e)?;
         eprintln!("[dbg] server hello block: len={} head={}", sh.len(), sh[..sh.len().min(48)].iter().map(|b| format!("{b:02x}")).collect::<String>());
         let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
         eprintln!("[dbg] parsed: vRange {}..{} sid={}B auth={}", _min, _max, sid.len(), auth_spki.is_some());
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
         check_session_binding(&sid)?;
+        // SEC-04: enforce binding when the relay supplied a non-empty sessionId (TLS Finished); plain/local sid is empty.
+        if let Some(tb) = tls_binding { if !sid.is_empty() { verify_channel_binding(&sid, tb)?; } }
         let eph = x25519_keypair();
         let eph_priv = eph.secret.to_bytes();
         let ch = client_hello_block_key(SMP_VERSION, key_hash, false, Some(spki_x25519(eph.public.as_bytes()))).map_err(map_e)?;
@@ -65,7 +67,7 @@ impl Client {
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
-        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash)?;
+        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
         { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
@@ -85,8 +87,8 @@ impl Client {
     /// v0.26: with_sni=false — public relays route SNI connections to the web handler;
     /// no-SNI gets the SMP protocol cert (same trick as XFTP v0.25).
     pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
-        let mut s = connect_tls_sni(addr, host, key_hash, with_sni).map_err(map_e)?;
-        let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash)?;
+        let (mut s, binding) = crate::transport::connect_tls_sni_bound(addr, host, key_hash, with_sni).map_err(map_e)?;
+        let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
         { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
