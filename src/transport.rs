@@ -209,16 +209,30 @@ impl ServerCertVerifier for PinVerifier {
         intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
-        for c in std::iter::once(end_entity).chain(intermediates.iter()) {
-            if cert_fingerprint(c.as_ref()) == self.key_hash {
-                return Ok(ServerCertVerified::assertion());
-            }
+        use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage, ALL_VERIFICATION_ALGS};
+        // SEC-01: pin strictly to the last certificate in the chain (offline CA), never "any cert in chain".
+        let pinned = intermediates.last().unwrap_or(end_entity);
+        if cert_fingerprint(pinned.as_ref()) != self.key_hash {
+            return Err(TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer));
         }
-        Err(TlsError::InvalidCertificate(
-            rustls::CertificateError::UnknownIssuer,
-        ))
+        // Verify the leaf is actually signed by the pinned CA (blocks [evil_leaf, pinned_CA] MITM).
+        let anchor = anchor_from_trusted_cert(pinned)
+            .map_err(|_| TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer))?;
+        let ee = EndEntityCert::try_from(end_entity)
+            .map_err(|_| TlsError::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+        ee.verify_for_usage(
+            ALL_VERIFICATION_ALGS,
+            std::slice::from_ref(&anchor),
+            &[],
+            now,
+            KeyUsage::server_auth(),
+            None,
+            None,
+        )
+        .map_err(|_| TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer))?;
+        Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
         &self,

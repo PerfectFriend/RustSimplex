@@ -228,3 +228,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 29. v0.49 — P0 delivery hardening (audit SEC-03/SEC-08, 2026-11-15)
 - `SUB`/`GET` больше не делают `pop_front`: отдают максимум одно pending-сообщение и хранят его до `ACK`; при ошибке шифрования очередь не очищается. `SEND` с телом >16088 отклоняется сразу как `ERR LARGE_MSG` без сохранения. Регрессионный тест `tests/p0_delivery.rs`: 3 офлайн-сообщения доставляются по одному через SUB/GET+ACK, ни одно не теряется; oversized SEND → LARGE_MSG. Suite **57/57**.
+
+
+## 30. v0.50 — SEC-01 strict cert pinning in rustls path (2026-11-15)
+- `PinVerifier::verify_server_cert` больше не принимает совпадение отпечатка с любым сертификатом цепочки. Пиннинг строго по последнему сертификату (`intermediates.last()`, иначе leaf), затем `rustls-webpki` проверяет, что leaf действительно подписан этим CA (`EndEntityCert::verify_for_usage`, serverAuth). Это закрывает MITM `[evil_leaf, pinned_CA]`. Suite **57/57**. OpenSSL probe-бинарники остаются `NoVerify` по design как live-interop probes.
