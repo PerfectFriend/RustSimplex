@@ -332,3 +332,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 55. v0.75 — zeroize on PqdrRatchet drop (audit item 5, 2026-11-15)
 - Добавлен `zeroize`; `impl Drop for PqdrRatchet` затирает `rk/cks/ckr/nhks/nhkr/pending/skipped/ad`. Default **61/61**.
+
+
+## 56. v0.76 — XFTP FileDesc.orig_size (audit blocker #4, byte-exact trim, 2026-11-15)
+- В `FileDesc` добавлен `orig_size` (encode/decode, обратная совместимость: если `orig=` нет — равен `size`); `decrypt_file` после проверки digest обрезает padding до `orig_size`. Default **61/61**.

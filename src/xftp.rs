@@ -32,6 +32,8 @@ pub type XftpStore = std::collections::HashMap<Vec<u8>, XftpPacket>;
 pub struct FileDesc {
     pub packet_id: Vec<u8>,
     pub size: u64,
+    /// exact original (unpadded) file size for byte-precise trim after decrypt
+    pub orig_size: u64,
     pub digest: [u8; 32],
     pub key: [u8; 32],
     pub chunk_plain: usize,
@@ -41,9 +43,10 @@ pub struct FileDesc {
 impl FileDesc {
     pub fn encode(&self) -> String {
         format!(
-            "smp-xftp/1\nid={}\nsize={}\ndigest={}\nkey={}\nchunk={}\nchunks={}\n",
+            "smp-xftp/1\nid={}\nsize={}\norig={}\ndigest={}\nkey={}\nchunk={}\nchunks={}\n",
             hex(&self.packet_id),
             self.size,
+            self.orig_size,
             hex(&self.digest),
             hex(&self.key),
             self.chunk_plain,
@@ -60,9 +63,12 @@ impl FileDesc {
         if get("smp-xftp/1").is_err() && !s.starts_with("smp-xftp/1") {
             return Err("not a smp-xftp/1 description".into());
         }
+        let size: u64 = get("size")?.parse().map_err(|_| "bad size")?;
+        let orig_size = get("orig").ok().and_then(|v| v.parse().ok()).unwrap_or(size);
         Ok(FileDesc {
             packet_id: unhex(&get("id")?).ok_or("bad id hex")?,
-            size: get("size")?.parse().map_err(|_| "bad size")?,
+            size,
+            orig_size,
             digest: unhex(&get("digest")?).and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok()).ok_or("bad digest")?,
             key: unhex(&get("key")?).and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok()).ok_or("bad key")?,
             chunk_plain: get("chunk")?.parse().map_err(|_| "bad chunk")?,
@@ -128,6 +134,9 @@ pub fn decrypt_file(chunks: &BTreeMap<u32, Vec<u8>>, desc: &FileDesc) -> Result<
     if sha256(&padded) != desc.digest {
         return Err("DIGEST mismatch".into());
     }
+    if desc.orig_size <= desc.size {
+        padded.truncate(desc.orig_size as usize);
+    }
     // strip zero padding: real size = size - trailing zeros within last chunk is ambiguous,
     // so we store exact original length in the description via `size` of padded file;
     // callers that need the exact file keep original len separately (see upload_file).
@@ -159,7 +168,7 @@ pub fn upload_file(
             return Err(format!("FPUT chunk {i} failed: {:?}", r[0]));
         }
     }
-    Ok(FileDesc { packet_id, size: padded.len() as u64, digest, key, chunk_plain: XFTP_CHUNK_PLAIN, chunks: n })
+    Ok(FileDesc { packet_id, size: padded.len() as u64, orig_size: data.len() as u64, digest, key, chunk_plain: XFTP_CHUNK_PLAIN, chunks: n })
 }
 
 /// Full download flow: FGET per chunk offset, collect FDATA, decrypt, verify. Returns padded plaintext.
