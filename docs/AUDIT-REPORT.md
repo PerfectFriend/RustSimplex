@@ -208,3 +208,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 24. v0.42 — isolated strict block e2e green (2026-11-14)
 - `tests/strict_e2e.rs` (`SMP_STRICT=1`): local Engine + Client over 16384B ciphertext blocks — `PING→PONG` and `NEW→IDS` pass. Full default suite still **55/55** with strict off by default; clippy 0 errors.
+
+
+## 25. v0.43 — full strict block-chain round-trip (2026-11-14)
+- `tests/strict_e2e.rs` now runs the whole flow under `SMP_STRICT=1` over 16384B ciphertext blocks: `PING→PONG`, `NEW→IDS`, `SUB→SOK`, `SEND→OK`, pushed `MSG` decrypted byte-equal, `ACK→OK`, `DEL→DELD`. Strict test green; default suite **55/55**.
