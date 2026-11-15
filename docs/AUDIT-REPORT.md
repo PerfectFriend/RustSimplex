@@ -204,3 +204,7 @@ cargo clippy --all-targets         # 0 ошибок
 ## 23. v0.41 — server-side strict encryptBlock behind SMP_STRICT=1 (2026-11-14)
 - `server::handle_conn`: when `SMP_STRICT=1` and client sent `authPubKey`, server derives `sessSecret = DH(server_eph_priv, client_authPubKey)`, takes `strict_keys(sessionId, secret, client=false)`, and switches the poll pump to `write_block_encrypted` / `decrypt_block+decode_block_raw`. Default remains plaintext; suite **54/54** without the flag.
 - `client::Client` now keeps its ephemeral private key and auto-enables strict (`maybe_enable_strict_env`) under the same flag; `enable_strict` test pins key swap.
+
+
+## 24. v0.42 — isolated strict block e2e green (2026-11-14)
+- `tests/strict_e2e.rs` (`SMP_STRICT=1`): local Engine + Client over 16384B ciphertext blocks — `PING→PONG` and `NEW→IDS` pass. Full default suite still **55/55** with strict off by default; clippy 0 errors.
