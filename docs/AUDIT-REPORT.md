@@ -324,3 +324,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 53. v0.73 — audit blocker #2: openssl optional (2026-11-15)
 - `openssl`/`tokio-openssl` стали optional; feature `v71-probes` включает probe-бины `smp-v71`/`xftp-h2-v71` (`required-features`). `cargo check --no-default-features` чистый — lib для Android без `openssl-sys`. Также откатил receiver-first rotation в pqdr (ломал root chain). Default **61/61**.
+
+
+## 54. v0.74 — hardening pass (audit item 5: no panics on wire paths, no dbg spam, 2026-11-15)
+- Убраны `eprintln!("[dbg] ...")` дампы из `client.rs`; `agent.rs` parse/dh_secret/init_e2e_receiver переведены на `Result` (без unwrap/expect на wire-путях); `chat::encode_chat` -> Result. Default **61/61**.

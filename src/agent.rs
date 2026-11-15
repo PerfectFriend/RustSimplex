@@ -160,7 +160,7 @@ pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
             Ok(AgentMsg::ConnInfoReply(qs, r.rest().to_vec()))
         }
         b'M' => {
-            let msg_id = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().unwrap());
+            let msg_id = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().map_err(|_| "bad msg_id".to_string())?);
             let prev_hash = r.short().map_err(|e| e.to_string())?;
             match r.u8().map_err(|e| e.to_string())? {
                 b'H' => Ok(AgentMsg::Hello { msg_id, prev_hash }),
@@ -169,7 +169,7 @@ pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
                     let n = r.u8().map_err(|e| e.to_string())? as usize;
                     let mut receipts = Vec::new();
                     for _ in 0..n {
-                        let agent_msg_id = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().unwrap());
+                        let agent_msg_id = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().map_err(|_| "bad agent_msg_id".to_string())?);
                         let msg_hash = r.short().map_err(|e| e.to_string())?;
                         let rl = r.u16().map_err(|e| e.to_string())? as usize;
                         let rcpt_info = r.take(rl).map_err(|e| e.to_string())?.to_vec();
@@ -178,7 +178,7 @@ pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
                     Ok(AgentMsg::Rcvd { msg_id, prev_hash, receipts })
                 }
                 b'E' => {
-                    let last = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().unwrap());
+                    let last = i64::from_be_bytes(r.take(8).map_err(|e| e.to_string())?.try_into().map_err(|_| "bad last".to_string())?);
                     Ok(AgentMsg::Eready { msg_id, prev_hash, last })
                 }
                 t => Err(format!("unknown aMessage tag {t}")),
@@ -212,9 +212,9 @@ pub struct Agent {
 }
 
 impl Agent {
-    fn dh_secret(&self) -> [u8; 32] {
-        let srv_raw = parse_spki(&self.srv_dh).expect("srv dh spki").1;
-        x25519_dh(&self.rcv_dh.secret, &x25519_public(srv_raw))
+    fn dh_secret(&self) -> Result<[u8; 32], String> {
+        let srv_raw = parse_spki(&self.srv_dh).map_err(|e| e.to_string())?.1;
+        Ok(x25519_dh(&self.rcv_dh.secret, &x25519_public(srv_raw)))
     }
 
     /// Initiator: create a contact queue and produce a connection link.
@@ -397,7 +397,7 @@ impl Agent {
     /// (queue already subscribed in create_contact)
     pub fn accept_contact(&mut self) -> Result<(), String> {
         let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
-        let secret = self.dh_secret();
+        let secret = self.dh_secret()?;
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
@@ -419,7 +419,7 @@ impl Agent {
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
-                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().unwrap(), None)
+                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO is sent (before any A_MSG)
                     if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
@@ -433,7 +433,7 @@ impl Agent {
     /// Joiner: wait for HELLO on own queue, reply HELLO. (queue already subscribed in join_contact)
     pub fn await_hello(&mut self) -> Result<(), String> {
         let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
-        let secret = self.dh_secret();
+        let secret = self.dh_secret()?;
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
@@ -452,7 +452,7 @@ impl Agent {
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
-                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().unwrap(), None)
+                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO reply is sent
                     if !self.init_ci.is_empty() {
@@ -461,7 +461,7 @@ impl Agent {
                                 if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
                                     if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
                                         let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk, dh_raw); }
+                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk, dh_raw)?; }
                                     }
                                 }
                             }
@@ -486,8 +486,8 @@ impl Agent {
     }
 
     /// Negotiate E2E as the receiver (joiner): uses own DH + KEM from the link exchange.
-    pub fn init_e2e_receiver(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32]) {
-        let kem = self.kem.clone().expect("kem");
+    pub fn init_e2e_receiver(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32]) -> Result<(), String> {
+        let kem = self.kem.clone().ok_or("no kem")?;
         let mut r = crate::pqdr::PqdrRatchet::init_receiver(
             sk,
             self.rcv_id.clone(),
@@ -497,6 +497,7 @@ impl Agent {
         );
         r.dh_r = x25519_public(peer_dh_raw);
         self.ratchet = Some(r);
+        Ok(())
     }
 
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {
@@ -518,7 +519,7 @@ impl Agent {
     /// Receive one agent message (blocks on one block). Returns parsed message + raw msg_id.
     pub fn recv_agent(&mut self) -> Result<(Vec<u8>, AgentMsg), String> {
         let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
-        let secret = self.dh_secret();
+        let secret = self.dh_secret()?;
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;

@@ -35,8 +35,8 @@ pub struct ChatMsg {
     pub params: Value,
 }
 
-pub fn encode_chat(cm: &ChatMsg) -> Vec<u8> {
-    serde_json::to_vec(cm).expect("json encode")
+pub fn encode_chat(cm: &ChatMsg) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(cm).map_err(|e| e.to_string())
 }
 
 pub fn parse_chat(body: &[u8]) -> Result<ChatMsg, String> {
@@ -56,7 +56,7 @@ pub fn send_text(a: &mut Agent, text: &str) -> Result<String, String> {
         })
         .map_err(|e| e.to_string())?,
     };
-    a.send_msg(&encode_chat(&cm))?;
+    a.send_msg(&encode_chat(&cm)?)?;
     Ok(msg_id)
 }
 
@@ -99,6 +99,6 @@ pub fn send_info(a: &mut Agent, profile_name: &str) -> Result<(), String> {
         mtype: "x.info".into(),
         params: serde_json::json!({ "profile": { "profileId": "", "localAlias": "", "name": profile_name } }),
     };
-    a.send_msg(&encode_chat(&cm))?;
+    a.send_msg(&encode_chat(&cm)?)?;
     Ok(())
 }

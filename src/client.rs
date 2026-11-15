@@ -50,9 +50,7 @@ pub struct Client {
 impl Client {
     fn handshake(stream: &mut BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<(Vec<u8>, Option<[u8; 32]>, [u8; 32])> {
         let sh = read_block(stream).map_err(map_e)?;
-        eprintln!("[dbg] server hello block: len={} head={}", sh.len(), sh[..sh.len().min(48)].iter().map(|b| format!("{b:02x}")).collect::<String>());
         let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
-        eprintln!("[dbg] parsed: vRange {}..{} sid={}B auth={}", _min, _max, sid.len(), auth_spki.is_some());
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
         check_session_binding(&sid)?;
         // SEC-04: enforce binding when the relay supplied a non-empty sessionId (TLS Finished); plain/local sid is empty.
