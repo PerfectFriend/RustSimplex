@@ -256,3 +256,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 36. v0.56 — bounded offline queue (audit P1, 2026-11-15)
 - `SEND` отклоняется как `ERR QUEUE_FULL` при `messages.len() >= MAX_QUEUE_MSGS (1000)` — нет неограниченного роста памяти офлайн-очереди. Suite **60/60**.
+
+
+## 37. v0.57 — bounded client I/O timeouts (audit P1, 2026-11-15)
+- `connect_plain` и `connect_tls_sni` ставят read/write timeout 30s на TCP сокет — зависший пир не держит клиента бесконечно. Suite **60/60**.

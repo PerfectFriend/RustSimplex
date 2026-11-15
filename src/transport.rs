@@ -313,6 +313,9 @@ pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> std::io:
 /// cert on SNI and route those connections to the web handler; no-SNI gets the SMP cert.
 pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<BoxStream> {
     let tcp = TcpStream::connect(addr)?;
+    // P1: bounded I/O — a stalled peer must not hang the client forever
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
     let name = if with_sni {
         ServerName::try_from(host.to_string())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
@@ -332,5 +335,7 @@ pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sn
 /// Connect over plain TCP. Client socket stays blocking.
 pub fn connect_plain(addr: SocketAddr) -> std::io::Result<BoxStream> {
     let tcp = TcpStream::connect(addr)?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
     Ok(Box::new(tcp))
 }
