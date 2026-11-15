@@ -64,3 +64,6 @@ tests/wire.rs  tests/interop.rs
 spec/            спецификации SMP (simplex-messaging.md, agent-protocol.md, simplex-chat.md)
 simplexmq/       Haskell reference (клон simplex-chat/simplexmq @ stable)
 ```
+
+## Roadmap
+См. `docs/ROADMAP.md`: статус аудита (SEC/P1 закрыты) и план настоящего E2E через PQDR в agent/chat.

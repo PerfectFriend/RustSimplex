@@ -272,3 +272,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 40. v0.61 — TLS channel binding wired into handshake (SEC-04, 2026-11-15)
 - `connect_tls_sni_bound` завершает TLS handshake и вычисляет exporter binding (`SimpleX-channel-binding`, 32B). `Client::handshake` при непустом serverHello sessionId вызывает `verify_channel_binding`. Plain/local sid пустой — binding не навязывается. Suite **60/60**. Примечание: для публичных реле SimpleX sid = TLS Finished verify_data; rustls наружу отдаёт exporter, поэтому финальная сверка с Finished — в backlog (нужен доступ к Finished, не к exporter).
+
+
+## 41. v0.62 — E2E roadmap зафиксирован (2026-11-15)
+- `docs/ROADMAP.md`: план подключения PQDR к agent/chat (ConnInfo pq_support/e2e -> init_sender/init_receiver -> Msg body = ratchet wire -> pqdr_e2e тест 20 msg both ways). Статус: библиотека/интероп готовы, E2E в agent — следующий шаг.
