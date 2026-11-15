@@ -8,7 +8,7 @@ use rcgen::{
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
-use crate::crypto::{base64url_nopad, sha256, spki_ed25519};
+use crate::crypto::{base64url_nopad, sha256};
 
 #[derive(Clone)]
 pub struct RouterIdentity {

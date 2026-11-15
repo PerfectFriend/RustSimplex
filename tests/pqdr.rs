@@ -58,7 +58,7 @@ fn kem_params_wire_golden() {
     let pk = vec![0xAB; KEM_PK_LEN];
     let mut v = Vec::new();
     encode_kem_params(&mut v, &KemParams::Pk(pk.clone())).unwrap();
-    assert_eq!(&v[..2], &[b'1', b'P']);
+    assert_eq!(&v[..2], b"1P");
     assert_eq!(&v[2..4], &(KEM_PK_LEN as u16).to_be_bytes());
     assert_eq!(&v[4..], &pk[..]);
     let mut r = Reader::new(&v);
@@ -68,7 +68,7 @@ fn kem_params_wire_golden() {
     let ct = vec![0xCD; KEM_CT_LEN];
     let mut v = Vec::new();
     encode_kem_params(&mut v, &KemParams::CtPk(ct.clone(), pk.clone())).unwrap();
-    assert_eq!(&v[..2], &[b'1', b'A']);
+    assert_eq!(&v[..2], b"1A");
     let mut r = Reader::new(&v);
     assert_eq!(decode_kem_params(&mut r).unwrap(), KemParams::CtPk(ct, pk));
 }

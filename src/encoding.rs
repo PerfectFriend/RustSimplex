@@ -139,7 +139,7 @@ pub fn pad(msg: &[u8], total: usize) -> Result<Vec<u8>, EncodeError> {
     out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
     out.extend_from_slice(msg);
     let pad_len = total - msg.len() - 2;
-    out.extend(std::iter::repeat(b'#').take(pad_len));
+    out.extend(std::iter::repeat_n(b'#', pad_len));
     Ok(out)
 }
 

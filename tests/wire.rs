@@ -100,7 +100,7 @@ fn transmission_block_layout_single() {
     exp.extend_from_slice(b"PING");
     assert_eq!(wire, exp);
 
-    let blk = encode_block(&[wire.clone()]).unwrap();
+    let blk = encode_block(std::slice::from_ref(&wire)).unwrap();
     assert_eq!(blk.len(), BLOCK_SIZE);
     // outer pad: word16BE(content_len) ...
     let content = unpad(&blk).unwrap();

@@ -19,7 +19,7 @@ async fn main() {
     let port: u16 = std::env::args().nth(2).unwrap_or_else(|| "443".into()).parse().unwrap();
     println!("connect {host}:{port} ALPN xftp/1");
 
-    let mut roots = rustls::RootCertStore::empty();
+    let _roots = rustls::RootCertStore::empty();
     // permissive: probe only
     let verifier = Arc::new(NoVerify);
     let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
@@ -110,7 +110,7 @@ async fn main() {
     println!("server xftp version range {vmin_srv}..{vmax_srv} sessionId(73)={}; transmission uses empty sessionId (tls-unique)", hex(&sid));
 
     // keyHash = SHA-256 of CA certificate DER (arg 3 = path to ca.crt PEM, optional)
-    let key_hash: [u8; 32] = match std::env::args().nth(3) {
+    let _key_hash: [u8; 32] = match std::env::args().nth(3) {
         Some(p) => {
             use sha2::Digest;
             let b = std::fs::read(&p).expect("ca cert");
@@ -147,7 +147,7 @@ async fn main() {
     println!("PING -> {} bytes payload: {:?}", pr.len(), String::from_utf8_lossy(&pr[2..(2 + pl).min(pr.len())]));
 
     // 4. FNEW: create a file packet. Signed with sender Ed25519 key.
-    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+    use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
     use sha2::Digest;
     let snd = SigningKey::generate(&mut rand::rngs::OsRng);
     let rcv = SigningKey::generate(&mut rand::rngs::OsRng);
@@ -228,7 +228,7 @@ async fn main() {
         t.push(sid.len() as u8);
         t.extend_from_slice(sid);
         t.push(corr.len() as u8);
-        t.extend_from_slice(&corr);
+        t.extend_from_slice(corr);
         t.push(entity.len() as u8);
         t.extend_from_slice(entity);
         t.extend_from_slice(cmd);

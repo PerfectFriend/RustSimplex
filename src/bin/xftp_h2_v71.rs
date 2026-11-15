@@ -40,9 +40,9 @@ async fn main() {
     let connector = builder.build();
 
     let tcp = TcpStream::connect((host.as_str(), port)).await.expect("tcp");
-    let mut cfg = connector.configure().expect("configure");
+    let cfg = connector.configure().expect("configure");
     // NO SNI: the public relay serves the web cert on SNI and treats SNI connections as web (ERR SESSION)
-    let ssl_obj = cfg.into_ssl("localhost").expect("ssl");
+    let _ssl_obj = cfg.into_ssl("localhost").expect("ssl");
     let ssl_obj = openssl::ssl::Ssl::new(connector.context()).expect("ssl ctx");
     let ssl_obj = {
         let mut s = ssl_obj;

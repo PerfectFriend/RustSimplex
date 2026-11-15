@@ -51,7 +51,7 @@ impl FileDesc {
         )
     }
     pub fn decode(s: &str) -> Result<FileDesc, String> {
-        let mut get = |k: &str| -> Result<String, String> {
+        let get = |k: &str| -> Result<String, String> {
             s.lines()
                 .find_map(|l| l.strip_prefix(&format!("{k}=")))
                 .map(|v| v.to_string())
@@ -75,7 +75,7 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
@@ -89,7 +89,7 @@ pub fn encrypt_file(data: &[u8]) -> (Vec<u8>, [u8; 32], [u8; 32]) {
     let rem = data.len() % XFTP_CHUNK_PLAIN;
     let pad = if rem == 0 { 0 } else { XFTP_CHUNK_PLAIN - rem };
     let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(0u8).take(pad));
+    padded.extend(std::iter::repeat_n(0u8, pad));
     let digest = sha256(&padded);
     (padded, k, digest)
 }

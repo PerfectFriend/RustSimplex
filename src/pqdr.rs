@@ -19,7 +19,7 @@
 use sha2::{Digest, Sha512};
 
 use crate::crypto::{secretbox_decrypt, secretbox_encrypt, x25519_dh, x25519_keypair, x25519_public, X25519Keypair, XPublic};
-use crate::encoding::{w_large, w_short, w_u16, w_u32, EncodeError, Reader};
+use crate::encoding::{w_short, w_u16, w_u32, EncodeError, Reader};
 use crate::pq::{kem_decaps, kem_encaps, kem_keypair, KemKeypair, KemParams, KEM_CT_LEN, KEM_PK_LEN};
 
 pub const PQDR_VERSION: u16 = 3; // pqRatchetE2EEncryptVersion

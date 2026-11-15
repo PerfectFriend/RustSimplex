@@ -73,7 +73,7 @@ pub fn encode_agent(m: &AgentMsg, msg_id: i64, prev_hash: &[u8]) -> Vec<u8> {
         }
         AgentMsg::ConnInfoReply(qs, ci) => {
             o.push(b'D');
-            w_short(&mut o, &(qs.len() as u8).to_be_bytes().to_vec()).ok();
+            w_short(&mut o, (qs.len() as u8).to_be_bytes().as_ref()).ok();
             // smpQueues = length 1*newQueueInfo ; length = 1 byte count
             o.clear();
             o.push(b'D');
@@ -296,7 +296,7 @@ impl Agent {
         let (kh, hostport) = kh_host.split_once('@').ok_or("bad link authority")?;
         let (host, port) = hostport.split_once(':').ok_or("bad hostport")?;
         let (rcv_hex, params) = frag.split_once('?').ok_or("bad link params")?;
-        let rcv_id = crate::xftp::unhex(rcv_hex).ok_or("bad rcv hex")?;
+        let _rcv_id = crate::xftp::unhex(rcv_hex).ok_or("bad rcv hex")?;
         let mut init_snd = Vec::new();
         for kv in params.split('&') {
             if let Some(v) = kv.strip_prefix("snd=") {

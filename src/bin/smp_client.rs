@@ -146,7 +146,7 @@ fn main() {
             )
             .expect("NEW2");
         let rcv_id2 = match &resp2[0] {
-            BrokerMsg::Ids { rcv_id, snd_id: _, .. } => rcv_id.clone(),
+            BrokerMsg::Ids { rcv_id, .. } => rcv_id.clone(),
             other => panic!("expected IDS, got {other:?}"),
         };
         let ntf_auth = ed25519_keypair();

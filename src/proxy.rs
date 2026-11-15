@@ -11,7 +11,6 @@
 //! Deviation from spec (documented): our plain-mode hello has empty sessionId, so the proxy
 //! generates a random 24-byte proxy session id used as PFWD entity id; PKEY carries it as sessionId.
 
-use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use crate::crypto::*;

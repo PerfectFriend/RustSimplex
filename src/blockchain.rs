@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn chain_roundtrip_and_advance() {
         let (c0a, _c0b) = sbc_init(b"session-id-32-bytes-aaaaaaaaaaaaa", b"dh-secret-32-bytes-aaaaaaaaaaaa");
-        let mut ck = c0a;
+        let ck = c0a;
         let mut block = b"PING".to_vec();
         block.extend_from_slice(&[0u8; 100]);
         let (ck1, ct) = encrypt_block(&ck, &block);

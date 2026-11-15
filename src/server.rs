@@ -6,7 +6,7 @@
 //! pump drains and writes — so a single writer per connection, no TLS split needed.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -62,12 +62,18 @@ impl ServerState {
     }
 }
 
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn new_state() -> Arc<Mutex<ServerState>> {
     Arc::new(Mutex::new(ServerState::new()))
 }
 
 pub fn new_state_persist(path: std::path::PathBuf) -> Arc<Mutex<ServerState>> {
-    let mut st = crate::store::load(&path).unwrap_or_else(ServerState::new);
+    let mut st = crate::store::load(&path).unwrap_or_default();
     st.persist = Some(path);
     Arc::new(Mutex::new(st))
 }
@@ -113,8 +119,6 @@ macro_rules! err_np {
         })
     };
 }
-use resp_np;
-use err_np;
 
 pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN)?;
@@ -245,7 +249,7 @@ fn dispatch_cmd(
                     Ok(e) => e,
                     Err(_) => {
                         // v0.21: oversized msg breaks the queue — drop it, reply ERR to client
-                        let _ = q.messages.clear();
+                        q.messages.clear();
                         return vec![err_np!(t.corr_id.clone(), rcv_id, "INTERNAL")]
                     }
                 };

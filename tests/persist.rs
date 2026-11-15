@@ -21,7 +21,7 @@ fn queues_survive_restart() {
     let addr;
     let (rcv_id, snd_id, secret) = {
         let e = Engine::bind_plain_store("127.0.0.1:0", Some(store_path.clone())).unwrap();
-        let (a, _st, sd, h) = spawn_engine(e);
+        let (a, _st, sd, _h) = spawn_engine(e);
         addr = a;
         let kh = [0xCDu8; 32];
         let mut rcv = Client::connect_plain(addr, &kh).unwrap();
@@ -67,7 +67,7 @@ fn queues_survive_restart() {
     // restart engine on the same store file: SUB must deliver the pending message
     let e = Engine::bind_plain_store("127.0.0.1:0", Some(store_path.clone())).unwrap();
     let (addr2, _st, _sd, _h) = spawn_engine(e);
-    let kh = [0xCDu8; 32];
+    let _kh = [0xCDu8; 32];
     // we need the rcv auth key to sign SUB — regenerate is impossible, so use state directly:
     // instead verify via a fresh connection using stored auth: emulate by signing with state key
     // Simpler: connect and SUB requires the private key, which we no longer have in this scope.
@@ -105,7 +105,7 @@ fn v0_20_encrypted_snapshot_tamper_detected() {
     let key = [0x5Bu8; 32];
     std::env::set_var("SMP_STORE_KEY", hex::encode(key));
     let p = scratch_file("test-smp-tamper.bin");
-    let e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
+    let _e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
     let st = smp_rs::server::ServerState::new();
     store::save(&p, &st).unwrap();
     let mut raw = std::fs::read(&p).unwrap();
@@ -121,7 +121,7 @@ fn v0_20_wrong_key_rejected_and_legacy_plaintext_loads() {
     let key = [0x5Cu8; 32];
     std::env::set_var("SMP_STORE_KEY", hex::encode(key));
     let p = scratch_file("test-smp-key.bin");
-    let e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
+    let _e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
     let st = smp_rs::server::ServerState::new();
     store::save(&p, &st).unwrap();
     std::env::set_var("SMP_STORE_KEY", hex::encode([0x77u8; 32]));
