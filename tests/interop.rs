@@ -176,7 +176,7 @@ fn session_binding_rejects_nonempty_sid() {
     use smp_rs::client::check_session_binding;
     // v0.26: non-empty sessionId (TLS 1.3 Finished) is valid; assertion vs tls-unique happens in handshake
     assert!(check_session_binding(b"").is_ok());
-    assert!(check_session_binding(b"tls-finished-32B-value............").is_ok());
+    assert!(check_session_binding(&[7u8; 32]).is_ok());
 }
 
 #[test]
@@ -223,4 +223,16 @@ fn v0_18_garbage_block_does_not_kill_connection() {
     let resp2 = read_block(&mut s).unwrap();
     let msgs2 = decode_block(&resp2).unwrap();
     assert!(msgs2.iter().any(|w| smp_rs::protocol::decode_transmission(w).map(|t| t.command.starts_with(b"PONG")).unwrap_or(false)));
+}
+
+#[test]
+fn channel_binding_rejects_rewritten_sid() {
+    use smp_rs::client::{check_session_binding, verify_channel_binding};
+    let real = [9u8; 32];
+    assert!(check_session_binding(&real).is_ok());
+    assert!(check_session_binding(b"").is_ok());
+    assert!(check_session_binding(b"short").is_err());
+    assert!(verify_channel_binding(&real, &real).is_ok());
+    assert!(verify_channel_binding(&[8u8; 32], &real).is_err());
+    assert!(verify_channel_binding(b"", b"").is_err());
 }

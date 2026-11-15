@@ -248,3 +248,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 34. v0.54 — proxy destination SSRF guard (audit P1, 2026-11-15)
 - `Command::Proxy` теперь отклоняет непубличные IP (loopback/private/link-local/multicast/ULA), `localhost`, нестандартные порты (разрешены 5223/443) и мусорные host-строки. Локальные цели возможны только с явным `SMP_ALLOW_LOCAL_PROXY=1` для тестов. Тест `proxy_guard_tests`; suite **59/59**.
+
+
+## 35. v0.55 — channel binding primitives (audit SEC-04, 2026-11-15)
+- `check_session_binding` теперь валидирует длину sid (0 для plain TCP, 32B для TLS 1.3 Finished). Добавлен `verify_channel_binding(sid, tls_binding)` — равенство sid и живого TLS binding, негативный тест на подменённый sid. Suite **60/60**.

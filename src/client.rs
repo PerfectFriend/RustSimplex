@@ -13,10 +13,22 @@ pub type ClResult<T> = Result<T, String>;
 /// Channel binding (spec appendix A): client asserts sessionIdentifier == tls-unique.
 /// TLS 1.3 has empty tls-unique (RFC 5929) and plain TCP uses "" — so sessionId must be empty.
 pub fn check_session_binding(sid: &[u8]) -> ClResult<()> {
-    // v0.26: for TLS 1.3 sessionId = client Finished verify_data (non-empty, 32B) —
-    // accepted as-is; empty is also valid (plain TCP). Assertion vs tls-unique needs the TLS handle.
-    let _ = sid;
+    // v0.26: TLS 1.3 sessionId = client Finished verify_data (32B); plain TCP may be empty.
+    // Length is enforced here; equality with the live TLS binding is verify_channel_binding().
+    if !(sid.is_empty() || sid.len() == 32) {
+        return Err("bad session id length".into());
+    }
     Ok(())
+}
+
+/// SEC-04: when the caller has the live TLS binding (Finished verify_data or exporter),
+/// sessionId MUST equal it — rejects a MITM that rewrites serverHello sessionId.
+pub fn verify_channel_binding(sid: &[u8], tls_binding: &[u8]) -> ClResult<()> {
+    if sid == tls_binding && !sid.is_empty() {
+        Ok(())
+    } else {
+        Err("channel binding mismatch".into())
+    }
 }
 
 fn map_e<E: std::fmt::Display>(e: E) -> String {
