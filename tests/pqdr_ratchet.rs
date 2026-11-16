@@ -16,7 +16,7 @@ fn pair(sk: &[u8; 32], ad: &[u8]) -> (PqdrRatchet, PqdrRatchet) {
         ad.to_vec(),
         bob_dh.public,
         bob_kem.ek.as_ref().to_vec(),
-    );
+    ).unwrap();
     let bob = PqdrRatchet::init_receiver(
         sk,
         ad.to_vec(),

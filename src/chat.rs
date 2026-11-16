@@ -71,6 +71,10 @@ pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
         for m in &msgs {
             if let crate::protocol::BrokerMsg::Msg { msg_id, body } = m {
                 let pt = crate::server::decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
+                // ACK the broker message so it is removed from the queue (no redelivery/QUEUE_FULL)
+                a.client
+                    .request(crate::protocol::Command::Ack(msg_id.clone()), a.rcv_id.clone(), Some(&a.rcv_auth))
+                    .map_err(|e| e.to_string())?;
                 let Ok(mut am) = parse_agent_pub(&pt) else { continue };
                 if let AgentMsg::Msg { body, .. } = &mut am {
                     if let Some(r) = &mut a.ratchet {

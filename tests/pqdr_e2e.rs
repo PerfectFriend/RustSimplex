@@ -16,7 +16,7 @@ fn pqdr_e2e_twenty_messages_both_directions() {
     let kem_b_pk = kem_b.ek.as_ref().to_vec();
 
     // Alice (sender) encapsulates to Bob's keys.
-    let mut alice = PqdrRatchet::init_sender(&sk, ad.clone(), x25519_public(dh_b_raw), kem_b_pk);
+    let mut alice = PqdrRatchet::init_sender(&sk, ad.clone(), x25519_public(dh_b_raw), kem_b_pk).unwrap();
     let mut bob = PqdrRatchet::init_receiver(&sk, ad, dh_b, kem_b, Vec::new());
     assert_eq!(PQDR_VERSION, 3);
 
@@ -40,7 +40,7 @@ fn pqdr_snapshot_restore_continues_chain() {
     let ad = b"snap".to_vec();
     let dh_b = smp_rs::crypto::x25519_keypair();
     let kem_b = smp_rs::pq::kem_keypair();
-    let mut alice = PqdrRatchet::init_sender(&sk, ad.clone(), smp_rs::crypto::x25519_public(dh_b.public.to_bytes()), kem_b.ek.as_ref().to_vec());
+    let mut alice = PqdrRatchet::init_sender(&sk, ad.clone(), smp_rs::crypto::x25519_public(dh_b.public.to_bytes()), kem_b.ek.as_ref().to_vec()).unwrap();
     let mut bob = PqdrRatchet::init_receiver(&sk, ad, dh_b, kem_b, Vec::new());
     for i in 0..5 {
         let m = format!("pre{i}").into_bytes();

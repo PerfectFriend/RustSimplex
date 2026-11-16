@@ -192,15 +192,15 @@ fn dh_pub_raw(kp: &X25519Keypair) -> [u8; 32] {
 impl PqdrRatchet {
     /// Sender init (Alice): SK = initial shared secret from X3DH-style key agreement.
     /// Bob's DH pub `dh_r` and KEM pub `kem_r` come from the connection request.
-    pub fn init_sender(sk: &[u8; 32], ad: Vec<u8>, dh_r: XPublic, kem_r: Vec<u8>) -> PqdrRatchet {
+    pub fn init_sender(sk: &[u8; 32], ad: Vec<u8>, dh_r: XPublic, kem_r: Vec<u8>) -> Result<PqdrRatchet, String> {
         let dh_s = x25519_keypair();
         let kem_s = kem_keypair();
-        // KEM #1 at init: encapsulate against Bob's KEM key
-        let (ct, ss) = kem_encaps_pub(&kem_r);
+        // KEM #1 at init: encapsulate against Bob's KEM key (peer-supplied — validate, never panic)
+        let (ct, ss) = kem_encaps_pub(&kem_r)?;
         let dh = x25519_dh(&dh_s.secret, &dh_r);
         let (rk, cks, nhks) = root_kdf(sk, &dh, Some(&ss));
         let kem_pk = kem_s.ek.as_ref().to_vec();
-        PqdrRatchet {
+        Ok(PqdrRatchet {
             ad,
             rk,
             dh_s,
@@ -216,7 +216,7 @@ impl PqdrRatchet {
             ns: 0,
             nr: 0,
             skipped: Vec::new(),
-        }
+        })
     }
 
     /// Receiver init (Bob): SK, own DH `dh_s` and own KEM `kem_s` (the pair Alice already
@@ -317,7 +317,7 @@ impl PqdrRatchet {
             if new_kem_pk.len() != KEM_PK_LEN {
                 return Err("KEM pk len".into());
             }
-            let (ct, ss) = kem_encaps_pub(&new_kem_pk);
+            let (ct, ss) = kem_encaps_pub(&new_kem_pk)?;
             let dh2 = x25519_dh(&self.dh_s.secret, &dh_pub);
             let (rk2, cks, nhks) = root_kdf(&rk1, &dh2, Some(&ss));
             self.rk = rk2;
@@ -374,10 +374,13 @@ impl PqdrRatchet {
     }
 }
 
-/// Encapsulate against a raw KEM public key (1158 bytes).
-pub fn kem_encaps_pub(pk: &[u8]) -> (Vec<u8>, [u8; 32]) {
-    let ek = sntrup761::EncapsulationKey::try_from(pk).expect("kem pk len");
-    kem_encaps(&ek)
+/// Encapsulate against a raw KEM public key (1158 bytes). Fails (no panic) on bad length.
+pub fn kem_encaps_pub(pk: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
+    if pk.len() != KEM_PK_LEN {
+        return Err(format!("kem pk len {} != {KEM_PK_LEN}", pk.len()));
+    }
+    let ek = sntrup761::EncapsulationKey::try_from(pk).map_err(|e| format!("kem pk: {e}"))?;
+    Ok(kem_encaps(&ek))
 }
 
 impl Drop for PqdrRatchet {

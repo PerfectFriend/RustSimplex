@@ -241,7 +241,7 @@ impl Agent {
                 Some(&rcv_auth),
             )
             .map_err(|e| e.to_string())?;
-        let (rcv_id, snd_id, srv_dh) = match &r[0] {
+        let (rcv_id, snd_id, srv_dh) = match r.first().ok_or("empty response, expected IDS")? {
             BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, .. } => (rcv_id.clone(), snd_id.clone(), rcv_dh_key.clone()),
             other => return Err(format!("expected IDS, got {other:?}")),
         };
@@ -343,7 +343,7 @@ impl Agent {
                 Some(&rcv_auth),
             )
             .map_err(|e| e.to_string())?;
-        let (my_rcv, my_snd, srv_dh) = match &r[0] {
+        let (my_rcv, my_snd, srv_dh) = match r.first().ok_or("empty response, expected IDS")? {
             BrokerMsg::Ids { rcv_id, snd_id, rcv_dh_key, .. } => (rcv_id.clone(), snd_id.clone(), rcv_dh_key.clone()),
             other => return Err(format!("expected IDS, got {other:?}")),
         };
@@ -414,10 +414,11 @@ impl Agent {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                 if let AgentMsg::ConnInfoReply(qs, ci) = parse_agent(&pt)? {
-                    let peer = qs[0].sender_id.clone();
+                    let Some(q0) = qs.first() else { return Err("empty smpQueues in D".into()) };
+                    let peer = q0.sender_id.clone();
                     self.peer_snd_id = Some(peer);
                     // auto-negotiate E2E: SK = DH(our rcv_dh, joiner rcv_dh from queue info)
-                    let peer_dh_raw = parse_spki(&qs[0].dh_pub).map_err(|e| e.to_string())?.1;
+                    let peer_dh_raw = parse_spki(&q0.dh_pub).map_err(|e| e.to_string())?.1;
                     let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(peer_dh_raw));
                     let peer_kem = (|| {
                         let ci: ConnInfo = serde_json::from_slice(&ci).ok()?;
@@ -427,14 +428,20 @@ impl Agent {
                             crate::pq::KemParams::Pk(pk) | crate::pq::KemParams::CtPk(_, pk) => Some(pk),
                             _ => None,
                         }
-                    })().unwrap_or_default();
+                    })();
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
                         .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
-                    // init E2E only AFTER HELLO is sent (before any A_MSG)
-                    if self.e2e { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
+                    // init E2E only AFTER HELLO is sent (before any A_MSG); fail-closed:
+                    // with e2e on, a missing/malformed peer KEM key is an error, never plaintext.
+                    if self.e2e {
+                        let kem = peer_kem
+                            .filter(|k| k.len() == crate::pq::KEM_PK_LEN)
+                            .ok_or("E2E on: missing or malformed peer KEM key in connInfo")?;
+                        self.init_e2e_sender(&sk, peer_dh_raw, kem)?;
+                    }
                     return Ok(());
                 }
             }
@@ -450,34 +457,24 @@ impl Agent {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                 if matches!(parse_agent(&pt)?, AgentMsg::Hello { .. }) {
-                    if !self.init_ci.is_empty() {
-                        if let Ok(ci) = serde_json::from_slice::<ConnInfo>(&self.init_ci) {
-                            if let Some(e2e) = ci.e2e {
-                                if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
-                                    if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
-                                        let _sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                    }
-                                }
-                            }
-                        }
-                    }
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     self.client
                         .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
-                    // init E2E only AFTER HELLO reply is sent
-                    if !self.init_ci.is_empty() {
-                        if let Ok(ci) = serde_json::from_slice::<ConnInfo>(&self.init_ci) {
-                            if let Some(e2e) = ci.e2e {
-                                if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
-                                    if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
-                                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                        if self.e2e { self.init_e2e_receiver(&sk, dh_raw)?; }
-                                    }
-                                }
-                            }
+                    // init E2E only AFTER HELLO reply is sent; fail-closed: with e2e on,
+                    // unparsable e2e params in the link are an error, never a silent downgrade.
+                    if self.e2e {
+                        if self.init_ci.is_empty() {
+                            return Err("E2E on: empty init_ci, cannot negotiate".into());
                         }
+                        let ci: ConnInfo = serde_json::from_slice(&self.init_ci).map_err(|e| format!("init_ci: {e}"))?;
+                        let e2e = ci.e2e.ok_or("E2E on: no e2e params in init_ci")?;
+                        let params = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e))
+                            .map_err(|e| format!("e2e params: {e}"))?;
+                        let (_, dh_raw) = parse_spki(&params.snd_dh_spki).map_err(|e| e.to_string())?;
+                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
+                        self.init_e2e_receiver(&sk, dh_raw)?;
                     }
                     return Ok(());
                 }
@@ -488,13 +485,14 @@ impl Agent {
 
     /// Send an application message (A_MSG). Returns the agent msg id used.
     /// Negotiate E2E as the sender (initiator): peer DH raw + peer KEM pk from connInfo.
-    pub fn init_e2e_sender(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32], peer_kem_pk: Vec<u8>) {
+    pub fn init_e2e_sender(&mut self, sk: &[u8; 32], peer_dh_raw: [u8; 32], peer_kem_pk: Vec<u8>) -> Result<(), String> {
         self.ratchet = Some(crate::pqdr::PqdrRatchet::init_sender(
             sk,
             self.rcv_id.clone(),
             x25519_public(peer_dh_raw),
             peer_kem_pk,
-        ));
+        )?);
+        Ok(())
     }
 
     /// Negotiate E2E as the receiver (joiner): uses own DH + KEM from the link exchange.
@@ -513,6 +511,11 @@ impl Agent {
     }
 
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {
+        // fail-closed: E2E is on by default — never send plaintext just because the
+        // ratchet is not negotiated yet (that was a silent downgrade).
+        if self.e2e && self.ratchet.is_none() {
+            return Err("E2E on but ratchet not negotiated — refusing plaintext send".into());
+        }
         self.msg_counter += 1;
         let id = self.msg_counter;
         // E2E: a fresh receiver has no ckr yet — buffer the PLAINTEXT until the first
@@ -538,7 +541,13 @@ impl Agent {
 
     /// Flush buffered E2E sends once the receiving chain exists (encrypt in original order).
     pub fn flush_outbox(&mut self) -> Result<(), String> {
-        if self.outbox.is_empty() || !self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
+        if self.outbox.is_empty() {
+            return Ok(());
+        }
+        if self.e2e && self.ratchet.is_none() {
+            return Err("E2E on but ratchet not negotiated — outbox would go plaintext".into());
+        }
+        if !self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
             return Ok(());
         }
         let peer = self.peer_snd_id.clone().ok_or("no peer")?;
@@ -555,10 +564,12 @@ impl Agent {
         Ok(())
     }
 
-    /// Receive one agent message (blocks on one block). Returns parsed message + raw msg_id.
+    /// Receive agent messages (one block). ACKs EVERY delivered MSG (queue cleanup,
+    /// no QUEUE_FULL / redelivery) and returns the first parsed agent message.
     pub fn recv_agent(&mut self) -> Result<(Vec<u8>, AgentMsg), String> {
         let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
         let secret = self.dh_secret()?;
+        let mut first: Option<(Vec<u8>, AgentMsg)> = None;
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
@@ -569,11 +580,17 @@ impl Agent {
                         am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
                     }
                 }
-                let _ = self.flush_outbox();
-                return Ok((msg_id.clone(), am));
+                // ACK the broker message so it is removed from the queue
+                self.client
+                    .request(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                    .map_err(|e| e.to_string())?;
+                if first.is_none() {
+                    first = Some((msg_id.clone(), am));
+                }
             }
         }
-        Err("no MSG in block".into())
+        let _ = self.flush_outbox();
+        first.ok_or_else(|| "no MSG in block".to_string())
     }
 
     /// Send A_RCVD for a received agent msg id.
