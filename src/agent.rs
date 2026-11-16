@@ -455,7 +455,7 @@ impl Agent {
                             if let Some(e2e) = ci.e2e {
                                 if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
                                     if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
-                                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
+                                        let _sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
                                     }
                                 }
                             }

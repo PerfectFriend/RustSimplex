@@ -24,7 +24,7 @@ impl AsyncSmpClient {
             if tls {
                 if let Some(p) = &proxy {
                     let (stream, binding) = connect_tls_sni_proxy(&host, port, kh, true, p).map_err(|e| e.to_string())?;
-                    let mut c = Client::from_stream(stream, kh);
+                    let c = Client::from_stream(stream, kh);
                     // binding is available for verify_channel_binding when needed
                     let _ = binding;
                     return Ok(c);

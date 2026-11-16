@@ -47,8 +47,11 @@ pub struct Client {
     eph_priv: Option<[u8; 32]>,
 }
 
+/// (sessionId, tlsBinding, keyHash) extracted from a server hello.
+pub type HandshakeKeys = (Vec<u8>, Option<[u8; 32]>, [u8; 32]);
+
 impl Client {
-    fn handshake(stream: &mut BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<(Vec<u8>, Option<[u8; 32]>, [u8; 32])> {
+    fn handshake(stream: &mut BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<HandshakeKeys> {
         let sh = read_block(stream).map_err(map_e)?;
         let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.

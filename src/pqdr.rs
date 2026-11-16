@@ -180,8 +180,10 @@ pub struct PqdrRatchet {
     pub ns: u32,
     pub nr: u32,
     /// skipped message keys: (dh_pub_raw, n) -> mk
-    skipped: Vec<([u8; 32], u32, [u8; 32], [u8; 16])>,
+    skipped: Vec<SkippedKey>,
 }
+
+type SkippedKey = ([u8; 32], u32, [u8; 32], [u8; 16]);
 
 fn dh_pub_raw(kp: &X25519Keypair) -> [u8; 32] {
     kp.public.to_bytes()
@@ -404,7 +406,7 @@ fn put_opt32(o: &mut Vec<u8>, a: &Option<[u8; 32]>) { match a { Some(v) => { o.p
 struct Cur<'a> { b: &'a [u8], p: usize }
 impl<'a> Cur<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> { if self.p + n > self.b.len() { return Err("short snapshot".into()); } let r = &self.b[self.p..self.p+n]; self.p += n; Ok(r) }
-    fn b32(&mut self) -> Result<[u8; 32], String> { Ok(self.take(32)?.try_into().map_err(|_| "bad32".to_string())?) }
+    fn b32(&mut self) -> Result<[u8; 32], String> { self.take(32)?.try_into().map_err(|_| "bad32".to_string()) }
     fn bytes(&mut self) -> Result<Vec<u8>, String> { let n = u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "bad len".to_string())?) as usize; Ok(self.take(n)?.to_vec()) }
     fn opt32(&mut self) -> Result<Option<[u8; 32]>, String> { Ok(if self.take(1)?[0] == 1 { Some(self.b32()?) } else { None }) }
     fn u32(&mut self) -> Result<u32, String> { Ok(u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "bad u32".to_string())?)) }

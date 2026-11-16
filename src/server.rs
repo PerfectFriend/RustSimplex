@@ -306,10 +306,9 @@ fn dispatch_cmd(
                 // v0.21: oversized message — drop it, deliver ERR INTERNAL via push pipe (no panic)
                 match encrypt_for_recipient(&q.rcv_dh_secret, &msg_id, &body) {
                     Ok(enc) => {
-                        if let msg_t = resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc }) {
-                            if let Ok(wire) = encode_transmission(&msg_t) {
-                                let _ = sub.send(wire);
-                            }
+                        let msg_t = resp_np!(random_bytes(24), rcv_id.clone(), BrokerMsg::Msg { msg_id: msg_id.clone(), body: enc });
+                        if let Ok(wire) = encode_transmission(&msg_t) {
+                            let _ = sub.send(wire);
                         }
                     }
                     Err(_) => {
@@ -328,7 +327,7 @@ fn dispatch_cmd(
                 if let (Some(ntf_secret), Some(ntf_sub)) = (&q.rcv_ntf_dh_secret, &q.ntf_subscriber) {
                     let nonce = random_bytes(24);
                     let mut meta = Vec::new();
-                    crate::encoding::w_short(&mut meta, &msg_id);
+                    let _ = crate::encoding::w_short(&mut meta, &msg_id);
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -338,10 +337,9 @@ fn dispatch_cmd(
                         let mut n24 = [0u8; 24];
                         n24.copy_from_slice(&nonce);
                         let enc_meta = secretbox_encrypt(ntf_secret, &n24, &padded);
-                        if let ntf_t = resp_np!(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta }) {
-                            if let Ok(wire) = encode_transmission(&ntf_t) {
-                                let _ = ntf_sub.send(wire);
-                            }
+                        let ntf_t = resp_np!(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta });
+                        if let Ok(wire) = encode_transmission(&ntf_t) {
+                            let _ = ntf_sub.send(wire);
                         }
                     }
                 }
@@ -448,9 +446,7 @@ fn dispatch_cmd(
                     break;
                 }
                 size += need;
-                if let r = resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fdata { offset: *off, chunk: ch.clone() }) {
-                    out.push(r);
-                }
+                out.push(resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fdata { offset: *off, chunk: ch.clone() }));
             }
             if out.is_empty() {
                 out.push(err_np!(t.corr_id.clone(), vec![], "NO_FILE"));

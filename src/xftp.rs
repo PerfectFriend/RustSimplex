@@ -232,7 +232,7 @@ pub fn upload_file_stream(
     let sender_spki = spki_ed25519(&sender.verifying.to_bytes());
     // FNEW needs padded size + digest: pre-scan for digest (streaming, low RAM)
     let mut f2 = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut rem = total as usize % XFTP_CHUNK_PLAIN;
+    let rem = total as usize % XFTP_CHUNK_PLAIN;
     let mut scan = vec![0u8; XFTP_CHUNK_PLAIN];
     loop {
         let r = f2.read(&mut scan).map_err(|e| e.to_string())?;
@@ -240,7 +240,7 @@ pub fn upload_file_stream(
         hasher.update(&scan[..r]);
         n += 1;
     }
-    if rem != 0 { hasher.update(&vec![0u8; XFTP_CHUNK_PLAIN - rem]); n += 1; }
+    if rem != 0 { hasher.update(vec![0u8; XFTP_CHUNK_PLAIN - rem]); n += 1; }
     let digest = hasher.finalize();
     let mut digest_arr = [0u8; 32]; digest_arr.copy_from_slice(&digest);
     let padded_size = (n as usize) * XFTP_CHUNK_PLAIN;

@@ -71,18 +71,17 @@ pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
         for m in &msgs {
             if let crate::protocol::BrokerMsg::Msg { msg_id, body } = m {
                 let pt = crate::server::decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                if let Ok(mut am) = parse_agent_pub(&pt) {
-                    if let AgentMsg::Msg { body, .. } = &mut am {
-                        if let Some(r) = &mut a.ratchet {
-                            let plain = r.decrypt(body)?;
-                            *body = plain;
-                        }
-                        let _ = a.flush_outbox();
-                        let cm = parse_chat(body)?;
-                        if cm.mtype == "x.msg.new" {
-                            let params: MsgParams = serde_json::from_value(cm.params).map_err(|e| e.to_string())?;
-                            return Ok((params.msg_id.unwrap_or_default(), params.content.text));
-                        }
+                let Ok(mut am) = parse_agent_pub(&pt) else { continue };
+                if let AgentMsg::Msg { body, .. } = &mut am {
+                    if let Some(r) = &mut a.ratchet {
+                        let plain = r.decrypt(body)?;
+                        *body = plain;
+                    }
+                    let _ = a.flush_outbox();
+                    let cm = parse_chat(body)?;
+                    if cm.mtype == "x.msg.new" {
+                        let params: MsgParams = serde_json::from_value(cm.params).map_err(|e| e.to_string())?;
+                        return Ok((params.msg_id.unwrap_or_default(), params.content.text));
                     }
                 }
             }

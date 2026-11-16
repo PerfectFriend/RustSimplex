@@ -2,6 +2,7 @@
 //!   - SNTRUP761 KEM (reference parameter set: pk 1158 B, sk 1763 B, ct 1039 B, ss 32 B)
 //!     via the `sntrup761` crate (pure-Rust port of the reference implementation).
 //!   - Hybrid secret: `kemHybridSecret = SHA3-256(DHSecretX25519 || KEMSharedKey)`
+#![allow(clippy::doc_overindented_list_items)]
 //!     (draft-josefsson-ntruprime-hybrid style, see SNTRUP761.hs).
 //!   - `kemParams` wire format (agent-protocol.md):
 //!       kemParams        = %s"0" / (%s"1" ratchetKEMParams)

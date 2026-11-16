@@ -53,8 +53,9 @@ pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeErr
     Ok((min, max, sid))
 }
 
-/// Returns (min, max, sessionId, authPubKey SPKI DER if Just).
-pub fn parse_server_hello_key(block: &[u8]) -> Result<(u16, u16, Vec<u8>, Option<Vec<u8>>), EncodeError> {
+/// (min, max, sessionId, authPubKey SPKI DER if Just).
+pub type ServerHelloKey = (u16, u16, Vec<u8>, Option<Vec<u8>>);
+pub fn parse_server_hello_key(block: &[u8]) -> Result<ServerHelloKey, EncodeError> {
     let c = unpad(block)?;
     let mut r = Reader::new(&c);
     let min = r.u16()?;
@@ -100,8 +101,9 @@ pub fn parse_client_hello(block: &[u8]) -> Result<(u16, Vec<u8>, bool), EncodeEr
     Ok((v, kh, proxy))
 }
 
-/// Returns (version, keyHash, proxyServer, authPubKey SPKI DER if Just).
-pub fn parse_client_hello_key(block: &[u8]) -> Result<(u16, Vec<u8>, bool, Option<Vec<u8>>), EncodeError> {
+/// (version, keyHash, proxyServer, authPubKey SPKI DER if Just).
+pub type ClientHelloKey = (u16, Vec<u8>, bool, Option<Vec<u8>>);
+pub fn parse_client_hello_key(block: &[u8]) -> Result<ClientHelloKey, EncodeError> {
     let c = unpad(block)?;
     let mut r = Reader::new(&c);
     let v = r.u16()?;
@@ -336,12 +338,12 @@ pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], w
     let conn = ClientConnection::new(Arc::new(cfg), name)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut stream = StreamOwned::new(conn, tcp);
-    stream.conn.complete_io(&mut stream.sock).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    stream.conn.complete_io(&mut stream.sock).map_err(std::io::Error::other)?;
     let mut binding = [0u8; 32];
     stream
         .conn
         .export_keying_material(&mut binding, b"SimpleX-channel-binding", None)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     Ok((Box::new(stream), binding))
 }
 
@@ -426,8 +428,8 @@ pub fn connect_tls_sni_proxy(host: &str, port: u16, key_hash: [u8; 32], with_sni
     if !with_sni { cfg.enable_sni = false; }
     let conn = ClientConnection::new(Arc::new(cfg), name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut stream = StreamOwned::new(conn, tcp);
-    stream.conn.complete_io(&mut stream.sock).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    stream.conn.complete_io(&mut stream.sock).map_err(std::io::Error::other)?;
     let mut binding = [0u8; 32];
-    stream.conn.export_keying_material(&mut binding, b"SimpleX-channel-binding", None).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    stream.conn.export_keying_material(&mut binding, b"SimpleX-channel-binding", None).map_err(std::io::Error::other)?;
     Ok((Box::new(stream), binding))
 }
