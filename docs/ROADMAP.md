@@ -8,13 +8,26 @@
 - P1: proxy SSRF-guard (public IP only, порты 5223/443), bounded offline queue (1000, `ERR QUEUE_FULL`), 30s read/write timeouts.
 - Live interop: public SMP v17..v23 OK, XFTP v4 PING/PONG OK. Default suite 60/60.
 
-## Next — E2E (настоящий PQDR в agent/chat)
-1. `ConnInfo`/`ConnInfoReply` уже несут `pq_support`/`e2e` — договориться о PQ на уровне профилей.
-2. При `pq_support=true`: joiner генерирует `(dh_s, kem_s)` и шлёт их в `D` connInfo; initiator делает `PqdrRatchet::init_sender(sk, ad, dh_r, kem_r)`, receiver — `init_receiver(...)`.
-3. `AgentMsg::Msg.body` оборачивать в `ratchet.encrypt(body)`; на приёме `ratchet.decrypt` до парсинга `M`.
-4. `A_RCVD`/hash считаем по plaintext msgHash, но доставляем только wire — роутер видит лишь метаданные.
-5. Тест: два локальных serverа, две очереди, `pqdr_e2e.rs` — handshake + 20 сообщений в обе стороны + out-of-order/skip.
+## Done (v0.62–v0.89)
+- E2E PQDR default-on (`Agent::e2e = true`, fail-closed: no plaintext without ratchet);
+  init_sender/init_receiver negotiated over HELLO/connInfo; chat_e2e + strict_e2e green.
+- kem_encaps_pub/init_sender return Result (no panic on malformed peer KEM key) — audit CRITICAL fixed.
+- Guarded indexing (qs[0]/r[0] -> first().ok_or) — no panics on empty D/IDS.
+- recv_agent/recv_text ACK every delivered MSG via `Client::send_only` (fire-and-forget, no push swallowing).
+- Server pump: pushed MSGs are greedy-chunked into multiple blocks — fixes `pad overflow` that killed
+  connections (root cause of the chat flake, v0.89).
+- SEC-01 negative MITM test: [evil_leaf, pinned_CA] rejected by leaf signature verification (tests/interop.rs).
+- Live interop: public SMP v17..v23 round-trip OK (smp11.simplex.im:5223), XFTP v4 PING/PONG OK (xftp1).
+- Suite 70/70, SMP_STRICT 3/3, clippy 0 (default + v71-probes).
+
+## Next (backlog, by value)
+1. sessionId: verify against real TLS 1.3 Finished verify_data (rustls exporter today).
+2. NTF/proxy against live public relays (server-side currently disabled publicly; local tests cover it).
+3. Remove remaining unwrap/expect in src (sb_chain 16, ffi 8, ...) — dispatch is catch_unwind-guarded meanwhile.
+4. Onion routing over SMP proxy chains (the stated platform goal).
+5. Async engine with auto-reconnect on top of async_client.rs.
+6. External audit (Hydrogen / Grok / Sonnet) over docs/AUDIT-REPORT.md + multi-zone-security-audit skill.
 
 ## Caveats
-- Для public relay `sessionId` = TLS Finished verify_data; rustls даёт exporter — сверка с Finished в backlog.
-- Probe-бины (`smp-v71`, `xftp-h2-v71`) остаются `NoVerify` по design.
+- Probe bins (`smp-v71`, `xftp-h2-v71`) stay `NoVerify` by design — never ship them as clients.
+- For public relays keyHash = SHA-256 of leaf SPKI (live-verified); local identity uses offline CA DER.

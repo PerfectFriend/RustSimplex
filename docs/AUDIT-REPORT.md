@@ -408,3 +408,11 @@ cargo clippy --all-targets         # 0 ошибок
   cannot occur (SEND validates LARGE_MSG at 16088 < BLOCK_SIZE - overhead).
 - Verified: chat test 0/25 fails (was ~50%), full suite 69/69 x5 runs, SMP_STRICT 3/3,
   clippy --all-targets 0 warnings (default and --features v71-probes).
+
+## 70. v0.90 — SEC-01 negative MITM test + ROADMAP refresh
+- New test `tls_mitm_evil_leaf_with_pinned_ca_rejected` (tests/interop.rs): attacker chain
+  [leaf signed by evil CA, real pinned CA] — pin passes, webpki leaf-signature check must reject.
+  Green. Together with `tls_wrong_keyhash_rejected` the PinVerifier is now covered on both paths.
+- ROADMAP.md rewritten to v0.89 reality (E2E default-on done; backlog: TLS Finished sessionId,
+  NTF/proxy live, unwrap cleanup, onion routing, async engine).
+- Suite 70/70 x3, SMP_STRICT 3/3, clippy 0.

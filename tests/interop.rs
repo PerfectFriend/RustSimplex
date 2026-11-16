@@ -101,6 +101,71 @@ fn tls_wrong_keyhash_rejected() {
     assert!(r.is_err(), "client must reject a router whose keyHash does not match");
 }
 
+/// SEC-01 negative MITM test: attacker presents [leaf signed by EVIL CA, real pinned CA].
+/// The pin check passes (last cert in chain == pinned CA), so only the webpki
+/// leaf-signature verification against the pinned anchor can reject this.
+#[test]
+fn tls_mitm_evil_leaf_with_pinned_ca_rejected() {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+    };
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use smp_rs::crypto::sha256;
+    use smp_rs::identity::RouterIdentity;
+
+    // real router identity (what the client pins)
+    let real = RouterIdentity::generate("127.0.0.1").unwrap();
+    let pinned_hash = real.key_hash;
+
+    // evil CA + leaf signed by the evil CA (SAN = 127.0.0.1, ServerAuth)
+    let evil_kp = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let mut evil_ca_params = CertificateParams::new(vec!["evil-ca".to_string()]).unwrap();
+    evil_ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    evil_ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+    let evil_ca = CertifiedIssuer::self_signed(evil_ca_params, evil_kp).unwrap();
+    let evil_leaf_kp = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let mut leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "127.0.0.1");
+    leaf_params.distinguished_name = dn;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let evil_leaf = leaf_params.signed_by(&evil_leaf_kp, &evil_ca).unwrap();
+
+    // attacker chain: evil leaf + the REAL pinned CA cert appended
+    let chain: Vec<CertificateDer<'static>> = vec![
+        CertificateDer::from(evil_leaf.der().to_vec()),
+        CertificateDer::from(real.offline_der.clone()),
+    ];
+    let key = PrivatePkcs8KeyDer::from(evil_leaf_kp.serialize_der());
+    let cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(chain, key.into())
+        .unwrap();
+    let cfg = std::sync::Arc::new(cfg);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            let conn = rustls::ServerConnection::new(cfg.clone()).unwrap();
+            let mut st = rustls::StreamOwned::new(conn, s);
+            let mut buf = [0u8; 4096];
+            let _ = std::io::Read::read(&mut st, &mut buf); // handshake happens here; client aborts
+        }
+    });
+
+    let r = Client::connect_tls(addr, "127.0.0.1", pinned_hash);
+    assert!(
+        r.is_err(),
+        "MITM with [evil_leaf, pinned_CA] must be rejected by leaf signature verification"
+    );
+    // sanity: the pinned hash is really the offline CA (sha256 of SPKI DER is what PinVerifier compares)
+    assert_eq!(pinned_hash, sha256(&real.offline_der));
+}
+
+
 #[test]
 fn auth_rejected_for_wrong_key() {
     let addr = start_plain();
