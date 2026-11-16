@@ -378,3 +378,8 @@ cargo clippy --all-targets         # 0 ошибок
 - `tests/chat_e2e.rs` rewritten: `chat_e2e_over_pqdr_default_on` (both directions) + `chat_e2e_concurrent_first_send` (both sides send before reading) — both run in the default gate, no `#[ignore]`.
 - `tests/chat.rs` marked legacy-plaintext (`e2e=false`).
 - Suite: DEFAULT **65/65**, STRICT 3/3, `cargo check --no-default-features` + `--features ffi` clean. SECURITY.md scope note updated.
+
+## 67. v0.87 — XFTP v4 full cycle live + clippy zero across all targets
+- `xftp-h2-v71` extended with FGET (recipient DH + secretbox tail-tag decrypt) and FDEL; live on xftp1.simplex.im:443 full cycle PING->PONG, FNEW->SIDS, FPUT(64KB)->OK, FGET->FILE decrypt matches uploaded (sha256 verified), FDEL->OK. `scripts/live_interop.sh` now asserts the full cycle (binary-safe greps).
+- clippy: 0 warnings / 0 errors on `--all-targets` both default and `--features v71-probes` (removed unused imports in probe bins, `io::Error::other`/`let-else` from earlier --fix pass committed, doc-lint allows on probe bin headers, must_use on openssl builder fixed).
+- Gates: DEFAULT 65/65, STRICT 3/3, `cargo check --no-default-features` and `--features ffi` clean, live SMP v17..v23 matrix OK.

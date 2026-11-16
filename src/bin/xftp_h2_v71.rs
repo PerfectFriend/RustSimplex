@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
 //! xftp-h2: probe client for the real XFTP protocol v7.1 (HTTP/2 + TLS 1.3, ALPN "xftp/1").
 //!   xftp-h2 <host> <port>
 //!
@@ -17,7 +19,6 @@
 //! NOTE: accepts any server certificate (probe tool, not for production).
 
 use bytes::Bytes;
-use futures::stream::StreamExt;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use sha2::Digest;
 use tokio::net::TcpStream;
@@ -36,8 +37,8 @@ async fn main() {
 
     let mut builder = SslConnector::builder(SslMethod::tls()).expect("connector");
     builder.set_verify(SslVerifyMode::NONE); // probe only
-    builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_3));
-    builder.set_alpn_protos(b"\x06xftp/1").expect("alpn");
+    builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_3)).expect("min tls");
+    builder.set_alpn_protos(b"\x06xftp/1").unwrap_or_else(|_| panic!("alpn"));
     let connector = builder.build();
 
     let tcp = TcpStream::connect((host.as_str(), port)).await.expect("tcp");
@@ -257,4 +258,46 @@ async fn main() {
     blk.extend_from_slice(&file);
     let pr = post(&mut h2, Bytes::from(blk), &host).await;
     println!("FPUT -> {}", show_resp(&pr));
+
+    // ---- 6. FGET as recipient: entity=rcvId, cmd "FGET " + rDhKey(X25519 SPKI), signed with rcv key ----
+    let r_dh_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r_dh_pub = x25519_dalek::PublicKey::from(&r_dh_secret);
+    let rdh_spki = smp_rs::crypto::spki_x25519(r_dh_pub.as_bytes());
+    let mut gcmd = b"FGET ".to_vec();
+    gcmd.push(rdh_spki.len() as u8);
+    gcmd.extend_from_slice(&rdh_spki);
+    let c = corr();
+    let t = transmission(&session_id, &c, &rcv_id, &gcmd);
+    let sig = rcv.sign(&t);
+    let mut auth = vec![64u8];
+    auth.extend_from_slice(&sig.to_bytes());
+    let gr = post(&mut h2, Bytes::from(batch(&auth, &t)), &host).await;
+    println!("FGET -> {} bytes total", gr.len());
+    let gl = u16::from_be_bytes([gr[0], gr[1]]) as usize;
+    let gp = &gr[2..(2 + gl).min(gr.len())];
+    if let Some(pos) = gp.windows(4).position(|w| w == b"FILE") {
+        let mut q = pos + 5;
+        let kl = gp[q] as usize; q += 1;
+        let sdh_spki = &gp[q..q + kl]; q += kl;
+        let nonce: [u8; 24] = gp[q..q + 24].try_into().unwrap();
+        let (_, sdh_raw) = smp_rs::crypto::parse_spki(sdh_spki).expect("sDhKey");
+        let shared = smp_rs::crypto::x25519_dh(&r_dh_secret, &smp_rs::crypto::x25519_public(sdh_raw));
+        let enc_packet = if gr.len() > BLOCK { &gr[BLOCK..] } else { &[][..] };
+        let reordered = [&enc_packet[enc_packet.len().saturating_sub(16)..], &enc_packet[..enc_packet.len().saturating_sub(16)]].concat();
+        match smp_rs::crypto::secretbox_decrypt(&shared, &nonce, &reordered) {
+            Some(pt) => println!("  FGET FILE decrypted {} bytes, matches uploaded: {}, sha256={}", pt.len(), pt == file, hex(&smp_rs::crypto::sha256(&pt))),
+            None => println!("  FGET DECRYPT FAILED"),
+        }
+    } else if let Some(pos) = gp.windows(3).position(|w| w == b"ERR") {
+        println!("  FGET ERR: {:?}", String::from_utf8_lossy(&gp[pos..(pos + 40).min(gp.len())]));
+    }
+
+    // ---- 7. FDEL as sender: entity=senderId, cmd "FDEL", signed with snd key ----
+    let c = corr();
+    let t = transmission(&session_id, &c, &sender_id, b"FDEL");
+    let sig = snd.sign(&t);
+    let mut auth = vec![64u8];
+    auth.extend_from_slice(&sig.to_bytes());
+    let dr = post(&mut h2, Bytes::from(batch(&auth, &t)), &host).await;
+    println!("FDEL -> {}", show_resp(&dr));
 }

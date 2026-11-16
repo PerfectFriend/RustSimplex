@@ -78,7 +78,7 @@ fn queues_survive_restart() {
     let enc = smp_rs::server::encrypt_for_recipient(&q.rcv_dh_secret, mid, body).unwrap();
     let plain = decrypt_for_recipient(&secret, mid, &enc).expect("decrypt persisted msg");
     assert_eq!(plain, b"persist me across restart"); // our engine stores raw body (rcvMeta is added by real simplexmq)
-    drop(addr2);
+    let _ = addr2;
 }
 
 #[test]

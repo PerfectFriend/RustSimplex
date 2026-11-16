@@ -7,7 +7,6 @@
 //! (keyHash=CA DER sha256, authPubKey=Just X25519 SPKI, proxyServer 'F', clientService '0')
 //! -> init block-encryption chain from DH(server session pub, client eph priv) -> encrypted PING.
 
-use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 

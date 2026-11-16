@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::stream::StreamExt;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self, pki_types::ServerName};
 
@@ -215,6 +214,7 @@ async fn main() {
     println!("  senderId({})={} nRcv={nrcv} rcvId({})={}", sidl2, hex(&sender_id), ridl, hex(&rcv_id));
 
     // helper: send signed command, optional extra body bytes (file chunk)
+    #[allow(clippy::too_many_arguments)]
     async fn send_cmd(
         h2: &mut h2::client::SendRequest<Bytes>,
         host: &str,
