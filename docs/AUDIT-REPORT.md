@@ -396,3 +396,15 @@ cargo clippy --all-targets         # 0 ошибок
   with EOF at first recv_text (server pump closes the conn); passes standalone. Next step: trace
   server pump `Err(_) => break` path under suite timing.
 - clippy --all-targets: 0 warnings. SMP_STRICT: 3/3. Default suite: 69/69 when green.
+
+## 69. v0.89 — ROOT CAUSE of the chat flake: push batch "pad overflow" killed the pump
+- Symptom: `chat_text_over_agent_connection` failed ~50% with EOF ("failed to fill whole buffer")
+  at the first recv_text; server pump logged nothing because the fatal path was `?` on encode.
+- Root cause: an encrypted MSG push wire is padded near BLOCK_SIZE, so when 2+ pushes were drained
+  in one pump iteration, `encode_block(&pushes)` hit `pad overflow` and `?` closed the connection.
+  Latent since v0.21 (push pipe); exposed by the new ACK traffic shifting timing.
+- Fix: pump now greedy-chunks pushes into as many blocks as needed (`write_push_block` helper),
+  applied to both the main drain and the v0.23 late-push flush. A single oversized wire still
+  cannot occur (SEND validates LARGE_MSG at 16088 < BLOCK_SIZE - overhead).
+- Verified: chat test 0/25 fails (was ~50%), full suite 69/69 x5 runs, SMP_STRICT 3/3,
+  clippy --all-targets 0 warnings (default and --features v71-probes).

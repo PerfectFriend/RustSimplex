@@ -591,6 +591,18 @@ fn io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// Write a batch of pushed wires as a single block (strict-encrypted when chain keys active).
+/// Callers must chunk wires so the padded content fits BLOCK_SIZE (see pump drain loops).
+fn write_push_block(stream: &mut BoxStream, s_snd: Option<&mut [u8; 32]>, wires: &[Vec<u8>]) -> std::io::Result<()> {
+    if let Some(k) = s_snd {
+        let raw = encode_block_raw(wires).map_err(io_err)?;
+        write_block_encrypted(stream, k, &raw)
+    } else {
+        let blk = encode_block(wires).map_err(io_err)?;
+        write_block(stream, &blk)
+    }
+}
+
 /// One connection: blocking SMP/TLS handshake, then a poll pump (50 ms read timeout)
 /// that reads commands and drains the outbox of pushed transmissions.
 pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
@@ -641,14 +653,28 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
             pushes.push(w);
         }
         if !pushes.is_empty() {
-            let wr = if let Some(k) = s_snd.as_mut() {
-                let raw = encode_block_raw(&pushes).map_err(io_err)?;
-                write_block_encrypted(&mut stream, k, &raw)
-            } else {
-                let blk = encode_block(&pushes).map_err(io_err)?;
-                write_block(&mut stream, &blk)
-            };
-            if wr.is_err() { break; }
+            // Each push wire can be near BLOCK_SIZE (encrypted MSG body is padded), so a
+            // batch of 2+ pushes overflows one block ("pad overflow") and used to kill the
+            // connection via `?`. Fix: greedy chunk into as few blocks as fit, one wire
+            // per block when large.
+            let mut chunk: Vec<&Vec<u8>> = Vec::new();
+            let mut chunk_len = 1usize; // count byte
+            for w in &pushes {
+                let wl = 2 + w.len(); // w_large
+                if chunk_len + wl > BLOCK_SIZE - 2 && !chunk.is_empty() {
+                    let owned: Vec<Vec<u8>> = chunk.iter().map(|v| (*v).clone()).collect();
+                    let wr = write_push_block(&mut stream, s_snd.as_mut(), &owned);
+                    if wr.is_err() { break; }
+                    chunk.clear();
+                    chunk_len = 1;
+                }
+                chunk_len += wl;
+                chunk.push(w);
+            }
+            if !chunk.is_empty() {
+                let owned: Vec<Vec<u8>> = chunk.iter().map(|v| (*v).clone()).collect();
+                if write_push_block(&mut stream, s_snd.as_mut(), &owned).is_err() { break; }
+            }
         }
         // one non-blocking read attempt
         match stream.read(&mut rbuf[rpos..]) {
@@ -711,13 +737,23 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                     while let Ok(w) = rx.try_recv() {
                         late.push(w);
                     }
-                    if !late.is_empty() {
-                        let wr: std::io::Result<()> = if let Some(k) = s_snd.as_mut() {
-                            encode_block_raw(&late).map_err(io_err).and_then(|raw| write_block_encrypted(&mut stream, k, &raw))
-                        } else {
-                            encode_block(&late).map_err(io_err).and_then(|lb| write_block(&mut stream, &lb))
-                        };
-                        if wr.is_err() { break; }
+                    // same chunked-write as the main push drain (pad overflow guard)
+                    let mut chunk: Vec<&Vec<u8>> = Vec::new();
+                    let mut chunk_len = 1usize;
+                    for w in &late {
+                        let wl = 2 + w.len();
+                        if chunk_len + wl > BLOCK_SIZE - 2 && !chunk.is_empty() {
+                            let owned: Vec<Vec<u8>> = chunk.iter().map(|v| (*v).clone()).collect();
+                            if write_push_block(&mut stream, s_snd.as_mut(), &owned).is_err() { break; }
+                            chunk.clear();
+                            chunk_len = 1;
+                        }
+                        chunk_len += wl;
+                        chunk.push(w);
+                    }
+                    if !chunk.is_empty() {
+                        let owned: Vec<Vec<u8>> = chunk.iter().map(|v| (*v).clone()).collect();
+                        if write_push_block(&mut stream, s_snd.as_mut(), &owned).is_err() { break; }
                     }
                     rpos = 0;
                 }
