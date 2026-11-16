@@ -77,6 +77,7 @@ pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
                             let plain = r.decrypt(body)?;
                             *body = plain;
                         }
+                        let _ = a.flush_outbox();
                         let cm = parse_chat(body)?;
                         if cm.mtype == "x.msg.new" {
                             let params: MsgParams = serde_json::from_value(cm.params).map_err(|e| e.to_string())?;

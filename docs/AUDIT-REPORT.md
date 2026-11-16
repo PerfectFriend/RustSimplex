@@ -356,3 +356,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 61. v0.81 — joiner E2E outbox buffering (double-ratchet rule, 2026-11-15)
 - Joiner под ratchet теперь буферит исходящие A_MSG в `outbox`, пока первый входящий кадр не даст `ckr` (иначе receiver-first send невозможен в double ratchet). Default **63/63** не затронут. Chat под SMP_E2E сменил симптом на «failed to fill whole buffer» в recv_text — следующий дебаг: flush outbox и в chat::recv_text.
+
+
+## 62. v0.82 — flush_outbox shared by agent/chat (2026-11-15)
+- `Agent::flush_outbox()` вынесен отдельно и вызывается из `recv_agent` и `chat::recv_text` после успешного decrypt. Default **63/63**. Chat под SMP_E2E всё ещё падает «failed to fill whole buffer» в b.recv_text — следующий дебаг: почему server закрывает сокет b после первых ratchet MSG.

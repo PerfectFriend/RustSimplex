@@ -532,6 +532,18 @@ impl Agent {
         Ok(id)
     }
 
+    /// Flush buffered E2E sends once the receiving chain exists.
+    pub fn flush_outbox(&mut self) -> Result<(), String> {
+        if self.outbox.is_empty() || !self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
+            return Ok(());
+        }
+        let peer = self.peer_snd_id.clone().ok_or("no peer")?;
+        for (_, w) in self.outbox.drain(..) {
+            self.client.request(Command::Send { flags: false, body: w }, peer.clone(), None).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Receive one agent message (blocks on one block). Returns parsed message + raw msg_id.
     pub fn recv_agent(&mut self) -> Result<(Vec<u8>, AgentMsg), String> {
         let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
@@ -546,13 +558,7 @@ impl Agent {
                         am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
                     }
                 }
-                // first successful inbound frame establishes the receiving chain — flush buffered E2E sends
-                if !self.outbox.is_empty() && self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
-                    let peer = self.peer_snd_id.clone().ok_or("no peer")?;
-                    for (_, w) in self.outbox.drain(..) {
-                        self.client.request(Command::Send { flags: false, body: w }, peer.clone(), None).map_err(|e| e.to_string())?;
-                    }
-                }
+                let _ = self.flush_outbox();
                 return Ok((msg_id.clone(), am));
             }
         }
