@@ -209,6 +209,10 @@ pub struct Agent {
     pub ratchet: Option<crate::pqdr::PqdrRatchet>,
     /// raw initiator connInfo ("I" payload) for the joiner side; used to auto-init E2E.
     pub init_ci: Vec<u8>,
+    /// true for the link creator (initiator), false for the joiner
+    pub initiator: bool,
+    /// E2E: joiner buffers outgoing A_MSG until the first inbound ratchet frame establishes ckr
+    pub outbox: Vec<(i64, Vec<u8>)>,
 }
 
 impl Agent {
@@ -289,6 +293,8 @@ impl Agent {
                 kem: Some(kem),
                 ratchet: None,
                 init_ci: conn_info.clone(),
+                initiator: true,
+                outbox: Vec::new(),
             },
             link,
         ))
@@ -390,6 +396,8 @@ impl Agent {
             kem: Some(kem),
             ratchet: None,
             init_ci,
+            initiator: false,
+            outbox: Vec::new(),
         })
     }
 
@@ -509,6 +517,14 @@ impl Agent {
         };
         let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
         let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+        // E2E: a fresh receiver has no ckr yet — buffer until the first inbound frame (double-ratchet rule)
+        if let Some(r) = &self.ratchet {
+            if !self.initiator && r.ckr.is_none() {
+                self.outbox.push((id, wire));
+                self.prev_hash = hash.to_vec();
+                return Ok(id);
+            }
+        }
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
@@ -528,6 +544,13 @@ impl Agent {
                     if let Some(r) = &mut self.ratchet {
                         let plain = r.decrypt(body)?;
                         am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
+                    }
+                }
+                // first successful inbound frame establishes the receiving chain — flush buffered E2E sends
+                if !self.outbox.is_empty() && self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
+                    let peer = self.peer_snd_id.clone().ok_or("no peer")?;
+                    for (_, w) in self.outbox.drain(..) {
+                        self.client.request(Command::Send { flags: false, body: w }, peer.clone(), None).map_err(|e| e.to_string())?;
                     }
                 }
                 return Ok((msg_id.clone(), am));

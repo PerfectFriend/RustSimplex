@@ -352,3 +352,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 60. v0.80 — PqdrRatchet snapshot/restore (audit blocker #3, persistence, 2026-11-15)
 - `PqdrRatchet::snapshot()/restore()` — полный бинарный снапшот (rk/chain keys/kem/dh/pending/skipped); тест восстанавливает оба ratchet после 5 сообщений и продолжает цепочку до 10. Default **63/63**.
+
+
+## 61. v0.81 — joiner E2E outbox buffering (double-ratchet rule, 2026-11-15)
+- Joiner под ratchet теперь буферит исходящие A_MSG в `outbox`, пока первый входящий кадр не даст `ckr` (иначе receiver-first send невозможен в double ratchet). Default **63/63** не затронут. Chat под SMP_E2E сменил симптом на «failed to fill whole buffer» в recv_text — следующий дебаг: flush outbox и в chat::recv_text.
