@@ -336,3 +336,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 56. v0.76 — XFTP FileDesc.orig_size (audit blocker #4, byte-exact trim, 2026-11-15)
 - В `FileDesc` добавлен `orig_size` (encode/decode, обратная совместимость: если `orig=` нет — равен `size`); `decrypt_file` после проверки digest обрезает padding до `orig_size`. Default **61/61**.
+
+
+## 57. v0.77 — streaming XFTP file↔file (audit blocker #4, 2026-11-15)
+- `upload_file_stream(path)` читает файл чанками (digest pre-scan потоковый), FPUT по чанку, progress callback; `download_file_stream` пишет чанки сразу в файл, считает digest, проверяет size, `set_len(orig_size)`. RAM не растёт от размера файла. Default **61/61**.

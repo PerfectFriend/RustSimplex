@@ -212,3 +212,94 @@ pub fn delete_file(c: &mut crate::client::Client, packet_id: &[u8], sender: &Ed2
 // keep encoding import used
 #[allow(dead_code)]
 fn _u(_r: &mut Reader) {}
+
+/// Streaming upload from a file path — never holds the whole file in RAM.
+/// `progress(bytes_done, total_bytes)` is called after each FPUT.
+pub fn upload_file_stream(
+    c: &mut crate::client::Client,
+    path: &std::path::Path,
+    sender: &Ed25519Keypair,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<FileDesc, String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let total = f.metadata().map_err(|e| e.to_string())?.len();
+    let key = { let v = random_bytes(32); let mut k=[0u8;32]; k.copy_from_slice(&v); k };
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; XFTP_CHUNK_PLAIN];
+    let mut n = 0u32;
+    let sender_spki = spki_ed25519(&sender.verifying.to_bytes());
+    // FNEW needs padded size + digest: pre-scan for digest (streaming, low RAM)
+    let mut f2 = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut rem = total as usize % XFTP_CHUNK_PLAIN;
+    let mut scan = vec![0u8; XFTP_CHUNK_PLAIN];
+    loop {
+        let r = f2.read(&mut scan).map_err(|e| e.to_string())?;
+        if r == 0 { break; }
+        hasher.update(&scan[..r]);
+        n += 1;
+    }
+    if rem != 0 { hasher.update(&vec![0u8; XFTP_CHUNK_PLAIN - rem]); n += 1; }
+    let digest = hasher.finalize();
+    let mut digest_arr = [0u8; 32]; digest_arr.copy_from_slice(&digest);
+    let padded_size = (n as usize) * XFTP_CHUNK_PLAIN;
+    let r = c.request(Command::Fnew { size: padded_size as u64, digest: digest_arr.to_vec(), sender_key: sender_spki }, vec![], Some(sender)).map_err(|e| e.to_string())?;
+    let packet_id = match &r[0] { BrokerMsg::Fid { packet_id } => packet_id.clone(), other => return Err(format!("expected FID, got {other:?}")) };
+    let mut done = 0u64;
+    let mut off = 0u32;
+    loop {
+        let got = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if got == 0 { break; }
+        let chunk_plain = if got == XFTP_CHUNK_PLAIN { &buf[..] } else { &buf[..got] };
+        let enc = { let nb = random_bytes(24); let mut nonce=[0u8;24]; nonce.copy_from_slice(&nb); let mut out = nb; out.extend_from_slice(&raw_secretbox_encrypt(&key, &nonce, chunk_plain)); out };
+        let r = c.request(Command::Fput { packet_id: packet_id.clone(), offset: off, chunk: enc }, vec![], Some(sender)).map_err(|e| e.to_string())?;
+        if !matches!(r[0], BrokerMsg::Ok) { return Err(format!("FPUT chunk {off} failed: {:?}", r[0])); }
+        done += got as u64; off += 1; progress(done, total);
+    }
+    Ok(FileDesc { packet_id, size: padded_size as u64, orig_size: total, digest: digest_arr, key, chunk_plain: XFTP_CHUNK_PLAIN, chunks: n })
+}
+
+/// Streaming download to a file path; verifies size+digest, truncates to orig_size.
+pub fn download_file_stream(
+    c: &mut crate::client::Client,
+    desc: &FileDesc,
+    out_path: &std::path::Path,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
+    use sha2::Digest;
+    use std::io::Write;
+    let mut out = std::fs::File::create(out_path).map_err(|e| e.to_string())?;
+    let mut hasher = sha2::Sha256::new();
+    let mut chunks = BTreeMap::new();
+    let mut offset = 0u32;
+    while (offset as usize) < desc.chunks as usize {
+        let r = c.request(Command::Fget { packet_id: desc.packet_id.clone(), offset }, vec![], None).map_err(|e| e.to_string())?;
+        let mut got = 0usize;
+        for m in &r {
+            match m {
+                BrokerMsg::Fdata { offset: o, chunk } => { chunks.insert(*o, chunk.clone()); got += 1; }
+                BrokerMsg::Err(e) => return Err(format!("FGET: {e}")),
+                _ => {}
+            }
+        }
+        if got == 0 { return Err("FGET returned no chunks".into()); }
+        offset += got as u32;
+    }
+    let mut padded_len = 0u64;
+    for i in 0..desc.chunks {
+        let c = chunks.get(&i).ok_or_else(|| format!("missing chunk {i}"))?;
+        if c.len() < 24 + 16 { return Err("chunk too short".into()); }
+        let mut n = [0u8; 24]; n.copy_from_slice(&c[..24]);
+        let pt = raw_secretbox_decrypt(&desc.key, &n, &c[24..]).ok_or("chunk decrypt failed")?;
+        hasher.update(&pt);
+        out.write_all(&pt).map_err(|e| e.to_string())?;
+        padded_len += pt.len() as u64;
+        progress(padded_len, desc.size);
+    }
+    if padded_len != desc.size { return Err(format!("size mismatch {padded_len} != {}", desc.size)); }
+    let digest = hasher.finalize();
+    if digest.as_slice() != desc.digest { return Err("DIGEST mismatch".into()); }
+    out.set_len(desc.orig_size).map_err(|e| e.to_string())?;
+    Ok(())
+}
