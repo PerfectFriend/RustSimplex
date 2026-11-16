@@ -14,6 +14,7 @@ pub use sb_chain as blockchain;
 pub mod client;
 pub mod identity;
 pub mod agent;
+pub mod async_client;
 pub mod chat;
 pub mod crypto;
 pub mod encoding;

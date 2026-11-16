@@ -364,3 +364,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 63. v0.83 — SECURITY.md синхронизирован с реальностью (2026-11-15)
 - Scope note и таблица угроз обновлены: store шифруется (SMP1), PQDR подключён opt-in через SMP_E2E, chat E2E edge в backlog. Docs-only.
+
+
+## 64. v0.84 — async facade AsyncSmpClient (audit blocker #3 start, 2026-11-15)
+- `src/async_client.rs`: tokio-обёртка — connect через spawn_blocking (plain/TLS, опционально SOCKS5 remote-DNS), `request` через spawn_blocking с возвратом Client. База для event-loop/авто-реконнекта. Default **63/63**.

@@ -63,6 +63,11 @@ impl Client {
         Ok((sid, eph, eph_priv))
     }
 
+    /// Wrap an already-handshaken stream (used by async/proxy wrappers).
+    pub fn from_stream(s: BoxStream, key_hash: [u8; 32]) -> Client {
+        Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, eph_priv: None }
+    }
+
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
