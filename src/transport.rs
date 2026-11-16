@@ -352,3 +352,54 @@ pub fn connect_plain(addr: SocketAddr) -> std::io::Result<BoxStream> {
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
     Ok(Box::new(tcp))
 }
+
+/// Optional SOCKS5 proxy (Tor/Orbot). DNS is resolved REMOTELY (ATYP=0x03 domain).
+#[derive(Clone, Debug)]
+pub struct Socks5Config {
+    pub host: String,
+    pub port: u16,
+    pub user: Option<String>,
+    pub pass: Option<String>,
+}
+
+/// Connect through SOCKS5 to `dest_host:dest_port` with remote DNS (domain sent to proxy).
+pub fn connect_socks5(proxy: &Socks5Config, dest_host: &str, dest_port: u16) -> std::io::Result<TcpStream> {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect((proxy.host.as_str(), proxy.port))?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    s.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let methods: &[u8] = if proxy.user.is_some() { &[0x05, 0x02, 0x00, 0x02] } else { &[0x05, 0x01, 0x00] };
+    s.write_all(methods)?;
+    let mut hdr = [0u8; 2];
+    s.read_exact(&mut hdr)?;
+    if hdr[0] != 0x05 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not socks5")); }
+    match hdr[1] {
+        0x00 => {}
+        0x02 => {
+            let u = proxy.user.clone().unwrap_or_default();
+            let p = proxy.pass.clone().unwrap_or_default();
+            let mut a = vec![0x01u8, u.len() as u8];
+            a.extend_from_slice(u.as_bytes());
+            a.push(p.len() as u8);
+            a.extend_from_slice(p.as_bytes());
+            s.write_all(&a)?;
+            let mut r = [0u8; 2];
+            s.read_exact(&mut r)?;
+            if r[1] != 0x00 { return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "socks5 auth failed")); }
+        }
+        m => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("socks5 method {m} unsupported"))),
+    }
+    let host_b = dest_host.as_bytes();
+    if host_b.len() > 255 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "host too long")); }
+    let mut req = vec![0x05u8, 0x01, 0x00, 0x03, host_b.len() as u8];
+    req.extend_from_slice(host_b);
+    req.extend_from_slice(&dest_port.to_be_bytes());
+    s.write_all(&req)?;
+    let mut rh = [0u8; 4];
+    s.read_exact(&mut rh)?;
+    if rh[1] != 0x00 { return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, format!("socks5 connect err {}", rh[1]))); }
+    let skip = match rh[3] { 0x01 => 4, 0x04 => 16, 0x03 => { let mut l=[0u8;1]; s.read_exact(&mut l)?; l[0] as usize }, _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad atyp")) };
+    let mut buf = vec![0u8; skip + 2];
+    s.read_exact(&mut buf)?;
+    Ok(s)
+}

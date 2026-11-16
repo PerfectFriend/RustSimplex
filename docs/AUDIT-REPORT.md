@@ -340,3 +340,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 57. v0.77 — streaming XFTP file↔file (audit blocker #4, 2026-11-15)
 - `upload_file_stream(path)` читает файл чанками (digest pre-scan потоковый), FPUT по чанку, progress callback; `download_file_stream` пишет чанки сразу в файл, считает digest, проверяет size, `set_len(orig_size)`. RAM не растёт от размера файла. Default **61/61**.
+
+
+## 58. v0.78 — SOCKS5 transport with remote DNS (audit blocker #3, 2026-11-15)
+- `transport::Socks5Config` + `connect_socks5`: CONNECT с `ATYP=0x03` (DNS уходит на прокси/Tor), опциональная user/pass auth, 30s таймауты. Тест с mock SOCKS5 проверяет remote-DNS ATYP. Default **62/62**.
