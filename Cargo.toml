@@ -34,6 +34,7 @@ required-features = ["v71-probes"]
 [features]
 default = []
 v71-probes = ["dep:openssl", "dep:tokio-openssl"]
+ffi = []
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }

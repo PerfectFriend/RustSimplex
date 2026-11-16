@@ -15,6 +15,9 @@ fn chat_text_over_agent_connection() {
     let (mut a, link) = Agent::create_contact(ci, "127.0.0.1", addr.port(), &kh, "alice").unwrap();
     let cj = Client::connect_plain(addr, &kh).unwrap();
     let mut b = Agent::join_contact(cj, &link).unwrap();
+    // legacy plaintext path; E2E default-on is covered in tests/chat_e2e.rs
+    a.e2e = false;
+    b.e2e = false;
     a.accept_contact().unwrap();
     b.await_hello().unwrap();
     let (_, am) = a.recv_agent().unwrap();

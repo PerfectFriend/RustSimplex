@@ -213,6 +213,8 @@ pub struct Agent {
     pub initiator: bool,
     /// E2E: joiner buffers outgoing A_MSG until the first inbound ratchet frame establishes ckr
     pub outbox: Vec<(i64, Vec<u8>)>,
+    /// E2E PQDR on by default; set false for legacy plaintext tests. No env reads in lib (FFI-safe).
+    pub e2e: bool,
 }
 
 impl Agent {
@@ -295,6 +297,7 @@ impl Agent {
                 init_ci: conn_info.clone(),
                 initiator: true,
                 outbox: Vec::new(),
+                e2e: true,
             },
             link,
         ))
@@ -398,6 +401,7 @@ impl Agent {
             init_ci,
             initiator: false,
             outbox: Vec::new(),
+            e2e: true,
         })
     }
 
@@ -430,7 +434,7 @@ impl Agent {
                         .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO is sent (before any A_MSG)
-                    if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
+                    if self.e2e { self.init_e2e_sender(&sk, peer_dh_raw, peer_kem); }
                     return Ok(());
                 }
             }
@@ -469,7 +473,7 @@ impl Agent {
                                 if let Ok(params) = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e)) {
                                     if let Ok((_, dh_raw)) = parse_spki(&params.snd_dh_spki) {
                                         let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
-                                        if std::env::var("SMP_E2E").as_deref() == Ok("1") { self.init_e2e_receiver(&sk, dh_raw)?; }
+                                        if self.e2e { self.init_e2e_receiver(&sk, dh_raw)?; }
                                     }
                                 }
                             }
@@ -511,20 +515,20 @@ impl Agent {
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {
         self.msg_counter += 1;
         let id = self.msg_counter;
+        // E2E: a fresh receiver has no ckr yet — buffer the PLAINTEXT until the first
+        // inbound frame (double-ratchet rule); encrypt at flush time, in order.
+        if let Some(r) = &self.ratchet {
+            if !self.initiator && r.ckr.is_none() {
+                self.outbox.push((id, body.to_vec()));
+                return Ok(id);
+            }
+        }
         let payload = match &mut self.ratchet {
             Some(r) => r.encrypt(body),
             None => body.to_vec(),
         };
         let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
         let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
-        // E2E: a fresh receiver has no ckr yet — buffer until the first inbound frame (double-ratchet rule)
-        if let Some(r) = &self.ratchet {
-            if !self.initiator && r.ckr.is_none() {
-                self.outbox.push((id, wire));
-                self.prev_hash = hash.to_vec();
-                return Ok(id);
-            }
-        }
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
@@ -532,14 +536,21 @@ impl Agent {
         Ok(id)
     }
 
-    /// Flush buffered E2E sends once the receiving chain exists.
+    /// Flush buffered E2E sends once the receiving chain exists (encrypt in original order).
     pub fn flush_outbox(&mut self) -> Result<(), String> {
         if self.outbox.is_empty() || !self.ratchet.as_ref().map(|r| r.ckr.is_some()).unwrap_or(false) {
             return Ok(());
         }
         let peer = self.peer_snd_id.clone().ok_or("no peer")?;
-        for (_, w) in self.outbox.drain(..) {
-            self.client.request(Command::Send { flags: false, body: w }, peer.clone(), None).map_err(|e| e.to_string())?;
+        for (id, plain) in self.outbox.drain(..) {
+            let payload = match &mut self.ratchet {
+                Some(r) => r.encrypt(&plain),
+                None => plain,
+            };
+            let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
+            let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+            self.client.request(Command::Send { flags: false, body: wire }, peer.clone(), None).map_err(|e| e.to_string())?;
+            self.prev_hash = hash.to_vec();
         }
         Ok(())
     }

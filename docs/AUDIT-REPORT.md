@@ -368,3 +368,13 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 64. v0.84 — async facade AsyncSmpClient (audit blocker #3 start, 2026-11-15)
 - `src/async_client.rs`: tokio-обёртка — connect через spawn_blocking (plain/TLS, опционально SOCKS5 remote-DNS), `request` через spawn_blocking с возвратом Client. База для event-loop/авто-реконнекта. Default **63/63**.
+
+## 65. v0.85 — FFI facade (feature `ffi`), 2026-11-16
+- `src/ffi.rs` behind `#[cfg(feature="ffi")]`: opaque u64 handles into `OnceLock<Mutex<HashMap>>`, hex I/O, String errors, **no std::env on the FFI path** — Android passes host/port/keyHash/profile explicitly. `create_contact`/`join_contact`/`accept_contact`/`await_hello`/`send_msg`/`recv_agent_hex`/`drop_agent`. Verified: `cargo check --no-default-features` AND `--features ffi` both compile; default suite green.
+
+## 66. v0.86 — E2E PQDR default-ON, receiver-first edge fixed (audit blocker #1 CLOSED), 2026-11-16
+- `Agent::e2e: bool = true` (no env gates in lib; plaintext = explicit `e2e=false`). Old `SMP_E2E=1` checks removed.
+- Root cause of the old chat edge fixed properly: `send_msg` now buffers the **plaintext** in `outbox` when joiner has no `ckr` yet, and `flush_outbox` encrypts in original order at flush time (was: encrypt-before-check → "no receiving chain").
+- `tests/chat_e2e.rs` rewritten: `chat_e2e_over_pqdr_default_on` (both directions) + `chat_e2e_concurrent_first_send` (both sides send before reading) — both run in the default gate, no `#[ignore]`.
+- `tests/chat.rs` marked legacy-plaintext (`e2e=false`).
+- Suite: DEFAULT **65/65**, STRICT 3/3, `cargo check --no-default-features` + `--features ffi` clean. SECURITY.md scope note updated.
