@@ -403,3 +403,31 @@ pub fn connect_socks5(proxy: &Socks5Config, dest_host: &str, dest_port: u16) -> 
     s.read_exact(&mut buf)?;
     Ok(s)
 }
+
+/// Plain TCP through SOCKS5, remote DNS by hostname (no local resolve).
+pub fn connect_plain_proxy(host: &str, port: u16, proxy: &Socks5Config) -> std::io::Result<BoxStream> {
+    let tcp = connect_socks5(proxy, host, port)?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    Ok(Box::new(tcp))
+}
+
+/// TLS 1.3 through SOCKS5 with remote DNS; SNI still uses `host` (PinVerifier by key_hash).
+pub fn connect_tls_sni_proxy(host: &str, port: u16, key_hash: [u8; 32], with_sni: bool, proxy: &Socks5Config) -> std::io::Result<(BoxStream, [u8; 32])> {
+    let tcp = connect_socks5(proxy, host, port)?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let name = if with_sni {
+        ServerName::try_from(host.to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    } else {
+        ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    };
+    let mut cfg = (*tls_client_config(key_hash)).clone();
+    if !with_sni { cfg.enable_sni = false; }
+    let conn = ClientConnection::new(Arc::new(cfg), name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut stream = StreamOwned::new(conn, tcp);
+    stream.conn.complete_io(&mut stream.sock).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut binding = [0u8; 32];
+    stream.conn.export_keying_material(&mut binding, b"SimpleX-channel-binding", None).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok((Box::new(stream), binding))
+}
