@@ -396,3 +396,86 @@ impl Drop for PqdrRatchet {
         self.skipped.clear();
     }
 }
+
+// ---------- state snapshot (persistence) ----------
+fn put_b(o: &mut Vec<u8>, b: &[u8]) { o.extend_from_slice(&(b.len() as u32).to_be_bytes()); o.extend_from_slice(b); }
+fn put_a32(o: &mut Vec<u8>, a: &[u8; 32]) { o.extend_from_slice(a); }
+fn put_opt32(o: &mut Vec<u8>, a: &Option<[u8; 32]>) { match a { Some(v) => { o.push(1); put_a32(o, v); } None => o.push(0) } }
+struct Cur<'a> { b: &'a [u8], p: usize }
+impl<'a> Cur<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> { if self.p + n > self.b.len() { return Err("short snapshot".into()); } let r = &self.b[self.p..self.p+n]; self.p += n; Ok(r) }
+    fn b32(&mut self) -> Result<[u8; 32], String> { Ok(self.take(32)?.try_into().map_err(|_| "bad32".to_string())?) }
+    fn bytes(&mut self) -> Result<Vec<u8>, String> { let n = u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "bad len".to_string())?) as usize; Ok(self.take(n)?.to_vec()) }
+    fn opt32(&mut self) -> Result<Option<[u8; 32]>, String> { Ok(if self.take(1)?[0] == 1 { Some(self.b32()?) } else { None }) }
+    fn u32(&mut self) -> Result<u32, String> { Ok(u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "bad u32".to_string())?)) }
+}
+
+impl PqdrRatchet {
+    /// Binary snapshot of the full ratchet state (including skipped/pending).
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        put_b(&mut o, &self.ad);
+        put_a32(&mut o, &self.rk);
+        put_a32(&mut o, &self.dh_s.secret.to_bytes());
+        put_a32(&mut o, &self.dh_s.public.to_bytes());
+        put_a32(&mut o, &self.dh_r.to_bytes());
+        put_a32(&mut o, &self.cks);
+        put_opt32(&mut o, &self.ckr);
+        put_a32(&mut o, &self.nhks);
+        put_opt32(&mut o, &self.nhkr);
+        put_b(&mut o, self.kem_s.ek.as_ref());
+        put_b(&mut o, self.kem_s.dk.as_ref());
+        put_b(&mut o, &self.kem_r);
+        match &self.pending {
+            Some((ct, ss, pk)) => { o.push(1); put_b(&mut o, ct); put_a32(&mut o, ss); put_b(&mut o, pk); }
+            None => o.push(0),
+        }
+        o.extend_from_slice(&self.pn.to_be_bytes());
+        o.extend_from_slice(&self.ns.to_be_bytes());
+        o.extend_from_slice(&self.nr.to_be_bytes());
+        o.extend_from_slice(&(self.skipped.len() as u32).to_be_bytes());
+        for (d, n, mk, iv) in &self.skipped {
+            put_a32(&mut o, d);
+            o.extend_from_slice(&n.to_be_bytes());
+            put_a32(&mut o, mk);
+            o.extend_from_slice(iv);
+        }
+        o
+    }
+
+    pub fn restore(b: &[u8]) -> Result<PqdrRatchet, String> {
+        let mut c = Cur { b, p: 0 };
+        let ad = c.bytes()?;
+        let rk = c.b32()?;
+        let dh_s = crate::crypto::X25519Keypair {
+            secret: x25519_dalek::StaticSecret::from(<[u8;32]>::try_from(c.take(32).map_err(|_| "s".to_string())?).map_err(|_| "s".to_string())?),
+            public: crate::crypto::x25519_public(c.b32()?),
+        };
+        let dh_r = crate::crypto::x25519_public(c.b32()?);
+        let cks = c.b32()?;
+        let ckr = c.opt32()?;
+        let nhks = c.b32()?;
+        let nhkr = c.opt32()?;
+        let ek = c.bytes()?;
+        let dk = c.bytes()?;
+        let kem_s = crate::pq::KemKeypair {
+            ek: sntrup761::EncapsulationKey::try_from(ek.as_slice()).map_err(|_| "bad ek".to_string())?,
+            dk: sntrup761::DecapsulationKey::try_from(dk.as_slice()).map_err(|_| "bad dk".to_string())?,
+        };
+        let kem_r = c.bytes()?;
+        let pending = if c.take(1)?[0] == 1 { Some((c.bytes()?, c.b32()?, c.bytes()?)) } else { None };
+        let pn = c.u32()?;
+        let ns = c.u32()?;
+        let nr = c.u32()?;
+        let nskip = c.u32()? as usize;
+        let mut skipped = Vec::with_capacity(nskip);
+        for _ in 0..nskip {
+            let d = c.b32()?;
+            let n = c.u32()?;
+            let mk = c.b32()?;
+            let iv: [u8;16] = c.take(16)?.try_into().map_err(|_| "bad iv".to_string())?;
+            skipped.push((d, n, mk, iv));
+        }
+        Ok(PqdrRatchet { ad, rk, dh_s, dh_r, cks, ckr, nhks, nhkr, kem_s, kem_r, pending, pn, ns, nr, skipped })
+    }
+}

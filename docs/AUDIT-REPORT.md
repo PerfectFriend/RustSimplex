@@ -348,3 +348,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 59. v0.79 — proxy-aware connect wrappers (2026-11-15)
 - `connect_plain_proxy(host, port, proxy)` и `connect_tls_sni_proxy(host, port, key_hash, with_sni, proxy)`: TCP/TLS идут через SOCKS5 с remote DNS, SNI и PinVerifier сохраняются, возвращается channel binding. Default **62/62**.
+
+
+## 60. v0.80 — PqdrRatchet snapshot/restore (audit blocker #3, persistence, 2026-11-15)
+- `PqdrRatchet::snapshot()/restore()` — полный бинарный снапшот (rk/chain keys/kem/dh/pending/skipped); тест восстанавливает оба ratchet после 5 сообщений и продолжает цепочку до 10. Default **63/63**.

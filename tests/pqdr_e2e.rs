@@ -33,3 +33,30 @@ fn pqdr_e2e_twenty_messages_both_directions() {
         }
     }
 }
+
+#[test]
+fn pqdr_snapshot_restore_continues_chain() {
+    let sk = [3u8; 32];
+    let ad = b"snap".to_vec();
+    let dh_b = smp_rs::crypto::x25519_keypair();
+    let kem_b = smp_rs::pq::kem_keypair();
+    let mut alice = PqdrRatchet::init_sender(&sk, ad.clone(), smp_rs::crypto::x25519_public(dh_b.public.to_bytes()), kem_b.ek.as_ref().to_vec());
+    let mut bob = PqdrRatchet::init_receiver(&sk, ad, dh_b, kem_b, Vec::new());
+    for i in 0..5 {
+        let m = format!("pre{i}").into_bytes();
+        let w = if i % 2 == 0 { alice.encrypt(&m) } else { bob.encrypt(&m) };
+        let _ = if i % 2 == 0 { bob.decrypt(&w).unwrap() } else { alice.decrypt(&w).unwrap() };
+    }
+    let mut alice2 = PqdrRatchet::restore(&alice.snapshot()).unwrap();
+    let mut bob2 = PqdrRatchet::restore(&bob.snapshot()).unwrap();
+    for i in 5..10 {
+        let m = format!("post{i}").into_bytes();
+        if i % 2 == 0 {
+            let w = alice2.encrypt(&m);
+            assert_eq!(bob2.decrypt(&w).unwrap(), m);
+        } else {
+            let w = bob2.encrypt(&m);
+            assert_eq!(alice2.decrypt(&w).unwrap(), m);
+        }
+    }
+}
