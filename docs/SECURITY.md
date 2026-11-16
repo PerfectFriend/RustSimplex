@@ -1,6 +1,6 @@
 # SECURITY.md — smp-rs: модель угроз, границы, известные ограничения
 
-> **Scope note (audit SEC-02, 2026-11-15):** этот репозиторий сейчас — **interop-клиент/библиотека SMP/XFTP + исследовательский server**. Слой `agent.rs`/`chat.rs` — демо формата сообщений: тела `Command::Send` шифруются только router→recipient (`rcv_dh_secret` у роутера), **E2E между участниками сейчас нет**, `pqdr.rs` не подключён к agent/chat. Не используйте agent/chat как «конфиденциальный мессенджер»; см. ниже.
+> **Scope note (обновлено по внешнему аудиту, 2026-11-15):** репозиторий — interop-клиент/библиотека SMP/XFTP + исследовательский server. По умолчанию `agent/chat` — demo: SMP MSG шифруется только router→recipient (`rcv_dh_secret`), E2E PQDR подключается флагом `SMP_E2E=1` (`Agent::ratchet`, `init_e2e_*`, outbox у joiner’а); до полного зелёного `chat_e2e` не считайте agent/chat production-E2E. Store шифруется `SMP1` при наличии `SMP_STORE_KEY` (fail-closed).
 
 ## Что защищает протокол (и наша реализация)
 
@@ -24,11 +24,11 @@
 
 | Угроза | Защита | Примечание |
 |---|---|---|
-| Пассивный слушатель на пути клиент↔роутер | TLS 1.3 transport + E2E crypto_box тел | метаданные (timing/size) видны роутеру — как в оригинале |
+| Пассивный слушатель на пути клиент↔роутер | TLS 1.3 transport + router→recipient crypto_box; при SMP_E2E=1 ещё и PQDR поверх | без E2E роутер видит только метаданные SMP, но agent-demo body — нет |
 | MITM с чужим сертификатом | pin по keyHash | см. ниже про sessionId |
 | Подделка команд третьей стороной | Ed25519/X25519 authenticator | |
-| Роутер-имитатор очереди | E2E шифрование, ключ известен только концам | |
-| Постквантовый сбор трафика | PQDR KEM-слой (v0.15) | см. ниже: ratchet не реализован |
+| Роутер-имитатор очереди | при SMP_E2E=1 PQDR ratchet, ключ только у концов; иначе только router-level box | |
+| Постквантовый сбор трафика | PQDR KEM+ratchet (SNTRUP761), snapshot/restore, zeroize on drop | opt-in SMP_E2E=1; chat edge в backlog |
 
 ## Намеренные отклонения и известные ограничения (честно)
 

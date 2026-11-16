@@ -360,3 +360,7 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## 62. v0.82 — flush_outbox shared by agent/chat (2026-11-15)
 - `Agent::flush_outbox()` вынесен отдельно и вызывается из `recv_agent` и `chat::recv_text` после успешного decrypt. Default **63/63**. Chat под SMP_E2E всё ещё падает «failed to fill whole buffer» в b.recv_text — следующий дебаг: почему server закрывает сокет b после первых ratchet MSG.
+
+
+## 63. v0.83 — SECURITY.md синхронизирован с реальностью (2026-11-15)
+- Scope note и таблица угроз обновлены: store шифруется (SMP1), PQDR подключён opt-in через SMP_E2E, chat E2E edge в backlog. Docs-only.
