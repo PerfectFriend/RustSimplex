@@ -45,6 +45,9 @@ pub struct Client {
     /// per-connection ephemeral X25519 pub from server hello (authPubKey), used for box auth
     pub server_eph_pub: Option<[u8; 32]>,
     eph_priv: Option<[u8; 32]>,
+    /// pushed MSG broker messages diverted aside by request() so a command response
+    /// is never confused with a push (and vice versa); recv_block drains these first.
+    pending: Vec<BrokerMsg>,
 }
 
 /// (sessionId, tlsBinding, keyHash) extracted from a server hello.
@@ -68,13 +71,13 @@ impl Client {
 
     /// Wrap an already-handshaken stream (used by async/proxy wrappers).
     pub fn from_stream(s: BoxStream, key_hash: [u8; 32]) -> Client {
-        Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, eph_priv: None }
+        Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, eph_priv: None, pending: Vec::new() }
     }
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
@@ -95,7 +98,7 @@ impl Client {
     pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
         let (mut s, binding) = crate::transport::connect_tls_sni_bound(addr, host, key_hash, with_sni).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv) }; c.maybe_enable_strict_env(); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict_env(); Ok(c) }
     }
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
@@ -112,8 +115,19 @@ impl Client {
         Some(x25519_dh(&qauth_kp.secret, &x25519_public(srv)))
     }
 
-    /// Send one command transmission (signed if `auth` given) and read one response block.
+    /// Write one command and read one response block. NOTE: a pushed MSG block that
+    /// arrives before the response is returned as-is (callers that only want responses
+    /// must tolerate Msg entries — receive loops skip them; fire-and-forget commands
+    /// like ACK use send_only to avoid swallowing pushes).
     pub fn request(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
+        self.send_only(cmd, entity_id, auth)?;
+        self.recv_block()
+    }
+
+    /// Write one command WITHOUT reading a response. Use for fire-and-forget commands
+    /// (e.g. ACK) inside receive loops: request() would swallow a concurrently pushed
+    /// MSG block as the "response" and lose it for the agent layer.
+    pub fn send_only(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<()> {
         let mut t = Transmission {
             authenticator: Vec::new(),
             corr_id: random_bytes(24),
@@ -131,7 +145,7 @@ impl Client {
             let blk = encode_block(&[wire]).map_err(map_e)?;
             write_block(&mut self.stream, &blk).map_err(map_e)?;
         }
-        self.recv_block()
+        Ok(())
     }
 
     /// Send one command authorized with the X25519 crypto_box authenticator
@@ -155,8 +169,16 @@ impl Client {
         self.recv_block()
     }
 
-    /// Read one block and parse all broker messages in it (responses + pushed MSG).
+    /// Read one block of broker messages. Drains diverted pushes (see `pending`) first,
+    /// so pushed MSGs are never lost to command-response reads.
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
+        if !self.pending.is_empty() {
+            return Ok(std::mem::take(&mut self.pending));
+        }
+        self.recv_block_raw()
+    }
+
+    fn recv_block_raw(&mut self) -> ClResult<Vec<BrokerMsg>> {
         let rb = if let Some(rcv) = self.strict_rcv.as_mut() {
             read_block_encrypted(&mut self.stream, rcv).map_err(map_e)?
         } else {
@@ -258,6 +280,7 @@ mod tests {
             server_key_hash: vec![],
             server_eph_pub: None,
             eph_priv: None,
+            pending: Vec::new(),
         };
         let secret = [7u8; 32];
         c.enable_strict(&secret);

@@ -56,12 +56,17 @@ fn audit_recv_agent_acks_so_no_redelivery() {
     let (mut a, mut b) = pair();
     a.send_msg(b"m1").unwrap();
     let (id1, _m1) = b.recv_agent().unwrap();
-    // recv_agent must have ACKed: a fresh SUB on the same queue returns SOK with NO Msg
-    let sub = b
+    // recv_agent must have ACKed: drain the stale ACK-Ok response block(s), then a
+    // fresh SUB on the same queue must return SOK with NO Msg for id1.
+    let mut sub = b
         .client
         .request(Command::Sub, b.rcv_id.clone(), Some(&b.rcv_auth))
         .unwrap();
-    assert!(matches!(sub[0], BrokerMsg::Sok(_)), "SUB: {sub:?}");
+    if !sub.iter().any(|m| matches!(m, BrokerMsg::Sok(_))) {
+        // first block was the stale ACK response — read the real SUB response
+        sub = b.client.recv_block().unwrap();
+    }
+    assert!(sub.iter().any(|m| matches!(m, BrokerMsg::Sok(_))), "SUB: {sub:?}");
     assert!(
         !sub.iter().any(|m| matches!(m, BrokerMsg::Msg { msg_id, .. } if *msg_id == id1)),
         "ACK missing: msg {id1:?} redelivered on re-SUB"

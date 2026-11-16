@@ -383,3 +383,16 @@ cargo clippy --all-targets         # 0 ошибок
 - `xftp-h2-v71` extended with FGET (recipient DH + secretbox tail-tag decrypt) and FDEL; live on xftp1.simplex.im:443 full cycle PING->PONG, FNEW->SIDS, FPUT(64KB)->OK, FGET->FILE decrypt matches uploaded (sha256 verified), FDEL->OK. `scripts/live_interop.sh` now asserts the full cycle (binary-safe greps).
 - clippy: 0 warnings / 0 errors on `--all-targets` both default and `--features v71-probes` (removed unused imports in probe bins, `io::Error::other`/`let-else` from earlier --fix pass committed, doc-lint allows on probe bin headers, must_use on openssl builder fixed).
 - Gates: DEFAULT 65/65, STRICT 3/3, `cargo check --no-default-features` and `--features ffi` clean, live SMP v17..v23 matrix OK.
+
+## 68. v0.88 — ACK delivery hardening + client push/response decoupling
+- `Client::send_only` — fire-and-forget command write (no response read). `recv_agent`/`recv_text`
+  now ACK every delivered MSG via send_only: previously `request(ACK)` could swallow a concurrently
+  pushed MSG block as the "response", losing it (root cause of intermittent chat test stalls).
+- `Client::pending` — recv_block drains diverted pushes first (defensive; with send_only ACKs the
+  stream stays ordered).
+- `recv_agent` now loops over blocks until one carries a MSG (skips stale ACK-Ok response blocks).
+- Regression test `audit_recv_agent_acks_so_no_redelivery` updated to drain the stale ACK-Ok block.
+- Known residual: `tests/chat.rs::chat_text_over_agent_connection` still flakes under full-suite load
+  with EOF at first recv_text (server pump closes the conn); passes standalone. Next step: trace
+  server pump `Err(_) => break` path under suite timing.
+- clippy --all-targets: 0 warnings. SMP_STRICT: 3/3. Default suite: 69/69 when green.

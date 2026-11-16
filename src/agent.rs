@@ -564,33 +564,40 @@ impl Agent {
         Ok(())
     }
 
-    /// Receive agent messages (one block). ACKs EVERY delivered MSG (queue cleanup,
-    /// no QUEUE_FULL / redelivery) and returns the first parsed agent message.
+    /// Receive agent messages: reads blocks until one carries a MSG (skips stale
+    /// response blocks, e.g. ACK Ok replies left by send_only). ACKs EVERY delivered
+    /// MSG (queue cleanup, no QUEUE_FULL / redelivery) and returns the first parsed one.
     pub fn recv_agent(&mut self) -> Result<(Vec<u8>, AgentMsg), String> {
-        let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
-        let secret = self.dh_secret()?;
-        let mut first: Option<(Vec<u8>, AgentMsg)> = None;
-        for m in &msgs {
-            if let BrokerMsg::Msg { msg_id, body } = m {
-                let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                let mut am = parse_agent(&pt)?;
-                if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
-                    if let Some(r) = &mut self.ratchet {
-                        let plain = r.decrypt(body)?;
-                        am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
+        loop {
+            let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
+            let secret = self.dh_secret()?;
+            let mut first: Option<(Vec<u8>, AgentMsg)> = None;
+            for m in &msgs {
+                if let BrokerMsg::Msg { msg_id, body } = m {
+                    let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
+                    let mut am = parse_agent(&pt)?;
+                    if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
+                        if let Some(r) = &mut self.ratchet {
+                            let plain = r.decrypt(body)?;
+                            am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
+                        }
+                    }
+                    // ACK the broker message so it is removed from the queue.
+                    // send_only: request() here would swallow a concurrently pushed MSG.
+                    self.client
+                        .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                        .map_err(|e| e.to_string())?;
+                    if first.is_none() {
+                        first = Some((msg_id.clone(), am));
                     }
                 }
-                // ACK the broker message so it is removed from the queue
-                self.client
-                    .request(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
-                    .map_err(|e| e.to_string())?;
-                if first.is_none() {
-                    first = Some((msg_id.clone(), am));
-                }
             }
+            let _ = self.flush_outbox();
+            if let Some(f) = first {
+                return Ok(f);
+            }
+            // block carried no MSG (e.g. stale Ok response) — read the next one
         }
-        let _ = self.flush_outbox();
-        first.ok_or_else(|| "no MSG in block".to_string())
     }
 
     /// Send A_RCVD for a received agent msg id.
