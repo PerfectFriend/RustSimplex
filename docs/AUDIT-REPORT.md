@@ -416,3 +416,9 @@ cargo clippy --all-targets         # 0 ошибок
 - ROADMAP.md rewritten to v0.89 reality (E2E default-on done; backlog: TLS Finished sessionId,
   NTF/proxy live, unwrap cleanup, onion routing, async engine).
 - Suite 70/70 x3, SMP_STRICT 3/3, clippy 0.
+
+## 71. v0.90 — external audit hand-off prompt
+- `docs/AUDIT-PROMPT.md`: launch document for the three external critics (Hydrogen/Grok/Sonnet-class).
+  Fixed zone split (A: wire/crypto core, B: agent/ratchet/chat, C: transport/TLS/server/FFI/xftp),
+  mandatory JSON output contract with file:line+fragment+repro per finding, out-of-scope list,
+  ground rules (no secrets, no re-reporting CLOSED items, broken/dead/unbuilt labels).
