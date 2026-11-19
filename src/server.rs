@@ -49,6 +49,9 @@ pub struct ServerState {
 pub struct ConnCtx {
     pub sess_secret: Option<[u8; 32]>,
     pub server_eph_priv: Option<x25519_dalek::StaticSecret>,
+    /// most recent PROXY session opened on this connection (for onion-nested PFWD
+    /// with empty entity_id: the inner [Proxy, Pfwd] pair is dispatched atomically)
+    pub last_proxy: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 
 impl ServerState {
@@ -483,13 +486,20 @@ fn dispatch_cmd(
                         cert_key: spki_x25519(&conn.dest_session_pub),
                     };
                     lock_state(st).proxies.insert(proxy_id.clone(), Arc::new(Mutex::new(conn)));
+                    *ctx.last_proxy.lock().unwrap_or_else(|e| e.into_inner()) = Some(proxy_id.clone());
                     vec![resp_np!(t.corr_id.clone(), vec![], pkey)]
                 }
                 Err(e) => vec![err_np!(t.corr_id.clone(), vec![], &format!("PROXY {e}"))],
             }
         }
         Command::Pfwd { version, command_key, enc } => {
-            let proxy_id = t.entity_id.clone();
+            // onion nesting: empty entity_id = the proxy session just opened on this
+            // connection by the preceding inner Proxy command
+            let proxy_id = if t.entity_id.is_empty() {
+                ctx.last_proxy.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
+            } else {
+                t.entity_id.clone()
+            };
             let conn = lock_state(st).proxies.get(&proxy_id).cloned();
             let Some(conn) = conn else {
                 return vec![err_np!(t.corr_id.clone(), proxy_id, "NO_AUTH")];
@@ -509,7 +519,7 @@ fn dispatch_cmd(
             let st2 = st.clone();
             let sid = session_id.to_vec();
             let outbox2 = outbox.clone();
-            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None };
+            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None, last_proxy: ctx.last_proxy.clone() };
             match crate::proxy::handle_rfwd(&enc, &t.corr_id, &sess, eph_priv, session_id, &move |inner| {
                 dispatch(inner, &st2, &sid, &outbox2, &ctx2)
             }) {
@@ -633,6 +643,7 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                 .map(|(_a, raw)| x25519_dh(&eph.secret, &x25519_public(raw)))
         }),
         server_eph_priv: Some(eph.secret),
+        last_proxy: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
     // strict v23 transport encryption (encryptBlock) — enabled only when client sent authPubKey
     let (mut s_snd, mut s_rcv) = if std::env::var("SMP_STRICT").as_deref() == Ok("1") {

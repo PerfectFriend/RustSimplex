@@ -169,6 +169,21 @@ impl Client {
         self.recv_block()
     }
 
+    /// session id from the server hello (plain mode: empty)
+    pub fn session_id(&self) -> &[u8] {
+        &self.session_id
+    }
+
+    /// Write one raw 16384-byte block (used by onion routing to send a nested [Proxy, Pfwd] block).
+    pub fn write_raw_block(&mut self, block: &[u8]) -> ClResult<()> {
+        crate::transport::write_block(&mut self.stream, block).map_err(map_e)
+    }
+
+    /// Read one raw 16384-byte block.
+    pub fn read_raw_block(&mut self) -> ClResult<Vec<u8>> {
+        crate::transport::read_block(&mut self.stream).map_err(map_e)
+    }
+
     /// Read one block of broker messages. Drains diverted pushes (see `pending`) first,
     /// so pushed MSGs are never lost to command-response reads.
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {

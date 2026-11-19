@@ -118,12 +118,20 @@ pub fn handle_rfwd(
     let mut fc = [0u8; 24];
     fc.copy_from_slice(&fwd_corr);
     let padded = secretbox_decrypt(&client_sess, &fc, &client_enc).ok_or("RFWD client-layer decrypt failed")?;
-    let wire = unpad(&padded).map_err(|e| e.to_string())?;
-    let t = decode_transmission(&wire).map_err(|e| e.to_string())?;
-    let responses = dispatch(&t);
+    let content = unpad(&padded).map_err(|e| e.to_string())?;
+    // onion nesting: inner payload may be a block of several wires ([Proxy{next}, Pfwd{…}]);
+    // single-transmission payload (legacy single-hop) still parses first.
+    let wires: Vec<Vec<u8>> = match decode_transmission(&content) {
+        Ok(_) => vec![content.clone()],
+        Err(_) => decode_block_raw(&content).map_err(|e| e.to_string())?,
+    };
     let mut inner = Vec::new();
-    for resp in &responses {
-        inner.extend_from_slice(&encode_transmission(resp).map_err(|e| e.to_string())?);
+    for w in &wires {
+        let t = decode_transmission(w).map_err(|e| e.to_string())?;
+        let responses = dispatch(&t);
+        for resp in &responses {
+            inner.extend_from_slice(&encode_transmission(resp).map_err(|e| e.to_string())?);
+        }
     }
     let padded_resp = pad(&inner, PROXIED_T_LEN).map_err(|e| e.to_string())?;
     let rn = reverse_nonce(&fc);
