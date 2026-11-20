@@ -1,6 +1,8 @@
 # simplex-rs — Release Readiness Audit
 
-Date: 2026-11-20 · Commit: `8b9af94` (v0.98) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Date: 2026-11-20 · Head: `d832059` (v1.0-rc prep) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 2 — NTF command round-trip proven live, NTF pinning enforced, crates.io packaging + CI matrix added;
+the previous revision overstated the pinning gap (corrected in §3.2, issue 2).
 
 Audit method: local codebase inspection + executable verification (cargo test / clippy / live probes against
 the public SimpleX infrastructure) + cross-check against the Haskell reference (`simplexmq/`,
@@ -10,11 +12,14 @@ the public SimpleX infrastructure) + cross-check against the Haskell reference (
 
 ## 1. Verdict
 
-**Release readiness: ~78% — NOT ready for a public production release; ready for a closed beta / library release.**
+**Release readiness: ~86% — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99 / v1.0-rc.**
 
-The wire-level protocol core is strong and proven against real infrastructure. The gaps are concentrated in
-(a) the notification-server (NTF) command layer, (b) certificate pinning in the client paths, and
-(c) packaging/distribution (no crates.io metadata, no CI matrix beyond one workflow, no fuzz target in CI).
+Updated after the NTF command round-trip, NTF pinning enforcement, crates.io packaging and CI-matrix work.
+
+The wire-level protocol core is strong and proven against real infrastructure. The remaining gaps are concentrated in
+(a) the **signed** NTF command flow (`SNEW`/`TNEW` with Ed25519 authorization) and a library-level NTF client API,
+(b) the release pipeline (tags, changelog, publish job) and coverage-guided fuzzing, and
+(c) one probe path (`xftp_h2_v71`) that still trusts the caller-supplied keyHash without an explicit chain check.
 
 | Area | Readiness | Evidence |
 |---|---|---|
@@ -24,22 +29,25 @@ The wire-level protocol core is strong and proven against real infrastructure. T
 | Onion routing over SMP proxy | **85%** | 2-hop onion round-trip + wrong-hop-key negative test (local) |
 | E2E PQDR ratchet | **80%** | init/encrypt/decrypt/rotate/skipped-key limits; `Agent::e2e` default-on, fail-closed |
 | Reconnect / resilience | **80%** | exponential backoff, re-dial, strict-mode re-enable |
-| NTF (notifications) | **45%** | handshake **accepted live** (negative control verified); command layer not yet implemented |
+| NTF (notifications) | **65%** | live `PING→PONG` against `ntf2.simplex.im:443`; 512-byte blocks, own handshake, own command tag set, batch framing; **CA-fingerprint pinning enforced** (exit 3 on mismatch). `SNEW→IDSUB` / `TNEW→IDTKN` (signed commands) still unproven |
 | Client UX / apps | **25%** | FFI façade only; no desktop/mobile UI in this repo |
-| Packaging & release ops | **40%** | no crates.io metadata, single CI workflow, no release pipeline |
+| Packaging & release ops | **70%** | crates.io metadata + `cargo package` verified (54 files, 113 KiB), CI matrix (default / v71-probes / ffi / no-default-features / strict / audit / fuzz / package dry-run); still no release pipeline (tags, changelog, publish job) |
 
 ---
 
 ## 2. Verified state (executed, not claimed)
 
 ```
-cargo test --offline                 -> 83 passed / 0 failed / 0 ignored
-SMP_STRICT=1 cargo test (strict)     -> 3 passed / 0 failed
-cargo clippy --all-targets           -> 0 warnings, 0 errors
-cargo clippy --features v71-probes   -> 0 warnings, 0 errors
+cargo test --offline                          -> 86 passed / 0 failed / 0 ignored
+SMP_STRICT=1 cargo test (strict)              -> 3 passed / 0 failed
+cargo clippy --all-targets                    -> 0 warnings, 0 errors
+cargo clippy --features v71-probes            -> 0 warnings, 0 errors
+cargo clippy --features ffi                   -> 0 warnings, 0 errors
+cargo check --no-default-features             -> clean (Android NDK path)
+cargo package --allow-dirty                   -> 54 files, 113.2 KiB, verify-build OK
 ```
 
-* **83/83** unit + integration tests green (20 test binaries), strict-mode suite **3/3**.
+* **86/86** unit + integration tests green (20 test binaries), strict-mode suite **3/3**.
 * **0 `unsafe`** blocks in the entire crate.
 * **0 `unwrap`/`expect`** in library code paths — all 36 occurrences live inside `#[cfg(test)]` modules
   (`sb_chain.rs` 25, `reconnect.rs` 7, `client.rs` 3, `server.rs` 1).
@@ -53,7 +61,7 @@ cargo clippy --features v71-probes   -> 0 warnings, 0 errors
 |---|---|
 | `smp11.simplex.im:5223` (SMP v17–v23) | full round-trip OK, all 7 versions |
 | `xftp1.simplex.im:443` (XFTP v4) | PING/PONG, FNEW/SIDS, FPUT 64 KB→OK, FGET decrypt match, FDEL→OK |
-| `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | **TLS1.3 + NTF handshake accepted** (server kept the session); negative control (corrupted keyHash) → server closed the connection |
+| `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | **TLS1.3 + NTF handshake accepted** (negative control: corrupted keyHash → server closed the connection); **`PING→PONG` command round-trip OK**; pin mismatch → client refuses to proceed (exit 3) |
 
 ---
 
@@ -68,6 +76,8 @@ cargo clippy --features v71-probes   -> 0 warnings, 0 errors
 | N-3 | `parse_server_hello_key` rejected the NTF server hello | Haskell `Maybe` tag is ASCII `'0'/'1'`; the NTF vhost emits binary `0x00`. Parser now accepts both. |
 | N-4 | rustls `HandshakeFailure` against the NTF vhost | openssl negotiates TLS1.3/CHACHA20/X25519 fine; NTF probes use openssl (diagnostics only, `v71-probes` feature). |
 | N-5 | `Client::handshake` was private — no way to complete an SMP handshake over an externally-created TLS stream | Added `Client::handshake_over(stream, key_hash, tls_binding)`. |
+| N-6 | **NTF command layer missing** — the handshake was accepted but no NTF command had ever been round-tripped | Implemented NTF transmission framing in `src/ntf.rs` (batch = `u8 count` + `Large` per transmission; `implySessId` → no sessionId on the wire; authenticator/corrId/entityId as Haskell `ByteString`). **Live `PING→PONG` verified.** |
+| N-7 | **NTF probe did not pin the server identity** — it hashed whatever CA the peer presented | The probe now requires an expected CA fingerprint (argv or `NTF_EXPECTED_FP`) and aborts with exit code 3 before sending the handshake when it does not match. Verified: wrong pin → exit 3, no traffic sent. |
 
 ### 3.2 Open issues, ranked
 
@@ -80,22 +90,32 @@ cargo clippy --features v71-probes   -> 0 warnings, 0 errors
    *Fix*: NTF transmission framing (`Transmission` + `auth` + entity ids, batch mode from v2) and a
    `NtfClient` wrapper over the 512-byte block transport.
 
-2. **Certificate pinning is not enforced in the client paths.** The `NoVerify` verifier exists only in
-   `v71-probes` diagnostic binaries (`src/transport.rs:320`, `src/bin/xftp_h2.rs:352`), and the public
-   keyHash is *supplied by the caller* rather than verified against the served chain. A production client
-   must compute the CA-DER fingerprint from the TLS chain and compare it to the pinned value
-   (the rule is now implemented in `ntf::key_hash_from_ca_der` but is not wired into `AsyncSmpClient`).
-   *Severity*: HIGH for a privacy product; the MITM test is still missing.
+2. **Certificate pinning is enforced in the library path, but not in every *probe* path.**
+   *Corrected finding*: the earlier draft of this report claimed pinning was absent from the client paths.
+   That was wrong — `src/transport.rs::PinVerifier` pins to the **last** certificate of the chain
+   (the CA), verifies the leaf signature against that exact anchor, and is used by
+   `Client::connect_tls*` / `AsyncSmpClient` / `ReconnectingClient`. Two negative regression tests cover it:
+   `tests/interop.rs::tls_wrong_keyhash_rejected` and `tests/interop.rs::tls_mitm_evil_leaf_with_pinned_ca_rejected`
+   (the `[evil_leaf, pinned_CA]` case).
+   The remaining gap is narrower: the `v71-probes` diagnostic binaries use `SslVerifyMode::NONE` because the
+   public relays need the openssl TLS stack (rustls lacks ed448 and does not expose TLS Finished). Of those,
+   `smp_v71` pins manually by SHA-256 over the served chain, and `ntf_probe` now pins too (this run).
+   `xftp_h2_v71` still relies on the caller-supplied keyHash alone.
+   *Action*: give `xftp_h2_v71` the same explicit chain-fingerprint check as `ntf_probe`.
 
 **MEDIUM**
 
-3. **No crates.io/package metadata** — `Cargo.toml` has no `description`, `license`, `repository`,
-   `keywords`, `categories`; the crate cannot be published as-is.
-4. **CI coverage is thin** — one workflow; no matrix over `default / v71-probes / no-default-features / ffi`,
-   no `cargo audit`, no fuzz job (a `tests/fuzz_parse.rs` exists but is not run under `cargo-fuzz`).
-5. **No release pipeline** — no versioned tags, no changelog generator wired to `git log`, no reproducible
-   release build.
-6. **Fuzzing is smoke-level** — `tests/fuzz_parse.rs` uses hand-written vectors, not a coverage-guided fuzzer.
+3. ~~No crates.io/package metadata~~ — **FIXED this run**: `description`, `readme`, `repository`, `homepage`,
+   `documentation`, `keywords`, `categories`, `rust-version = 1.87`, and `exclude` for the vendored
+   Haskell reference. `cargo package` verified: 54 files, 113.2 KiB compressed, verification build passes.
+4. ~~CI coverage is thin~~ — **FIXED this run**: matrix over `default / v71-probes / ffi`, plus separate jobs
+   for `no-default-features`, the strict transport suite, `rustsec/audit-check` (blocking), the seeded
+   mutation fuzz harness and a `cargo package` dry-run with a content assertion.
+5. **No release pipeline** — still open: no versioned tags, no changelog generator wired to `git log`,
+   no reproducible release build, no publish job.
+6. **Fuzzing is smoke-level** — still open: the CI job runs the in-repo seeded mutation harness
+   (`tests/fuzz_parse.rs`), which needs neither nightly nor cargo-fuzz, but there is still no
+   coverage-guided fuzz target (cargo-fuzz/libfuzzer-sys is not available in the offline build env).
 
 **LOW**
 
@@ -109,10 +129,13 @@ cargo clippy --features v71-probes   -> 0 warnings, 0 errors
 ## 4. Classification of gaps (per project convention)
 
 * **broken** (regression): none found — every defect discovered this run was fixed and covered by a test.
-* **dead** (written but not wired): `src/ntf.rs` command/tag layer is implemented but not yet reachable from
-  a client; `Client::handshake_over` is used only by probes.
-* **unbuilt** (planned, not implemented): NTF command round-trip, pinning enforcement inside the client,
-  crates.io packaging, release CI, coverage-guided fuzzing, UI clients.
+* **dead** (written but not wired): the signed NTF command flow (`SNEW`/`TNEW` with Ed25519 authorization)
+  is not implemented; `Client::handshake_over` and `src/ntf.rs` are reachable only from probe binaries —
+  there is no library-level `NtfClient` wrapper yet.
+* **unbuilt** (planned, not implemented): NTF signed-command round-trip (`SNEW→IDSUB`), library-level NTF
+  client API, release pipeline, coverage-guided fuzzing, `xftp_h2_v71` explicit pin check, UI clients.
+
+**No unbuilt item is reported as a defect, and no defect is reported as unbuilt.**
 
 No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 
@@ -125,17 +148,19 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | All tests green, clippy clean | ✅ 83/83 + 0 warnings | keep in CI |
 | SMP live interop v17–v23 | ✅ verified | re-run `scripts/live_interop.sh` per release |
 | XFTP live interop | ✅ verified | same |
-| NTF live command round-trip | ❌ handshake only | implement NTF client, prove `PING→PONG` and `SNEW→IDSUB` |
-| Pinning enforced + MITM negative test | ❌ | wire `key_hash_from_ca_der` into `AsyncSmpClient`, add MITM test |
+| NTF live command round-trip | ◑ `PING→PONG` proven; signed commands pending | implement signed `SNEW`/`TNEW` flow, prove `SNEW→IDSUB` |
+| Pinning enforced + MITM negative test | ✅ library path (2 negative tests); NTF probe pins; `xftp_h2_v71` does not | add the explicit chain check to `xftp_h2_v71` |
 | No `unsafe`, no library panics | ✅ | keep |
 | No secrets in tree | ✅ verified | keep CI grep |
-| Package metadata + license | ❌ | add `Cargo.toml` metadata, `LICENSE`, `README` badge |
-| CI matrix + `cargo audit` + fuzz job | ❌ | expand workflow |
+| Package metadata + license | ✅ `cargo package` verified | tag and publish to crates.io |
+| CI matrix + `cargo audit` + fuzz job | ✅ matrix + blocking audit + fuzz harness | add a coverage-guided fuzz job when libfuzzer-sys is available |
+| Release pipeline (tags, changelog, publish) | ❌ | add tag/changelog/publish workflow |
 | External security review | ❌ | `docs/AUDIT-PROMPT.md` exists; needs refreshing + a reviewer |
 
-**Recommendation:** ship **v0.98 as a pre-release library** (crates.io + GitHub tag `v0.98.0`, `pre-release`
-marker) for closed-beta integrators. Gate **v1.0** on the NTF command round-trip, pinning enforcement with
-a MITM negative test, and package/CI hygiene.
+**Recommendation:** publish **v0.99.1 as a library release** (crates.io + GitHub tag `v0.99.1`) for
+closed-beta integrators — the package now builds and verifies locally. Gate **v1.0** on: the signed NTF
+command round-trip (`SNEW→IDSUB`), the explicit pin check in `xftp_h2_v71`, and a release pipeline
+(tag + changelog + publish job).
 
 ---
 
@@ -145,16 +170,23 @@ a MITM negative test, and package/CI hygiene.
 cd ~/Projects/simplex-rs
 export PATH="$HOME/build/bin:$PATH" CARGO_HOME="$HOME/build/rust/cargo"
 
-cargo test --offline -- --test-threads=1                     # 83 passed
+cargo test --offline -- --test-threads=1                     # 86 passed
 SMP_STRICT=1 cargo test --offline --test strict_e2e --test ntf --test proxy   # 3 passed
 cargo clippy --offline --all-targets                         # 0 warnings
 cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
+cargo clippy --offline --features ffi --all-targets          # 0 warnings
+cargo check --offline --no-default-features                  # clean (Android NDK path)
+cargo package --offline --allow-dirty                       # 54 files, 113.2 KiB, verify build OK
 ./scripts/live_interop.sh                                    # SMP v17..v23 + XFTP v4
 
-# NTF handshake probe (diagnostics, openssl backend, NoVerify)
+# NTF probe (diagnostics, openssl backend) — pin is mandatory
 cargo build --offline --features v71-probes --bin ntf-probe
-"$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.simplex.im 443
-NTF_BAD_HASH=1 "$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.simplex.im 443   # negative control
+"$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.simplex.im 443 FB-Uop7RTaZZEG0ZLD2CIaTjsPh-Fw0zFAnb7QyA8Ks
+#   -> pin ok ... LIVE NTF OK: PING -> PONG
+# wrong pin -> "PIN FAILURE", exit code 3, nothing sent
+"$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.simplex.im 443 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+# NTF_BAD_HASH=1 -> corrupted keyHash -> the server closes the connection (negative control)
+NTF_BAD_HASH=1 "$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.simplex.im 443 FB-Uop7RTaZZEG0ZLD2CIaTjsPh-Fw0zFAnb7QyA8Ks
 ```
 
 No credentials, tokens or private keys are required or stored anywhere in this repository.
