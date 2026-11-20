@@ -155,6 +155,35 @@ cargo package --allow-dirty                   -> 54 files, 113.2 KiB, verify-bui
 * **unbuilt** (planned, not implemented): NTF signed-command round-trip (`SNEW→IDSUB`),
   coverage-guided fuzzing, reproducible-release-build attestation, UI clients.
 
+**NTF signed-command path — specification extracted from the Haskell reference** (`simplexmq`,
+`src/Simplex/Messaging/Notifications/{Protocol,Server,Transport}.hs` + `src/Simplex/Messaging/Protocol.hs`).
+This is the exact recipe for the last unimplemented protocol feature; nothing here is guesswork:
+
+1. **Wire framing (NTF v2+, `implySessId = True`):** `authenticator (short) | corrId (short) |
+   entityId (short) | command (tail)`. The session id is *not* on the wire — it is implied by TLS.
+2. **Signature envelope:** the authenticator is `TASignature`, whose bytes are
+   `signatureBytes` = the raw 64-byte Ed25519 signature (no algorithm tag; the tag is only present
+   in the `ASignature` wrapper used elsewhere). It is encoded as a *short* string (1-byte length
+   prefix), so the authenticator field is `0x40 || sig[64]`.
+3. **Signed payload:** the server verifies the signature over
+   `smpEncode sessionId <> corrId || entityId || command`
+   (`authorized'` in `transmissionP`), i.e. the TLS session id is prepended to the command bytes
+   *before* signing. Signing the command alone is rejected with `AUTH`.
+4. **Command bodies:**
+   - `TNEW` → `NewNtfTkn deviceToken verifyKey dhPubKey`, where `deviceToken` is
+     `pushProvider (2 ASCII bytes: AD/AP/AT/AN) || token bytes` and `verifyKey` is the
+     Ed25519 public key in X.509/SPKI DER form.
+   - `SNEW` → `NewNtfSub tknId smpQueue notifierKey`, where `smpQueue` is
+     `smpServer || notifierId` and `smpServer` is `host || port || keyHash`.
+5. **Key encoding:** private keys are PKCS#8 DER (`encodePrivKey`), public keys are X.509/SPKI DER
+   (`encodePubKey`) — *not* the raw 32-byte forms used for the SMP entity IDs.
+6. **Server responses:** `TNEW` → `IDTKN` (token id + server X25519 public key); `SNEW` → `IDSUB`.
+
+Gap in our implementation: `NtfClient` can send *unsigned* commands only. It needs an
+authenticator-carrying transmission builder plus the PKCS#8/SPKI encoders above. Until then, a
+signed `TNEW`/`SNEW` cannot be produced, so the server answers `ERR AUTH` — the protocol itself is
+not broken, the encoder is missing.
+
 **No unbuilt item is reported as a defect, and no defect is reported as unbuilt.**
 
 No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
@@ -168,7 +197,7 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | All tests green, clippy clean | ✅ 83/83 + 0 warnings | keep in CI |
 | SMP live interop v17–v23 | ✅ verified | re-run `scripts/live_interop.sh` per release |
 | XFTP live interop | ✅ verified | same |
-| NTF live command round-trip | ◑ `PING→PONG` proven through the **library client**; signed commands pending | implement the authorization envelope, prove `SNEW→IDSUB` |
+| NTF live command round-trip | ◑ `PING→PONG` proven through the **library client**; signed commands pending | implement the authorization envelope per the §4 spec (extracted from the Haskell reference), prove `SNEW→IDSUB` |
 | Pinning enforced + MITM negative test | ✅ library path (2 negative tests); NTF probe pins; **`xftp_h2_v71` now pins too** (wrong pin → exit 3 before any XFTP traffic; no pin → exit 2) | keep the negative controls in the live harness |
 | No `unsafe`, no library panics | ✅ | keep |
 | No secrets in tree | ✅ verified | keep CI grep |
@@ -176,6 +205,13 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | CI matrix + `cargo audit` + fuzz job | ✅ matrix + blocking audit + fuzz harness | add a coverage-guided fuzz job when libfuzzer-sys is available |
 | Release pipeline (tags, changelog, publish) | ◑ workflow written; first tag not yet pushed | configure `CARGO_REGISTRY_TOKEN`, push `v0.99.1`, verify the crates.io publish |
 | External security review | ❌ | `docs/AUDIT-PROMPT.md` exists; needs refreshing + a reviewer |
+
+**NTF signed commands — what remains:** the wire format, the signed byte string, and the key
+encodings are all pinned down above (extracted from the Haskell reference, not guessed). What is
+missing in `smp-rs` is code, not knowledge: (1) an authenticator-carrying transmission builder in
+`NtfClient`, (2) PKCS#8 (private) and SPKI (public) DER encoders for the Ed25519 auth keys, and
+(3) the `NewNtfTkn`/`NewNtfSub` command bodies. A device token from a real APNS/FCM device is also
+required for `TNEW` to be accepted, so this gate cannot be closed against the public relay alone.
 
 **Recommendation:** publish **v0.99.1 as a library release** (crates.io + GitHub tag `v0.99.1`) for
 closed-beta integrators — the package builds and verifies locally, the public API is exercised live
