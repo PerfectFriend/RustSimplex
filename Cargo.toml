@@ -3,7 +3,15 @@ name = "smp-rs"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Rust implementation of the SimpleX Messaging Protocol (SMP) — server engine + client"
+description = "Rust implementation of the SimpleX Messaging Protocol stack (SMP relay, XFTP files, NTF notifications, agent protocol, PQDR E2E ratchet) — server engine + client"
+readme = "README.md"
+repository = "https://github.com/PerfectFriend/RustSimplex"
+homepage = "https://github.com/PerfectFriend/RustSimplex"
+documentation = "https://docs.rs/smp-rs"
+keywords = ["simplex", "smp", "messaging", "protocol", "e2ee"]
+categories = ["network-programming", "cryptography", "protocols"]
+rust-version = "1.87"
+exclude = ["simplexmq/", "spec/", "docs/", "scripts/", ".github/"]
 
 [lib]
 name = "smp_rs"
