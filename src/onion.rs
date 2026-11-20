@@ -17,7 +17,7 @@
 use std::net::SocketAddr;
 
 use crate::client::Client;
-use crate::crypto::{cb_nonce, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, x25519_dh, x25519_keypair, x25519_public, Ed25519Keypair};
+use crate::crypto::{cb_nonce, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, x25519_dh, x25519_from_secret, x25519_keypair, x25519_public, Ed25519Keypair};
 use crate::encoding::{pad, unpad};
 use crate::protocol::{
     auth_sign, decode_block, decode_block_raw, decode_transmission, encode_block, encode_block_raw,
@@ -67,12 +67,11 @@ pub fn onion_request(
     let wire_d = encode_transmission(&t_d).map_err(|e| e.to_string())?;
     let mut wires = vec![wire_d];
 
-    // build layers inside-out; remember the innermost (eph, corr) to decrypt the response
+    // build layers inside-out; remember every layer's (eph secret, corr, target pub)
+    // to unwrap the nested PRES responses on the way back
     let mut next_addr = dest;
     let mut next_pub = dest_pub;
-    let mut outer_eph = None;
-    let mut outer_corr = None;
-    let mut outer_pub = None;
+    let mut layers: Vec<([u8; 32], Vec<u8>, [u8; 32])> = Vec::new();
     for i in (0..hops.len()).rev() {
         let eph = x25519_keypair();
         let key = x25519_dh(&eph.secret, &x25519_public(next_pub));
@@ -95,11 +94,7 @@ pub fn onion_request(
             .map_err(|e| e.to_string())?,
         })
         .map_err(|e| e.to_string())?;
-        if i == 0 {
-            outer_eph = Some(eph);
-            outer_corr = Some(corr);
-            outer_pub = Some(next_pub);
-        }
+        layers.insert(0, (eph.secret.to_bytes(), corr, next_pub));
         let proxy_wire = encode_transmission(&Transmission {
             authenticator: Vec::new(),
             corr_id: random_bytes(24),
@@ -122,13 +117,7 @@ pub fn onion_request(
     let blk = encode_block(&wires).map_err(|e| e.to_string())?;
     entry.write_raw_block(&blk)?;
     // responses may span several blocks (PKEY + large PRES); read until a PRES arrives
-    // the PRES the client receives is encrypted by the first relay that peeled the
-    // outermost client layer (hops[1], or dest for a single hop) — key vs that hop's pub
-    let eph = outer_eph.ok_or("no outer layer")?;
-    let corr = outer_corr.ok_or("no outer corr")?;
-    let key = x25519_dh(&eph.secret, &x25519_public(outer_pub.ok_or("no outer pub")?));
-    let nonce = cb_nonce(&corr);
-    let mut msgs = Vec::new();
+    let mut queue: Vec<BrokerMsg> = Vec::new();
     let mut got_pres = false;
     for _ in 0..8 {
         if got_pres {
@@ -139,23 +128,45 @@ pub fn onion_request(
         for w in &resp_wires {
             let t = decode_transmission(w).map_err(|e| e.to_string())?;
             let bm = parse_broker(&t.command).map_err(|e| e.to_string())?;
-            if let BrokerMsg::Pres { enc } = bm {
+            if matches!(bm, BrokerMsg::Pres { .. }) {
                 got_pres = true;
-                let rn = reverse_nonce(&nonce);
-                let plain = secretbox_decrypt(&key, &rn, &enc).ok_or("PRES decrypt failed")?;
+            }
+            queue.push(bm);
+        }
+    }
+    if !got_pres {
+        return Err("no PRES in onion response".into());
+    }
+    if std::env::var_os("SMP_DEBUG").is_some() { eprintln!("[onion] raw queue: {:?}", queue.iter().map(|m| match m { BrokerMsg::Pres{..} => "PRES".to_string(), other => format!("{:?}", other).chars().take(40).collect() }).collect::<Vec<_>>()); }
+    // unwrap nested PRES layers outermost-first; layer i's PRES is encrypted with
+    // DH(eph_i, target_pub_i) and nonce reverse(cb_nonce(corr_i))
+    for (secret, corr, target) in &layers {
+        let key = x25519_dh(&x25519_from_secret(*secret).secret, &x25519_public(*target));
+        let nonce = cb_nonce(corr);
+        let rn = reverse_nonce(&nonce);
+        let mut next: Vec<BrokerMsg> = Vec::new();
+        for bm in queue {
+            if let BrokerMsg::Pres { enc } = bm {
+                let plain = secretbox_decrypt(&key, &rn, &enc).ok_or("PRES layer decrypt failed")?;
                 let inner = unpad(&plain).map_err(|e| e.to_string())?;
-                let inner_wires = match decode_transmission(&inner) {
-                    Ok(_) => vec![inner.clone()],
-                    Err(_) => decode_block_raw(&inner).map_err(|e| e.to_string())?,
+                let inner_wires = match decode_block_raw(&inner) {
+                    Ok(ws) if ws.iter().all(|w| decode_transmission(w).is_ok())
+                        && ws.iter().map(|w| 2 + w.len()).sum::<usize>() + 1 == inner.len() => ws,
+                    _ => match decode_transmission(&inner) {
+                        Ok(_) => vec![inner.clone()],
+                        Err(e) => return Err(e.to_string()),
+                    },
                 };
                 for iw in inner_wires {
                     let it = decode_transmission(&iw).map_err(|e| e.to_string())?;
-                    msgs.push(parse_broker(&it.command).map_err(|e| e.to_string())?);
+                    next.push(parse_broker(&it.command).map_err(|e| e.to_string())?);
                 }
             } else {
-                msgs.push(bm);
+                next.push(bm);
             }
         }
+        if std::env::var_os("SMP_DEBUG").is_some() { eprintln!("[onion] after layer: {:?}", next.iter().map(|m| match m { BrokerMsg::Pres{..} => "PRES".to_string(), other => format!("{:?}", other).chars().take(40).collect() }).collect::<Vec<_>>()); }
+        queue = next;
     }
-    Ok(msgs)
+    Ok(queue)
 }

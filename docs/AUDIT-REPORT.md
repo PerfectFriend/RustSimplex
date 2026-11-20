@@ -430,3 +430,8 @@ cargo clippy --all-targets         # 0 ошибок
 - `src/client.rs`: `session_id()`, `write_raw_block()`, `read_raw_block()`.
 - tests/onion.rs: 1-hop onion round-trip GREEN, wrong-hop-key negative GREEN; 2-hop test present but `#[ignore]` — nested relay_pfwd response path still overflows/hangs, next iteration.
 - Full suite green (all other targets), clippy 0 warnings/errors.
+
+## v0.92 — onion multi-hop GREEN (2-hop e2e)
+- Fixed nested RFWD response path: per-hop decreasing pad budgets (request size − 256B/layer), multi-wire inner responses wrapped as block content, client unwraps nested PRES layers outermost-first with per-layer DH keys.
+- tests/onion.rs: 3/3 green — 1-hop PING, 2-hop SEND→MSG→ACK full round-trip through R1→R2→dest, wrong-hop-key negative.
+- Full suite green (26 targets ok), strict 3/3, clippy 0.

@@ -136,20 +136,30 @@ pub fn handle_rfwd(
             },
         }
     };
-    let mut inner = Vec::new();
+    if std::env::var_os("SMP_DEBUG").is_some() { eprintln!("[rfwd] content_len={} wires={} tags={:?}", content.len(), wires.len(), wires.iter().map(|w| crate::protocol::tag_of(w).chars().take(8).collect::<String>()).collect::<Vec<_>>()); }
+    let mut resp_wires: Vec<Vec<u8>> = Vec::new();
     for w in &wires {
         let t = decode_transmission(w).map_err(|e| e.to_string())?;
         let responses = dispatch(&t);
         for resp in &responses {
-            inner.extend_from_slice(&encode_transmission(resp).map_err(|e| e.to_string())?);
+            resp_wires.push(encode_transmission(resp).map_err(|e| e.to_string())?);
         }
     }
-    let padded_resp = match pad(&inner, PROXIED_T_LEN) {
-        Ok(p) => p,
-        // onion nesting: inner response may exceed PROXIED_T_LEN (carries an inner
-        // PRES) — fall back to minimal padding; unpad reads the embedded length
-        Err(_) => pad(&inner, inner.len() + 2).map_err(|e| e.to_string())?,
+    // single response: raw transmission (legacy single-hop); multiple: block content
+    let inner = if resp_wires.len() == 1 {
+        resp_wires.pop().unwrap_or_default()
+    } else {
+        encode_block_raw(&resp_wires).map_err(|e| e.to_string())?
     };
+    // response pad budget shrinks with nesting depth: request padded size minus one
+    // layer of overhead (~256B: PKEY + framing + 16B tag), so a 2-hop response still
+    // fits into one block on the way back
+    let req_pad = client_enc.len().saturating_sub(16);
+    let mut budget = req_pad.saturating_sub(256).min(PROXIED_T_LEN);
+    if budget < inner.len() + 2 {
+        budget = inner.len() + 2;
+    }
+    let padded_resp = pad(&inner, budget).map_err(|e| e.to_string())?;
     let rn = reverse_nonce(&fc);
     let client_enc_resp = secretbox_encrypt(&client_sess, &rn, &padded_resp);
     // RRES payload = short(fwd_corr) <> client_enc_resp ; outer nonce = reverse(cbNonce(rfwd corr))
