@@ -29,11 +29,69 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Truncate to at most `max` CHARS without splitting a UTF-8 sequence.
+/// Slicing a String by a byte index panics when the index lands inside a multi-byte char —
+/// and these responses are raw binary, so that happens in practice.
+fn truncate_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// base64url decoder (no padding), tolerant of a trailing '='.
+fn b64url_dec(s: &str) -> Result<Vec<u8>, String> {
+    let mut tbl = [0xffu8; 256];
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".iter().enumerate() {
+        tbl[*c as usize] = i as u8;
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut nbits = 0;
+    for c in s.bytes() {
+        let v = tbl[c as usize];
+        if v == 0xff {
+            if c == b'=' {
+                break;
+            }
+            return Err(format!("bad b64 char {c}"));
+        }
+        acc = (acc << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 #[tokio::main]
 async fn main() {
     let host = std::env::args().nth(1).unwrap_or_else(|| "xftp1.simplex.im".into());
     let port: u16 = std::env::args().nth(2).unwrap_or_else(|| "443".into()).parse().unwrap();
-    println!("connect {host}:{port} ALPN xftp/1 (openssl, TLS1.3)");
+    // Expected CA fingerprint (base64url, no padding). PINNING IS MANDATORY: without it the client
+    // would trust whatever CA the peer presents, so a MITM serving its own chain would pass.
+    // The fingerprint is compared against the served chain BEFORE any XFTP traffic is sent.
+    let expected_fp = std::env::args()
+        .nth(3)
+        .or_else(|| std::env::var("XFTP_EXPECTED_FP").ok())
+        .unwrap_or_else(|| {
+            eprintln!("usage: xftp-h2-v71 <host> <port> <expected-ca-fingerprint-b64url>");
+            eprintln!("       (or set XFTP_EXPECTED_FP)");
+            std::process::exit(2);
+        });
+    let expected: [u8; 32] = {
+        let raw = b64url_dec(expected_fp.trim_end_matches('=')).unwrap_or_else(|e| {
+            eprintln!("bad expected fingerprint: {e}");
+            std::process::exit(2);
+        });
+        raw.try_into().unwrap_or_else(|_| {
+            eprintln!("expected fingerprint must be 32 bytes");
+            std::process::exit(2);
+        })
+    };
+    println!("connect {host}:{port} ALPN xftp/1 (openssl, TLS1.3), pinned CA fingerprint {expected_fp}");
 
     let mut builder = SslConnector::builder(SslMethod::tls()).expect("connector");
     builder.set_verify(SslVerifyMode::NONE); // probe only
@@ -70,6 +128,13 @@ async fn main() {
     let ca_der = chain.iter().last().expect("ca cert").to_der().expect("der");
     let key_hash: [u8; 32] = sha2::Sha256::digest(&ca_der).into();
     println!("peer chain {n} certs; keyHash = SHA256(CA DER) = {}", hex(&key_hash));
+    // PIN: the served CA fingerprint MUST equal the expected one — otherwise refuse to proceed.
+    // Checked before the h2 handshake, so a MITM never receives a single XFTP byte.
+    if key_hash != expected {
+        eprintln!("PIN FAILURE: served CA fingerprint {} != expected {}", hex(&key_hash), hex(&expected));
+        std::process::exit(3);
+    }
+    println!("pin ok: CA fingerprint matches the expected value");
 
     let (mut h2, conn) = h2::client::handshake(ssl).await.expect("h2 handshake");
     tokio::spawn(async move {
@@ -230,7 +295,7 @@ async fn main() {
     auth.extend_from_slice(&sig.to_bytes());
     let fr = post(&mut h2, Bytes::from(batch(&auth, &t)), &host).await;
     let fs = show_resp(&fr);
-    println!("FNEW -> {}", &fs[..fs.len().min(120)]);
+    println!("FNEW -> {}", truncate_chars(&fs, 120));
     let pl = u16::from_be_bytes([fr[0], fr[1]]) as usize;
     let fp = &fr[2..(2 + pl).min(fr.len())];
     let pos = match fp.windows(4).position(|w| w == b"SIDS") {
