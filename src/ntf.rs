@@ -185,6 +185,85 @@ impl NtfCommand {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NTF transmissions (simplexmq Protocol.hs `encodeTransmission` / `batchTransmissions_`)
+// ---------------------------------------------------------------------------
+
+/// A raw NTF transmission: `authenticator | corrId | entityId | command`.
+///
+/// On NTF v>=2 (`implySessId = True`) the sessionId is **not** on the wire — it is implied by
+/// the TLS session — and blocks carry **batches**: `u8 count` followed by `count` transmissions,
+/// each wrapped in `Large` (u16 length + bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NtfTransmission {
+    /// Raw authenticator bytes (empty for unauthenticated commands such as PING).
+    pub authenticator: Vec<u8>,
+    pub corr_id: Vec<u8>,
+    pub entity_id: Vec<u8>,
+    /// Encoded command bytes (tail).
+    pub command: Vec<u8>,
+}
+
+impl NtfTransmission {
+    /// Encode a transmission body (without the batch/`Large` wrapper).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        // authenticator: Haskell ByteString encoding = 1-byte length + bytes
+        v.push(self.authenticator.len() as u8);
+        v.extend_from_slice(&self.authenticator);
+        // corrId: ByteString (1-byte length)
+        v.push(self.corr_id.len() as u8);
+        v.extend_from_slice(&self.corr_id);
+        // entityId: ByteString (1-byte length)
+        v.push(self.entity_id.len() as u8);
+        v.extend_from_slice(&self.entity_id);
+        // command: Tail (raw)
+        v.extend_from_slice(&self.command);
+        v
+    }
+
+    /// Wrap the transmission in `Large` (u16 length + bytes) — used inside batches.
+    pub fn encode_large(&self) -> Vec<u8> {
+        let body = self.encode();
+        let mut v = Vec::with_capacity(body.len() + 2);
+        v.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    /// Parse a transmission body (without the `Large` wrapper).
+    pub fn parse(body: &[u8]) -> Result<NtfTransmission, String> {
+        let mut r = Reader::new(body);
+        let authenticator = r.short().map_err(|e| e.to_string())?;
+        let corr_id = r.short().map_err(|e| e.to_string())?;
+        let entity_id = r.short().map_err(|e| e.to_string())?;
+        let command = r.rest().to_vec();
+        Ok(NtfTransmission { authenticator, corr_id, entity_id, command })
+    }
+}
+
+/// Wrap transmissions into an NTF batch payload: `u8 count` + `Large` per transmission.
+pub fn encode_ntf_batch(transmissions: &[NtfTransmission]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.push(transmissions.len() as u8);
+    for t in transmissions {
+        v.extend_from_slice(&t.encode_large());
+    }
+    v
+}
+
+/// Parse an NTF batch payload into its transmissions.
+pub fn parse_ntf_batch(payload: &[u8]) -> Result<Vec<NtfTransmission>, String> {
+    let mut r = Reader::new(payload);
+    let count = r.u8().map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let body = r.large().map_err(|e| e.to_string())?;
+        out.push(NtfTransmission::parse(&body)?);
+    }
+    Ok(out)
+}
+
 /// NTF response tags (`NtfResponseTag`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NtfResponseTag {
@@ -316,5 +395,46 @@ mod tests {
         assert_eq!(tag, NtfResponseTag::IdSub);
         assert_eq!(rest, b"0123456789abcdef");
         assert!(split_ntf_response(b"UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn transmission_layout_and_roundtrip() {
+        let t = NtfTransmission {
+            authenticator: Vec::new(),
+            corr_id: vec![0xAA; 24],
+            entity_id: Vec::new(),
+            command: b"PING".to_vec(),
+        };
+        let enc = t.encode();
+        // authenticator (u8 len 0) | corrId (u8 len 24 + 24B) | entityId (u8 len 0) | command tail
+        assert_eq!(enc[0], 0);
+        assert_eq!(enc[1], 24);
+        assert_eq!(&enc[2..26], &[0xAA; 24]);
+        assert_eq!(enc[26], 0);
+        assert_eq!(&enc[27..], b"PING");
+        assert_eq!(NtfTransmission::parse(&enc).unwrap(), t);
+    }
+
+    #[test]
+    fn batch_layout() {
+        let t = NtfTransmission {
+            authenticator: Vec::new(),
+            corr_id: vec![1u8; 24],
+            entity_id: Vec::new(),
+            command: b"PING".to_vec(),
+        };
+        let batch = encode_ntf_batch(std::slice::from_ref(&t));
+        assert_eq!(batch[0], 1); // count
+        let body_len = u16::from_be_bytes([batch[1], batch[2]]) as usize;
+        assert_eq!(body_len + 3, batch.len());
+        let parsed = parse_ntf_batch(&batch).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], t);
+    }
+
+    #[test]
+    fn batch_parse_rejects_truncated() {
+        assert!(parse_ntf_batch(&[1, 0, 10]).is_err());
+        assert!(parse_ntf_batch(&[0]).unwrap().is_empty());
     }
 }

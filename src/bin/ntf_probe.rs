@@ -103,7 +103,46 @@ fn main() {
             let payload = unpad_ntf_block(&block).expect("unpad reply");
             println!("reply payload ({}B): {}", payload.len(), hex::encode(&payload[..payload.len().min(64)]));
         }
-        Ok(_) => println!("server closed connection after client hello"),
-        Err(e) => println!("no reply yet: {e}"),
+        Ok(_) => {
+            println!("server closed connection after client hello");
+            return;
+        }
+        Err(e) => println!("no reply yet (expected on a healthy handshake): {e}"),
+    }
+
+    // NTF command round-trip: PING -> PONG
+    // NTF v>=2 implies the sessionId (no sessionId on the wire) and uses batch framing:
+    // block payload = u8 count + count * Large(transmission).
+    let corr_id: Vec<u8> = (0u8..24).collect();
+    let ping = NtfTransmission {
+        authenticator: Vec::new(),
+        corr_id: corr_id.clone(),
+        entity_id: Vec::new(),
+        command: NtfCommand::new(NtfCommandTag::Ping).encode(),
+    };
+    let batch = encode_ntf_batch(std::slice::from_ref(&ping));
+    write_ntf_block(&mut s, &batch).expect("send PING");
+    println!("PING sent (batch {}B, corrId {})", batch.len(), hex::encode(&corr_id));
+
+    match read_ntf_block(&mut s) {
+        Ok(block) => {
+            let payload = unpad_ntf_block(&block).expect("unpad PONG block");
+            println!("response block payload ({}B): {}", payload.len(), hex::encode(&payload[..payload.len().min(64)]));
+            let ts = parse_ntf_batch(&payload).expect("parse NTF batch");
+            for t in &ts {
+                let (tag, rest) = split_ntf_response(&t.command).unwrap_or((NtfResponseTag::Ok, &[]));
+                println!(
+                    "response: tag={} corrMatch={} entityId={}B rest={}",
+                    String::from_utf8_lossy(tag.tag_bytes()),
+                    t.corr_id == corr_id,
+                    t.entity_id.len(),
+                    hex::encode(rest)
+                );
+                if tag == NtfResponseTag::Pong {
+                    println!("LIVE NTF OK: PING -> PONG");
+                }
+            }
+        }
+        Err(e) => println!("no PONG: {e}"),
     }
 }
