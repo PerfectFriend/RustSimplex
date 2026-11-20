@@ -622,14 +622,27 @@ fn write_push_block(stream: &mut BoxStream, s_snd: Option<&mut [u8; 32]>, wires:
 /// that reads commands and drains the outbox of pushed transmissions.
 pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
     let ctrl = tcp.try_clone()?;
+    let mut tls_binding: Option<[u8; 32]> = None;
     let mut stream: BoxStream = match mode {
         Mode::Plain => Box::new(tcp),
-        Mode::Tls(cfg) => match rustls::ServerConnection::new(cfg.clone()) {
-            Ok(c) => Box::new(rustls::StreamOwned::new(c, tcp)),
-            Err(e) => return Err(io_err(e)),
-        },
+        Mode::Tls(cfg) => {
+            let mut so = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(cfg.clone()).map_err(io_err)?,
+                tcp,
+            );
+            // complete the TLS 1.3 handshake BEFORE the SMP server hello, so that
+            // sessionId can be bound to the TLS channel binding (Finished transcript)
+            so.conn.complete_io(&mut so.sock).map_err(io_err)?;
+            let mut b = [0u8; 32];
+            so.conn
+                .export_keying_material(&mut b, b"SimpleX-channel-binding", None)
+                .map_err(io_err)?;
+            tls_binding = Some(b);
+            Box::new(so)
+        }
     };
-    let session_id: Vec<u8> = Vec::new();
+    // in TLS mode sessionId = TLS channel binding; in plain mode it stays empty
+    let session_id: Vec<u8> = tls_binding.map(|b| b.to_vec()).unwrap_or_default();
     // --- phase 1: blocking handshake (drives the TLS handshake too) ---
     // per-engine stable ephemeral X25519 key (authPubKey in server hello)
     let eph = x25519_from_secret(st.lock().unwrap_or_else(|e| e.into_inner()).eph_secret);

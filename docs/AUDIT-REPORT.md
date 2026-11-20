@@ -435,3 +435,7 @@ cargo clippy --all-targets         # 0 ошибок
 - Fixed nested RFWD response path: per-hop decreasing pad budgets (request size − 256B/layer), multi-wire inner responses wrapped as block content, client unwraps nested PRES layers outermost-first with per-layer DH keys.
 - tests/onion.rs: 3/3 green — 1-hop PING, 2-hop SEND→MSG→ACK full round-trip through R1→R2→dest, wrong-hop-key negative.
 - Full suite green (26 targets ok), strict 3/3, clippy 0.
+
+## v0.93 — sessionId bound to TLS channel binding (server side)
+- TLS mode: server completes the TLS 1.3 handshake before sending server hello and sets sessionId = exporter("SimpleX-channel-binding") — a real Finished-transcript channel binding; plain mode keeps empty sessionId. Client already verifies sid == binding (verify_channel_binding) on the `_bound` path.
+- Suite 26/26 ok, clippy 0. Note: public-relay live probes use the NoVerify `_sni` path, so exporter-vs-Finished difference vs upstream does not affect them.
