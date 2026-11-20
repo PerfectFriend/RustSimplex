@@ -1,4 +1,4 @@
-//! Live NTF probe (feature v71-probes): NTF handshake against a public notifications server.
+//! Live NTF probe (feature v71-probes): NTF handshake + PING against a public notifications server.
 //!
 //! NTF is a separate protocol from SMP (learned from simplexmq Notifications/Transport.hs):
 //! - TLS 1.3, ALPN `ntf/1` (port 443); rustls fails the handshake, openssl works;
@@ -7,7 +7,14 @@
 //! - client hello: `u16 ntfVersion + keyHash` (keyHash = ByteString encoding: len byte + 32B);
 //! - keyHash = SHA-256 over the DER of the **CA certificate** in the served chain.
 //!
-//! NoVerify pin probe — diagnostics only, never for production traffic.
+//! Two paths:
+//! - positive: the **library** `NtfClient` performs the handshake and the `PING → PONG` round-trip
+//!   (this is what proves the public API works against the real server);
+//! - negative control (`NTF_BAD_HASH=1`): a hand-rolled client hello with a corrupted keyHash —
+//!   the server must close the connection.
+//!
+//! The CA fingerprint pin is mandatory in both paths: the probe refuses to send anything when the
+//! served CA does not match the expected fingerprint (exit code 3).
 use openssl::ssl::{Ssl, SslConnector, SslMethod, SslVerifyMode, SslVersion};
 use smp_rs::ntf::*;
 use std::io::{Read, Write};
@@ -33,7 +40,7 @@ fn b64url_dec(s: &str) -> Result<Vec<u8>, String> {
             }
             return Err(format!("bad b64 char {c}"));
         }
-        acc = (acc << 6) | v as u32;
+        acc = (acc << 6) | v as u64 as u32;
         nbits += 6;
         if nbits >= 8 {
             nbits -= 8;
@@ -84,6 +91,39 @@ fn write_ntf_block(s: &mut S, payload: &[u8]) -> std::io::Result<()> {
     s.flush()
 }
 
+/// Negative control: a hand-rolled client hello with a corrupted keyHash. The server must close
+/// the connection instead of accepting the session.
+fn negative_control(s: &mut S, kh: [u8; 32]) {
+    let sh_block = read_ntf_block(s).expect("server hello block");
+    let sh_payload = unpad_ntf_block(&sh_block).expect("unpad server hello");
+    let sh = parse_ntf_server_handshake(&sh_payload).expect("parse server hello");
+    println!(
+        "server hello: minVer={} maxVer={} sessionId={}B authPubKey={}",
+        sh.min_version,
+        sh.max_version,
+        sh.session_id.len(),
+        sh.auth_pub_key.as_ref().map(|k| format!("{}B", k.len())).unwrap_or_else(|| "none".into())
+    );
+    let ver = negotiate_ntf_version(&sh).expect("negotiate");
+    let mut bad = kh;
+    bad[0] ^= 0xFF;
+    println!("(negative control: sending a corrupted keyHash)");
+    let ch = encode_ntf_client_handshake(&NtfClientHandshake { ntf_version: ver, key_hash: bad });
+    write_ntf_block(s, &ch).expect("client hello");
+    match read_ntf_block(s) {
+        Ok(block) => {
+            let payload = unpad_ntf_block(&block).expect("unpad reply");
+            println!("server replied instead of closing: {}B payload", payload.len());
+            eprintln!("NEGATIVE CONTROL FAILED: the server accepted a corrupted keyHash");
+            std::process::exit(5);
+        }
+        Err(e) => {
+            println!("server closed the connection after the corrupted keyHash (expected): {e}");
+            println!("LIVE NTF OK (negative control): corrupted keyHash rejected");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let host = args.first().cloned().unwrap_or_else(|| "ntf2.simplex.im".into());
@@ -112,7 +152,8 @@ fn main() {
     };
     let mut s = tls_connect(&host, port);
 
-    let kh = key_hash_from_ca_der(&ca_cert_der(&s));
+    let ca_der = ca_cert_der(&s);
+    let kh = key_hash_from_ca_der(&ca_der);
     println!("keyHash(sha256 CA DER) = {}", hex::encode(kh));
     // PIN: the served CA fingerprint MUST equal the expected one — otherwise refuse to proceed.
     if kh != expected {
@@ -120,84 +161,38 @@ fn main() {
         std::process::exit(3);
     }
     println!("pin ok: CA fingerprint matches the expected value");
-    // negative control: NTF_BAD_HASH=1 sends a wrong fingerprint — the server must close the conn
-    let kh = if std::env::var("NTF_BAD_HASH").is_ok() {
-        let mut bad = kh;
-        bad[0] ^= 0xFF;
-        println!("(negative control: using corrupted keyHash)");
-        bad
-    } else {
-        kh
-    };
 
-    let sh_block = read_ntf_block(&mut s).expect("server hello block");
-    let sh_payload = unpad_ntf_block(&sh_block).expect("unpad server hello");
-    let sh = parse_ntf_server_handshake(&sh_payload).expect("parse server hello");
-    println!(
-        "server hello: minVer={} maxVer={} sessionId={}B authPubKey={}",
-        sh.min_version,
-        sh.max_version,
-        sh.session_id.len(),
-        sh.auth_pub_key.as_ref().map(|k| format!("{}B", k.len())).unwrap_or_else(|| "none".into())
-    );
-
-    let ver = negotiate_ntf_version(&sh).expect("negotiate");
-    let ch = encode_ntf_client_handshake(&NtfClientHandshake { ntf_version: ver, key_hash: kh });
-    write_ntf_block(&mut s, &ch).expect("client hello");
-    println!("client hello sent (v{ver}, {} bytes)", ch.len());
-
-    // The server may answer with a handshake error block; read one if present.
-    let mut peek = [0u8; 1];
-    match s.read(&mut peek) {
-        Ok(1) => {
-            println!("server replied after client hello (first byte 0x{:02x})", peek[0]);
-            let mut rest = vec![0u8; NTF_BLOCK_SIZE - 1];
-            s.read_exact(&mut rest).expect("rest of block");
-            let mut block = vec![peek[0]];
-            block.extend_from_slice(&rest);
-            let payload = unpad_ntf_block(&block).expect("unpad reply");
-            println!("reply payload ({}B): {}", payload.len(), hex::encode(&payload[..payload.len().min(64)]));
-        }
-        Ok(_) => {
-            println!("server closed connection after client hello");
-            return;
-        }
-        Err(e) => println!("no reply yet (expected on a healthy handshake): {e}"),
+    if std::env::var("NTF_BAD_HASH").is_ok() {
+        negative_control(&mut s, kh);
+        return;
     }
 
-    // NTF command round-trip: PING -> PONG
-    // NTF v>=2 implies the sessionId (no sessionId on the wire) and uses batch framing:
-    // block payload = u8 count + count * Large(transmission).
-    let corr_id: Vec<u8> = (0u8..24).collect();
-    let ping = NtfTransmission {
-        authenticator: Vec::new(),
-        corr_id: corr_id.clone(),
-        entity_id: Vec::new(),
-        command: NtfCommand::new(NtfCommandTag::Ping).encode(),
-    };
-    let batch = encode_ntf_batch(std::slice::from_ref(&ping));
-    write_ntf_block(&mut s, &batch).expect("send PING");
-    println!("PING sent (batch {}B, corrId {})", batch.len(), hex::encode(&corr_id));
-
-    match read_ntf_block(&mut s) {
-        Ok(block) => {
-            let payload = unpad_ntf_block(&block).expect("unpad PONG block");
-            println!("response block payload ({}B): {}", payload.len(), hex::encode(&payload[..payload.len().min(64)]));
-            let ts = parse_ntf_batch(&payload).expect("parse NTF batch");
-            for t in &ts {
-                let (tag, rest) = split_ntf_response(&t.command).unwrap_or((NtfResponseTag::Ok, &[]));
-                println!(
-                    "response: tag={} corrMatch={} entityId={}B rest={}",
-                    String::from_utf8_lossy(tag.tag_bytes()),
-                    t.corr_id == corr_id,
-                    t.entity_id.len(),
-                    hex::encode(rest)
-                );
-                if tag == NtfResponseTag::Pong {
-                    println!("LIVE NTF OK: PING -> PONG");
-                }
+    // Positive path: the **library** NtfClient performs the handshake and the PING -> PONG
+    // round-trip. This proves the public API works against the real server.
+    let mut client = NtfClient::connect(&mut s, &ca_der, kh).expect("NtfClient::connect");
+    println!(
+        "library client connected: NTF v{}, sessionId={}B",
+        client.version(),
+        client.session_id().len()
+    );
+    match client.ping() {
+        Ok(resp) => {
+            println!(
+                "response: tag={} corrMatch={} entityId={}B",
+                String::from_utf8_lossy(resp.tag.tag_bytes()),
+                resp.corr_id == (0u8..24).collect::<Vec<u8>>(),
+                resp.entity_id.len()
+            );
+            if resp.tag == NtfResponseTag::Pong {
+                println!("LIVE NTF OK: PING -> PONG (via library NtfClient)");
+            } else {
+                eprintln!("unexpected response tag");
+                std::process::exit(4);
             }
         }
-        Err(e) => println!("no PONG: {e}"),
+        Err(e) => {
+            eprintln!("no PONG: {e}");
+            std::process::exit(4);
+        }
     }
 }
