@@ -39,11 +39,19 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 | Цель | Результат |
 |---|---|
 | `smp11.simplex.im:5223` (SMP v17–v23) | полный цикл `PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG(decrypt), ACK→OK, DEL→OK` — все 7 версий |
-| `xftp1.simplex.im:443` (XFTP v4) | `PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (byte-exact decrypt), FDEL→OK` |
+| `xftp1.simplex.im:443` (XFTP v4) | `PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (byte-exact decrypt), FDEL→OK`; CA fingerprint **обязателен** (неверный пин → exit 3 до первого байта XFTP) |
 | `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | handshake принят, **`PING→PONG` через библиотечный `NtfClient`** (NTF v3, sessionId 32B, corrMatch=true); пин CA-fingerprint подтверждён отрицательным контролем (неверный пин → exit 3, ничего не отправляется) |
 | onion routing поверх SMP proxy | 2-hop round-trip + отрицательный тест (неверный hop-key) |
 
-Скрипты: `scripts/live_public_smp.sh`, `scripts/live_interop.sh`, `scripts/check.sh`.
+Скрипты: `scripts/live_public_smp.sh`, `scripts/live_interop.sh` (SMP + XFTP + NTF, все с пином),
+`scripts/check.sh`.
+
+## Релиз
+
+Тег `vX.Y.Z` запускает `.github/workflows/release.yml`: сверка версии с `Cargo.toml` → тесты +
+clippy (оба feature-конфига) + `cargo package` → changelog из `git log` в `docs/CHANGELOG.md` →
+публикация на crates.io + GitHub release. Пре-релизные теги (`-rc.N`) только проверяются.
+Требуется секрет `CARGO_REGISTRY_TOKEN`.
 
 ## Границы и отклонения
 

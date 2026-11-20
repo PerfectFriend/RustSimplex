@@ -1,0 +1,115 @@
+name: release
+
+# Release pipeline for smp-rs.
+# Trigger: push a tag `vX.Y.Z` (semver). The job verifies the crate, generates the changelog
+# from the commits since the previous tag, and publishes to crates.io.
+#
+# Required secret: CARGO_REGISTRY_TOKEN (crates.io API token, publish scope).
+# The publish step runs only when the tag is a real release tag (vX.Y.Z without a pre-release
+# suffix). Pre-release tags (vX.Y.Z-rc.N) build and verify but do NOT publish.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.99.1)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG"
+
+      - name: Verify the tag matches Cargo.toml
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          EXPECTED="${TAG#v}"
+          if [ "$VERSION" != "$EXPECTED" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+          echo "Cargo.toml version $VERSION matches tag $TAG"
+
+      - name: Tests
+        run: cargo test --offline -- --test-threads=1
+
+      - name: Clippy (default + v71-probes)
+        run: |
+          cargo clippy --offline --all-targets -- -D warnings
+          cargo clippy --offline --features v71-probes --all-targets -- -D warnings
+
+      - name: Package verification
+        run: cargo package --allow-dirty
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          PREV=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1 || true)
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+          {
+            echo "## $TAG"
+            echo
+            git log --pretty="- %s (%h)" "$RANGE" -- . ':(exclude)docs/CHANGELOG.md'
+          } > CHANGELOG_FRAGMENT.md
+          cat CHANGELOG_FRAGMENT.md
+
+      - name: Append to CHANGELOG.md
+        run: |
+          if [ -f docs/CHANGELOG.md ]; then
+            printf '\n' >> docs/CHANGELOG.md
+          else
+            printf '# Changelog\n' > docs/CHANGELOG.md
+          fi
+          cat CHANGELOG_FRAGMENT.md >> docs/CHANGELOG.md
+          rm -f CHANGELOG_FRAGMENT.md
+
+      - name: Commit changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/CHANGELOG.md
+          git diff --staged --quiet || git commit -m "docs: changelog for ${{ steps.tag.outputs.tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Publish to crates.io
+        if: ${{ !contains(steps.tag.outputs.tag, '-') }}
+        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub release
+        if: ${{ !contains(steps.tag.outputs.tag, '-') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.tag.outputs.tag }}
+          body_path: docs/CHANGELOG.md
+          draft: false
