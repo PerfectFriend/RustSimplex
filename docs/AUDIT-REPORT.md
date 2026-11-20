@@ -445,3 +445,6 @@ cargo clippy --all-targets         # 0 ошибок
 - transport: `connect_tls_sni_alpn` (explicit ALPN; 443 web/NTF vhost needs NO ALPN), `tls_client_config_noverify`/`connect_tls_sni_alpn_noverify` (probe-only NoVerify).
 - Findings: ntf1.simplex.im NXDOMAIN; ntf2.simplex.im reachable only on 443 (5223 IPv6 unreachable from here); 443 no-SNI+ALPN smp/1 -> NoApplicationProtocol; SNI+no-ALPN works at TLS level in python but rustls gets HandshakeFailure — next step: align rustls groups/schemes with openssl probe.
 - Suite 26/26 ok, clippy 0 (default + v71-probes).
+
+## v0.94 update — NTF live blocker documented
+- rustls (aws-lc-rs, default provider AND X25519+CHACHA20-only) gets TLS alert HandshakeFailure from ntf2.simplex.im:443 (SNI, no ALPN), while openssl/python negotiate TLS1.3/CHACHA20/X25519 fine. Next step: diff ClientHello (openssl -msg) vs rustls, or use openssl-based probe like smp_v71.
