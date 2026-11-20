@@ -439,3 +439,9 @@ cargo clippy --all-targets         # 0 ошибок
 ## v0.93 — sessionId bound to TLS channel binding (server side)
 - TLS mode: server completes the TLS 1.3 handshake before sending server hello and sets sessionId = exporter("SimpleX-channel-binding") — a real Finished-transcript channel binding; plain mode keeps empty sessionId. Client already verifies sid == binding (verify_channel_binding) on the `_bound` path.
 - Suite 26/26 ok, clippy 0. Note: public-relay live probes use the NoVerify `_sni` path, so exporter-vs-Finished difference vs upstream does not affect them.
+
+## v0.94 — NTF live probe harness (in progress)
+- `src/bin/ntf_probe.rs` (feature v71-probes): PING -> NKEY -> NID -> NSUB against public NTF server.
+- transport: `connect_tls_sni_alpn` (explicit ALPN; 443 web/NTF vhost needs NO ALPN), `tls_client_config_noverify`/`connect_tls_sni_alpn_noverify` (probe-only NoVerify).
+- Findings: ntf1.simplex.im NXDOMAIN; ntf2.simplex.im reachable only on 443 (5223 IPv6 unreachable from here); 443 no-SNI+ALPN smp/1 -> NoApplicationProtocol; SNI+no-ALPN works at TLS level in python but rustls gets HandshakeFailure — next step: align rustls groups/schemes with openssl probe.
+- Suite 26/26 ok, clippy 0 (default + v71-probes).

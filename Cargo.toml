@@ -31,6 +31,11 @@ name = "smp-v71"
 path = "src/bin/smp_v71.rs"
 required-features = ["v71-probes"]
 
+[[bin]]
+name = "ntf-probe"
+path = "src/bin/ntf_probe.rs"
+required-features = ["v71-probes"]
+
 [features]
 default = []
 v71-probes = ["dep:openssl", "dep:tokio-openssl"]

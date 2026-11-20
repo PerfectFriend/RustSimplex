@@ -317,6 +317,78 @@ pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sn
     Ok(connect_tls_sni_bound(addr, host, key_hash, with_sni)?.0)
 }
 
+/// Probe-only TLS config: NoVerify. NEVER use outside `v71-probes` diagnostic binaries.
+pub fn tls_client_config_noverify() -> Arc<ClientConfig> {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("tls13")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
+    Arc::new(cfg)
+}
+
+#[derive(Debug)]
+struct NoVerify;
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(&self, _e: &CertificateDer<'_>, _i: &[CertificateDer<'_>], _n: &ServerName<'_>, _o: &[u8], _now: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(&self, _m: &[u8], _c: &CertificateDer<'_>, _d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(&self, _m: &[u8], _c: &CertificateDer<'_>, _d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![rustls::SignatureScheme::RSA_PKCS1_SHA256, rustls::SignatureScheme::ECDSA_NISTP256_SHA256, rustls::SignatureScheme::ED25519, rustls::SignatureScheme::RSA_PSS_SHA256]
+    }
+}
+
+/// TLS connect with explicit ALPN (None = offer no ALPN; needed for the 443 web/NTF vhost).
+pub fn connect_tls_sni_alpn(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool, alpn: Option<&[u8]>) -> std::io::Result<BoxStream> {
+    let tcp = TcpStream::connect(addr)?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let name = if with_sni {
+        ServerName::try_from(host.to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    } else {
+        ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    };
+    let mut cfg = (*tls_client_config(key_hash)).clone();
+    if !with_sni {
+        cfg.enable_sni = false;
+    }
+    cfg.alpn_protocols = alpn.map(|a| vec![a.to_vec()]).unwrap_or_default();
+    let conn = ClientConnection::new(Arc::new(cfg), name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut stream = StreamOwned::new(conn, tcp);
+    stream.conn.complete_io(&mut stream.sock).map_err(std::io::Error::other)?;
+    Ok(Box::new(stream))
+}
+
+/// Probe-only variant of connect_tls_sni_alpn with NoVerify cert verifier (v71-probes bins).
+pub fn connect_tls_sni_alpn_noverify(addr: SocketAddr, host: &str, with_sni: bool, alpn: Option<&[u8]>) -> std::io::Result<BoxStream> {
+    let tcp = TcpStream::connect(addr)?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let name = if with_sni {
+        ServerName::try_from(host.to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    } else {
+        ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    };
+    let mut cfg = (*tls_client_config_noverify()).clone();
+    if !with_sni {
+        cfg.enable_sni = false;
+    }
+    cfg.alpn_protocols = alpn.map(|a| vec![a.to_vec()]).unwrap_or_default();
+    let conn = ClientConnection::new(Arc::new(cfg), name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut stream = StreamOwned::new(conn, tcp);
+    stream.conn.complete_io(&mut stream.sock).map_err(std::io::Error::other)?;
+    Ok(Box::new(stream))
+}
+
 /// TLS connect that also completes the handshake and returns a TLS channel binding
 /// (exporter label) for SEC-04 `verify_channel_binding`.
 pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<(BoxStream, [u8; 32])> {
