@@ -17,11 +17,11 @@
 use std::net::SocketAddr;
 
 use crate::client::Client;
-use crate::crypto::{cb_nonce, pad, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, unpad, x25519_dh, x25519_keypair, x25519_public};
-use crate::identity::Ed25519Keypair;
+use crate::crypto::{cb_nonce, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, x25519_dh, x25519_keypair, x25519_public, Ed25519Keypair};
+use crate::encoding::{pad, unpad};
 use crate::protocol::{
     auth_sign, decode_block, decode_block_raw, decode_transmission, encode_block, encode_block_raw,
-    encode_command, encode_transmission, parse_broker, parse_command, BrokerMsg, Command, Transmission, SMP_VERSION,
+    encode_command, encode_transmission, parse_broker, BrokerMsg, Command, Transmission, SMP_VERSION,
 };
 use crate::proxy::{reverse_nonce, PROXIED_T_LEN};
 
@@ -70,22 +70,22 @@ pub fn onion_request(
     // build layers inside-out; remember the innermost (eph, corr) to decrypt the response
     let mut next_addr = dest;
     let mut next_pub = dest_pub;
-    let mut first_eph = None;
-    let mut first_corr = None;
+    let mut outer_eph = None;
+    let mut outer_corr = None;
+    let mut outer_pub = None;
     for i in (0..hops.len()).rev() {
         let eph = x25519_keypair();
         let key = x25519_dh(&eph.secret, &x25519_public(next_pub));
         let corr = random_bytes(24);
         let content = encode_block_raw(&wires).map_err(|e| e.to_string())?;
-        let padded = pad(&content, PROXIED_T_LEN).map_err(|e| e.to_string())?;
+        // each nesting level adds ~150B of wire overhead, so inner layers get a
+        // smaller pad budget to keep the outer block within BLOCK_SIZE
+        let budget = PROXIED_T_LEN.saturating_sub(256 * (i + 1));
+        let padded = pad(&content, budget).map_err(|e| e.to_string())?;
         let enc = secretbox_encrypt(&key, &cb_nonce(&corr), &padded);
-        if i == hops.len() - 1 {
-            first_eph = Some(eph);
-            first_corr = Some(corr.clone());
-        }
         let pfwd_wire = encode_transmission(&Transmission {
             authenticator: Vec::new(),
-            corr_id: corr,
+            corr_id: corr.clone(),
             entity_id: Vec::new(),
             command: encode_command(&Command::Pfwd {
                 version: SMP_VERSION,
@@ -95,6 +95,11 @@ pub fn onion_request(
             .map_err(|e| e.to_string())?,
         })
         .map_err(|e| e.to_string())?;
+        if i == 0 {
+            outer_eph = Some(eph);
+            outer_corr = Some(corr);
+            outer_pub = Some(next_pub);
+        }
         let proxy_wire = encode_transmission(&Transmission {
             authenticator: Vec::new(),
             corr_id: random_bytes(24),
@@ -116,32 +121,40 @@ pub fn onion_request(
     // last_proxy before Pfwd runs, so the empty entity_id resolves correctly
     let blk = encode_block(&wires).map_err(|e| e.to_string())?;
     entry.write_raw_block(&blk)?;
-    let resp_block = entry.read_raw_block()?;
-    let resp_wires = decode_block(&resp_block).map_err(|e| e.to_string())?;
-
-    // responses come back PRES-wrapped; the outermost PRES is encrypted with the
-    // innermost (destination) client-layer key
-    let eph = first_eph.ok_or("no innermost layer")?;
-    let corr = first_corr.ok_or("no innermost corr")?;
-    let key = x25519_dh(&eph.secret, &x25519_public(dest_pub));
+    // responses may span several blocks (PKEY + large PRES); read until a PRES arrives
+    // the PRES the client receives is encrypted by the first relay that peeled the
+    // outermost client layer (hops[1], or dest for a single hop) — key vs that hop's pub
+    let eph = outer_eph.ok_or("no outer layer")?;
+    let corr = outer_corr.ok_or("no outer corr")?;
+    let key = x25519_dh(&eph.secret, &x25519_public(outer_pub.ok_or("no outer pub")?));
     let nonce = cb_nonce(&corr);
     let mut msgs = Vec::new();
-    for w in &resp_wires {
-        let t = decode_transmission(w).map_err(|e| e.to_string())?;
-        if let Command::Pres { enc } = parse_command(&t.command).map_err(|e| e.to_string())? {
-            let rn = reverse_nonce(&nonce);
-            let plain = secretbox_decrypt(&key, &rn, &enc).ok_or("PRES decrypt failed")?;
-            let inner = unpad(&plain).map_err(|e| e.to_string())?;
-            match decode_transmission(&inner) {
-                Ok(_) => msgs.push(parse_broker(&inner).ok_or("bad broker msg in PRES")?),
-                Err(_) => {
-                    for iw in decode_block_raw(&inner).map_err(|e| e.to_string())? {
-                        msgs.push(parse_broker(&iw).ok_or("bad broker msg in PRES")?);
-                    }
+    let mut got_pres = false;
+    for _ in 0..8 {
+        if got_pres {
+            break;
+        }
+        let resp_block = entry.read_raw_block()?;
+        let resp_wires = decode_block(&resp_block).map_err(|e| e.to_string())?;
+        for w in &resp_wires {
+            let t = decode_transmission(w).map_err(|e| e.to_string())?;
+            let bm = parse_broker(&t.command).map_err(|e| e.to_string())?;
+            if let BrokerMsg::Pres { enc } = bm {
+                got_pres = true;
+                let rn = reverse_nonce(&nonce);
+                let plain = secretbox_decrypt(&key, &rn, &enc).ok_or("PRES decrypt failed")?;
+                let inner = unpad(&plain).map_err(|e| e.to_string())?;
+                let inner_wires = match decode_transmission(&inner) {
+                    Ok(_) => vec![inner.clone()],
+                    Err(_) => decode_block_raw(&inner).map_err(|e| e.to_string())?,
+                };
+                for iw in inner_wires {
+                    let it = decode_transmission(&iw).map_err(|e| e.to_string())?;
+                    msgs.push(parse_broker(&it.command).map_err(|e| e.to_string())?);
                 }
+            } else {
+                msgs.push(bm);
             }
-        } else {
-            msgs.push(parse_broker(w).ok_or("bad broker msg")?);
         }
     }
     Ok(msgs)

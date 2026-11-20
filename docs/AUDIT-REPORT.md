@@ -422,3 +422,11 @@ cargo clippy --all-targets         # 0 ошибок
   Fixed zone split (A: wire/crypto core, B: agent/ratchet/chat, C: transport/TLS/server/FFI/xftp),
   mandatory JSON output contract with file:line+fragment+repro per finding, out-of-scope list,
   ground rules (no secrets, no re-reporting CLOSED items, broken/dead/unbuilt labels).
+
+## v0.91 — onion routing (multi-hop over SMP proxy chains), partial
+- `src/onion.rs`: client-side layered onion — client→R1→…→Rn→dest; inner blocks `[Proxy{next}, Pfwd{entity=∅}]`; per-hop secretbox(DH(eph, next_hop_pub)); pad budget shrinks 256B/layer.
+- `src/server.rs`: `ConnCtx.last_proxy` (empty-entity Pfwd binds to the just-opened proxy session); stable per-engine server eph (`ServerState.eph_secret/eph_pub`) so onion hops are addressable by pub across connections; chunked response writes (PKEY+PRES overflow no longer kills conn); SMP_DEBUG conn-error log.
+- `src/proxy.rs`: RFWD inner payload parses as block-of-wires (validated) or legacy single wire; response pad falls back to minimal size for nested PRES.
+- `src/client.rs`: `session_id()`, `write_raw_block()`, `read_raw_block()`.
+- tests/onion.rs: 1-hop onion round-trip GREEN, wrong-hop-key negative GREEN; 2-hop test present but `#[ignore]` — nested relay_pfwd response path still overflows/hangs, next iteration.
+- Full suite green (all other targets), clippy 0 warnings/errors.

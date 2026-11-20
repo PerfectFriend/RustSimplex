@@ -111,6 +111,13 @@ pub fn x25519_public(raw: [u8; 32]) -> XPublic {
     XPublic::from(raw)
 }
 
+/// Rebuild a keypair from its secret bytes (stable per-engine server eph).
+pub fn x25519_from_secret(secret: [u8; 32]) -> X25519Keypair {
+    let secret = StaticSecret::from(secret);
+    let public = XPublic::from(&secret);
+    X25519Keypair { secret, public }
+}
+
 // ---------- NaCl crypto_box == HSalsa20(shared, 0^16) then XSalsa20-Poly1305 ----------
 /// Derive the symmetric key exactly like NaCl crypto_box_beforenm: HSalsa20(shared, 0^16).
 fn box_key(shared: &[u8; 32]) -> [u8; 32] {

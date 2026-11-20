@@ -43,6 +43,10 @@ pub struct ServerState {
     pub proxies: crate::proxy::ProxyMap,   // proxy_session_id -> dest conn
     pub xftp: crate::xftp::XftpStore,      // packet_id -> XftpPacket
     pub persist: Option<std::path::PathBuf>,
+    /// stable per-engine server ephemeral key (authPubKey in every server hello),
+    /// so onion hops can be addressed by this pub across connections
+    pub eph_secret: [u8; 32],
+    pub eph_pub: [u8; 32],
 }
 
 /// Per-connection proxy context (session key from hello exchange).
@@ -56,7 +60,8 @@ pub struct ConnCtx {
 
 impl ServerState {
     pub fn new() -> Self {
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None }
+        let kp = x25519_keypair();
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes() }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -626,8 +631,8 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
     };
     let session_id: Vec<u8> = Vec::new();
     // --- phase 1: blocking handshake (drives the TLS handshake too) ---
-    // per-connection ephemeral X25519 key for proxy sessions (authPubKey in server hello)
-    let eph = x25519_keypair();
+    // per-engine stable ephemeral X25519 key (authPubKey in server hello)
+    let eph = x25519_from_secret(st.lock().unwrap_or_else(|e| e.into_inner()).eph_secret);
     let eph_pub = eph.public.to_bytes();
     let hello = server_hello_block_key(SMP_VERSION, SMP_VERSION, &session_id, Some(&eph_pub)).map_err(io_err)?;
     write_block(&mut stream, &hello)?;
@@ -733,14 +738,30 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
                         }
                     }
                     if !responses.is_empty() {
-                        let wr = if let Some(k) = s_snd.as_mut() {
-                            let raw = encode_block_raw(&responses).map_err(io_err)?;
-                            write_block_encrypted(&mut stream, k, &raw)
-                        } else {
-                            let out = encode_block(&responses).map_err(io_err)?;
-                            write_block(&mut stream, &out)
-                        };
-                        if wr.is_err() { break; }
+                        // chunk responses into as many blocks as needed (a PKEY + a large
+                        // PRES can overflow one block — used to kill the connection)
+                        let mut start = 0usize;
+                        while start < responses.len() {
+                            let mut end = start;
+                            let mut len = 1usize;
+                            while end < responses.len() {
+                                let wl = 2 + responses[end].len();
+                                if len + wl > BLOCK_SIZE - 2 && end > start {
+                                    break;
+                                }
+                                len += wl;
+                                end += 1;
+                            }
+                            let out = encode_block(&responses[start..end]).map_err(io_err)?;
+                            let wr = if let Some(k) = s_snd.as_mut() {
+                                let raw = encode_block_raw(&responses[start..end]).map_err(io_err)?;
+                                write_block_encrypted(&mut stream, k, &raw)
+                            } else {
+                                write_block(&mut stream, &out)
+                            };
+                            if wr.is_err() { break; }
+                            start = end;
+                        }
                     }
                     // v0.23: flush pushes that arrived while we were dispatching — otherwise a
                     // peer blocked in recv_block can starve (flaky "failed to fill whole buffer").
@@ -869,7 +890,11 @@ impl Engine {
             let st = self.state.clone();
             let mode = self.mode.clone();
             thread::spawn(move || {
-                let _ = handle_conn(tcp, &mode, st);
+                if let Err(e) = handle_conn(tcp, &mode, st) {
+                    if std::env::var_os("SMP_DEBUG").is_some() {
+                        eprintln!("[engine] conn error: {e}");
+                    }
+                }
             });
         }
         Ok(())

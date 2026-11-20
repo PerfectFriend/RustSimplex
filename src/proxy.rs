@@ -119,11 +119,22 @@ pub fn handle_rfwd(
     fc.copy_from_slice(&fwd_corr);
     let padded = secretbox_decrypt(&client_sess, &fc, &client_enc).ok_or("RFWD client-layer decrypt failed")?;
     let content = unpad(&padded).map_err(|e| e.to_string())?;
-    // onion nesting: inner payload may be a block of several wires ([Proxy{next}, Pfwd{…}]);
-    // single-transmission payload (legacy single-hop) still parses first.
-    let wires: Vec<Vec<u8>> = match decode_transmission(&content) {
-        Ok(_) => vec![content.clone()],
-        Err(_) => decode_block_raw(&content).map_err(|e| e.to_string())?,
+    // onion nesting: inner payload may be a block of several wires ([Proxy{next}, Pfwd{…}]).
+    // Try block first (and require full consumption + valid transmissions), then legacy single wire.
+    let wires: Vec<Vec<u8>> = {
+        let block_ok = decode_block_raw(&content)
+            .ok()
+            .filter(|ws| {
+                ws.iter().all(|w| decode_transmission(w).is_ok())
+                    && ws.iter().map(|w| 2 + w.len()).sum::<usize>() + 1 == content.len()
+            });
+        match block_ok {
+            Some(ws) => ws,
+            None => match decode_transmission(&content) {
+                Ok(_) => vec![content.clone()],
+                Err(e) => return Err(e.to_string()),
+            },
+        }
     };
     let mut inner = Vec::new();
     for w in &wires {
@@ -133,7 +144,12 @@ pub fn handle_rfwd(
             inner.extend_from_slice(&encode_transmission(resp).map_err(|e| e.to_string())?);
         }
     }
-    let padded_resp = pad(&inner, PROXIED_T_LEN).map_err(|e| e.to_string())?;
+    let padded_resp = match pad(&inner, PROXIED_T_LEN) {
+        Ok(p) => p,
+        // onion nesting: inner response may exceed PROXIED_T_LEN (carries an inner
+        // PRES) — fall back to minimal padding; unpad reads the embedded length
+        Err(_) => pad(&inner, inner.len() + 2).map_err(|e| e.to_string())?,
+    };
     let rn = reverse_nonce(&fc);
     let client_enc_resp = secretbox_encrypt(&client_sess, &rn, &padded_resp);
     // RRES payload = short(fwd_corr) <> client_enc_resp ; outer nonce = reverse(cbNonce(rfwd corr))
