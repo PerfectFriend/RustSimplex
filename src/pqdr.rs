@@ -115,8 +115,8 @@ pub struct MsgHeader {
 pub fn encode_msg_header(h: &MsgHeader) -> Vec<u8> {
     let mut o = Vec::new();
     w_u16(&mut o, h.max_version);
-    w_short(&mut o, &h.dh_pub_spki).unwrap();
-    crate::pq::encode_kem_params(&mut o, &h.kem).unwrap();
+    let _ = w_short(&mut o, &h.dh_pub_spki); // Vec write is infallible
+    let _ = crate::pq::encode_kem_params(&mut o, &h.kem);
     w_u32(&mut o, h.pn);
     w_u32(&mut o, h.ns);
     o

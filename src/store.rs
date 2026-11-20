@@ -39,7 +39,8 @@ fn env_key() -> Result<Option<[u8; 32]>, String> {
 fn seal(plain: Vec<u8>) -> Result<Vec<u8>, String> {
     match env_key()? {
         Some(k) => {
-            let nonce: [u8; 24] = random_bytes(24).try_into().unwrap();
+            let nb = random_bytes(24);
+            let nonce: [u8; 24] = nb.as_slice().try_into().unwrap_or([0u8; 24]);
             let mut out = Vec::with_capacity(4 + 24 + plain.len() + 16);
             out.extend_from_slice(ENC_MAGIC);
             out.extend_from_slice(&nonce);

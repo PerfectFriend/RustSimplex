@@ -184,16 +184,16 @@ pub type BoxStream = Box<dyn RW>;
 
 // ---------- TLS ----------
 
-pub fn tls_server_config(id: &RouterIdentity) -> Arc<ServerConfig> {
+pub fn tls_server_config(id: &RouterIdentity) -> std::io::Result<Arc<ServerConfig>> {
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut cfg = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("tls13")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .with_no_client_auth()
         .with_single_cert(id.cert_chain(), PrivateKeyDer::Pkcs8(id.private_key()))
-        .expect("cert");
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
-    Arc::new(cfg)
+    Ok(Arc::new(cfg))
 }
 
 /// Client-side certificate verifier: pins the router by keyHash (SHA-256 of offline SPKI)
@@ -275,7 +275,7 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
-pub fn tls_client_config(key_hash: [u8; 32]) -> Arc<ClientConfig> {
+pub fn tls_client_config(key_hash: [u8; 32]) -> std::io::Result<Arc<ClientConfig>> {
     // v0.26: match simplexmq defaultSupportedParams — CHACHA20-POLY1305 for TLS1.3,
     // groups X448+X25519 (no-SNI public relay otherwise answers HandshakeFailure)
     // v0.26: default aws-lc-rs suites work with the public relay (verified via openssl/python:
@@ -283,12 +283,12 @@ pub fn tls_client_config(key_hash: [u8; 32]) -> Arc<ClientConfig> {
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("tls13")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinVerifier { key_hash }))
         .with_no_client_auth();
     cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
-    Arc::new(cfg)
+    Ok(Arc::new(cfg))
 }
 
 /// Accept a TLS connection (server side). Underlying socket set non-blocking for the pump.
@@ -318,16 +318,16 @@ pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sn
 }
 
 /// Probe-only TLS config: NoVerify. NEVER use outside `v71-probes` diagnostic binaries.
-pub fn tls_client_config_noverify() -> Arc<ClientConfig> {
+pub fn tls_client_config_noverify() -> std::io::Result<Arc<ClientConfig>> {
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("tls13")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
     cfg.alpn_protocols = vec![ALPN_SMP.to_vec()];
-    Arc::new(cfg)
+    Ok(Arc::new(cfg))
 }
 
 #[derive(Debug)]
@@ -357,7 +357,7 @@ pub fn connect_tls_sni_alpn(addr: SocketAddr, host: &str, key_hash: [u8; 32], wi
     } else {
         ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
     };
-    let mut cfg = (*tls_client_config(key_hash)).clone();
+    let mut cfg = tls_client_config(key_hash)?.as_ref().clone();
     if !with_sni {
         cfg.enable_sni = false;
     }
@@ -378,7 +378,7 @@ pub fn connect_tls_sni_alpn_noverify(addr: SocketAddr, host: &str, with_sni: boo
     } else {
         ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
     };
-    let mut cfg = (*tls_client_config_noverify()).clone();
+    let mut cfg = tls_client_config_noverify()?.as_ref().clone();
     if !with_sni {
         cfg.enable_sni = false;
     }
@@ -403,7 +403,7 @@ pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], w
         ServerName::try_from("localhost".to_string())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
     };
-    let mut cfg = (*tls_client_config(key_hash)).clone();
+    let mut cfg = tls_client_config(key_hash)?.as_ref().clone();
     if !with_sni {
         cfg.enable_sni = false;
     }
@@ -496,7 +496,7 @@ pub fn connect_tls_sni_proxy(host: &str, port: u16, key_hash: [u8; 32], with_sni
     } else {
         ServerName::try_from("localhost".to_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
     };
-    let mut cfg = (*tls_client_config(key_hash)).clone();
+    let mut cfg = tls_client_config(key_hash)?.as_ref().clone();
     if !with_sni { cfg.enable_sni = false; }
     let conn = ClientConnection::new(Arc::new(cfg), name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut stream = StreamOwned::new(conn, tcp);

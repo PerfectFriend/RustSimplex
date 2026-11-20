@@ -448,3 +448,10 @@ cargo clippy --all-targets         # 0 ошибок
 
 ## v0.94 update — NTF live blocker documented
 - rustls (aws-lc-rs, default provider AND X25519+CHACHA20-only) gets TLS alert HandshakeFailure from ntf2.simplex.im:443 (SNI, no ALPN), while openssl/python negotiate TLS1.3/CHACHA20/X25519 fine. Next step: diff ClientHello (openssl -msg) vs rustls, or use openssl-based probe like smp_v71.
+
+## v0.95 — panic-free lib (unwrap/expect cleanup, plan item #4)
+- sb_chain: `sbc_init`/`sbc_hkdf`/`encrypt_block`/`pad_block`/`strict_keys` now return Result (was expect/assert — a panic would lose the chain). ChainStep type alias added (clippy complex-type).
+- transport: `tls_server_config`/`tls_client_config`/`tls_client_config_noverify` return io::Result instead of expect.
+- ffi: mutex locks poison-tolerant (`unwrap_or_else(into_inner)`).
+- pqdr/store: remaining infallible unwraps removed.
+- Result: 0 unwrap/expect outside `#[cfg(test)]` in src/ (bins-probes keep theirs deliberately); suite 26/26 ok, strict 3/3, clippy 0/0 in default + v71-probes.

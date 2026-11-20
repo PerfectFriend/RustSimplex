@@ -103,7 +103,7 @@ impl Client {
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
     pub fn enable_strict(&mut self, dh_secret: &[u8; 32]) {
-        let (snd, rcv) = strict_keys(&self.session_id, dh_secret, true);
+        let Ok((snd, rcv)) = strict_keys(&self.session_id, dh_secret, true) else { return; };
         self.strict_snd = Some(snd);
         self.strict_rcv = Some(rcv);
     }
@@ -299,7 +299,7 @@ mod tests {
         };
         let secret = [7u8; 32];
         c.enable_strict(&secret);
-        let (a, b) = crate::sb_chain::sbc_init(b"sid", &secret);
+        let (a, b) = crate::sb_chain::sbc_init(b"sid", &secret).unwrap(); // test-only
         assert_eq!(c.strict_snd.unwrap(), b);
         assert_eq!(c.strict_rcv.unwrap(), a);
     }

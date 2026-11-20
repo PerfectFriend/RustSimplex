@@ -666,7 +666,7 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
     // strict v23 transport encryption (encryptBlock) — enabled only when client sent authPubKey
     let (mut s_snd, mut s_rcv) = if std::env::var("SMP_STRICT").as_deref() == Ok("1") {
         match ctx.sess_secret {
-            Some(sec) => { let (a, b) = strict_keys(&session_id, &sec, false); (Some(a), Some(b)) }
+            Some(sec) => match strict_keys(&session_id, &sec, false) { Ok((a, b)) => (Some(a), Some(b)), Err(_) => (None, None) }
             None => (None, None),
         }
     } else { (None, None) };
@@ -858,7 +858,7 @@ impl Engine {
     pub fn bind_tls_store(addr: &str, host: &str, store: Option<std::path::PathBuf>) -> Result<Engine, String> {
         let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
         let id = RouterIdentity::generate(host)?;
-        let cfg = tls_server_config(&id);
+        let cfg = tls_server_config(&id).map_err(|e| e.to_string())?;
         Ok(Engine {
             listener,
             state: match store {
