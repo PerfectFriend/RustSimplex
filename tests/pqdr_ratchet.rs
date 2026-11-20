@@ -223,3 +223,37 @@ fn v0_24_skipped_key_removed_after_use() {
     // replaying w0 must now fail (key was removed)
     assert!(b.decrypt(&w0).is_err());
 }
+
+#[test]
+fn rotate_then_encrypt_decrypts() {
+    let (mut a, mut b) = pair(&[7u8; 32], b"rot");
+    let w0 = a.encrypt(b"before");
+    assert_eq!(b.decrypt(&w0).unwrap(), b"before");
+    // bob answers so alice learns bob's ratcheted DH key
+    let wr = b.encrypt(b"hi");
+    assert_eq!(a.decrypt(&wr).unwrap(), b"hi");
+    // proactive rotation on sender: next message carries fresh DH+KEM
+    a.rotate().unwrap();
+    let w1 = a.encrypt(b"after-rotate");
+    let r = b.decrypt(&w1);
+    assert!(r.is_ok(), "decrypt after rotate failed: {:?}", r.err());
+    assert_eq!(r.unwrap(), b"after-rotate");
+    // conversation continues both ways
+    let w2 = b.encrypt(b"reply");
+    assert_eq!(a.decrypt(&w2).unwrap(), b"reply");
+    let w3 = a.encrypt(b"again");
+    assert_eq!(b.decrypt(&w3).unwrap(), b"again");
+}
+
+#[test]
+fn skip_limit_rejects_huge_gap() {
+    let (mut a, mut b) = pair(&[9u8; 32], b"skip");
+    let w0 = a.encrypt(b"m0");
+    assert_eq!(b.decrypt(&w0).unwrap(), b"m0");
+    let msg = decode_ratchet_msg(&a.encrypt(b"y")).unwrap();
+    let mut bad = msg.clone();
+    bad.header.ns = MAX_SKIP + 10;
+    let wire = encode_ratchet_msg(&bad);
+    let err = b.decrypt(&wire).unwrap_err();
+    assert!(err.contains("too many skipped") || err.contains("AUTH"), "got: {err}");
+}

@@ -460,3 +460,8 @@ cargo clippy --all-targets         # 0 ошибок
 - New `src/reconnect.rs`: `ReconnectingClient` wraps `Client` with `Endpoint` params; on any request/send/recv error it drops the connection, re-dials with exponential backoff (50ms..8s, ≤30s budget, 3 attempts), re-runs the SMP handshake and re-enables strict v23 block encryption from the remembered DH secret (SMP is stateless per-connection, so agent/ratchet state survives).
 - Test `reconnect_after_server_restart`: live PING/PONG via local engine + dead-endpoint backoff path fails fast instead of hanging.
 - Suite 27/27 ok, clippy 0.
+
+## v0.97 — PQDR rotation + skipped-key caps (plan item #6)
+- `PqdrRatchet::rotate()`: proactive DH+KEM rekey (fresh keypair, encaps vs peer KEM, root-chain advance from `rk_peer`), next encrypt carries new keys. New `rk_peer` field tracks the peer's root key (rk1 of last decrypt); included in snapshot bytes/restore.
+- `MAX_SKIPPED_TOTAL = 4096` global cap with oldest-first prune in `skip_message_keys`; last unwrap in pqdr removed (let-else).
+- Tests: `rotate_then_encrypt_decrypts` (rotate mid-conversation, both directions continue), `skip_limit_rejects_huge_gap`. pqdr suite 12/12, full 26/26, strict 3/3, clippy 0, 0 unwrap in pqdr.

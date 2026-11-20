@@ -24,6 +24,8 @@ use crate::pq::{kem_decaps, kem_encaps, kem_keypair, KemKeypair, KemParams, KEM_
 
 pub const PQDR_VERSION: u16 = 3; // pqRatchetE2EEncryptVersion
 pub const MAX_SKIP: u32 = 1000;
+/// Hard cap on total stored skipped message keys (memory DoS guard across chains).
+pub const MAX_SKIPPED_TOTAL: usize = 4096;
 
 // ---------- HKDF-SHA512 (hand-rolled HMAC) ----------
 
@@ -166,6 +168,9 @@ pub fn decode_ratchet_msg(b: &[u8]) -> Result<RatchetMsg, EncodeError> {
 pub struct PqdrRatchet {
     pub ad: Vec<u8>,
     pub rk: [u8; 32],
+    /// root key the PEER will use when processing our next DH ratchet (== rk1 of our last decrypt);
+    /// `rotate()` derives from this, not from `rk` (which holds our own send-chain root)
+    rk_peer: Option<[u8; 32]>,
     pub dh_s: X25519Keypair, // our current DH ratchet private key
     pub dh_r: XPublic,       // peer's current DH ratchet public key
     pub cks: [u8; 32],       // sending chain key
@@ -203,6 +208,7 @@ impl PqdrRatchet {
         Ok(PqdrRatchet {
             ad,
             rk,
+            rk_peer: Some(rk),
             dh_s,
             dh_r,
             cks,
@@ -229,6 +235,7 @@ impl PqdrRatchet {
         PqdrRatchet {
             ad,
             rk,
+            rk_peer: None,
             dh_s,
             dh_r,
             cks: [0u8; 32],
@@ -273,6 +280,34 @@ impl PqdrRatchet {
         encode_ratchet_msg(&RatchetMsg { header: hdr, body })
     }
 
+    /// Proactive DH+KEM ratchet rotation (post-compromise recovery / periodic rekey).
+    /// Fresh DH+KEM keypair, encapsulation against the peer's current KEM pk, root-chain
+    /// advance; queues new keys in `pending` so the NEXT encrypt() carries them.
+    pub fn rotate(&mut self) -> Result<(), String> {
+        let peer_kem = self.kem_r.clone();
+        if peer_kem.len() != KEM_PK_LEN {
+            return Err("peer KEM pk len".into());
+        }
+        // mirror the receiver's DH-ratchet step: fresh DH+KEM pair, then
+        // RK, CKs, NHKs = rootKdf(RK, DH(newDHs, DHRr) || ss)
+        let dh_new = x25519_keypair();
+        let kem_new = kem_keypair();
+        let base = self.rk_peer.ok_or("rotate needs a received message first (unknown peer rk)")?;
+        let dh1 = x25519_dh(&dh_new.secret, &self.dh_r);
+        let (ct, ss) = kem_encaps_pub(&peer_kem)?;
+        let (rk1, cks, nhks) = root_kdf(&base, &dh1, Some(&ss));
+        self.rk = rk1;
+        self.cks = cks;
+        self.nhks = nhks;
+        self.dh_s = dh_new;
+        self.kem_s = kem_new;
+        self.pending = Some((ct, ss, self.kem_s.ek.as_ref().to_vec()));
+        self.pn = self.ns;
+        self.ns = 0;
+        self.rk_peer = None; // unknown until the peer answers
+        Ok(())
+    }
+
     /// Decrypt one message; returns plaintext or error string.
     pub fn decrypt(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let msg = decode_ratchet_msg(wire).map_err(|e| e.to_string())?;
@@ -307,6 +342,7 @@ impl PqdrRatchet {
             // DHRatchetPQ2HE: state.RK, CKr, NHKr = rootKdf(RK, DH(newDHRs, DHRr) || ss)
             let dh1 = x25519_dh(&self.dh_s.secret, &dh_pub);
             let (rk1, ckr, nhkr) = root_kdf(&self.rk, &dh1, kem_ss.as_ref());
+            self.rk_peer = Some(rk1); // peer's rk after it ratchets on our next header
             // new DH key + KEM #1: encapsulate against the incoming KEM pk
             self.dh_s = x25519_keypair();
             self.kem_s = kem_keypair();
@@ -360,13 +396,18 @@ impl PqdrRatchet {
             return Ok(());
         }
         let dh_raw = self.dh_r.to_bytes();
-        let mut ckr = self.ckr.unwrap();
+        let Some(mut ckr) = self.ckr else { return Ok(()); };
         let mut n = nr;
         while n < until {
             let (ckr2, mk, iv1, _) = chain_kdf(&ckr);
             ckr = ckr2;
             self.skipped.push((dh_raw, n, mk, iv1));
             n += 1;
+        }
+        // prune oldest skipped keys beyond the global cap
+        if self.skipped.len() > MAX_SKIPPED_TOTAL {
+            let excess = self.skipped.len() - MAX_SKIPPED_TOTAL;
+            self.skipped.drain(..excess);
         }
         self.ckr = Some(ckr);
         self.nr = n;
@@ -421,6 +462,7 @@ impl PqdrRatchet {
         let mut o = Vec::new();
         put_b(&mut o, &self.ad);
         put_a32(&mut o, &self.rk);
+        put_opt32(&mut o, &self.rk_peer);
         put_a32(&mut o, &self.dh_s.secret.to_bytes());
         put_a32(&mut o, &self.dh_s.public.to_bytes());
         put_a32(&mut o, &self.dh_r.to_bytes());
@@ -452,6 +494,7 @@ impl PqdrRatchet {
         let mut c = Cur { b, p: 0 };
         let ad = c.bytes()?;
         let rk = c.b32()?;
+        let rk_peer = c.opt32()?;
         let dh_s = crate::crypto::X25519Keypair {
             secret: x25519_dalek::StaticSecret::from(<[u8;32]>::try_from(c.take(32).map_err(|_| "s".to_string())?).map_err(|_| "s".to_string())?),
             public: crate::crypto::x25519_public(c.b32()?),
@@ -481,6 +524,6 @@ impl PqdrRatchet {
             let iv: [u8;16] = c.take(16)?.try_into().map_err(|_| "bad iv".to_string())?;
             skipped.push((d, n, mk, iv));
         }
-        Ok(PqdrRatchet { ad, rk, dh_s, dh_r, cks, ckr, nhks, nhkr, kem_s, kem_r, pending, pn, ns, nr, skipped })
+        Ok(PqdrRatchet { ad, rk, rk_peer, dh_s, dh_r, cks, ckr, nhks, nhkr, kem_s, kem_r, pending, pn, ns, nr, skipped })
     }
 }
