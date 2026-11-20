@@ -19,14 +19,14 @@
 | Транспорт | `src/transport.rs` | transmission = `short(auth) short(corrId) short(entityId) cmd`; блок 16384B = `pad( count <> concat(large(transmission)) )`; handshake routerHello/clientHello; TLS 1.3 + пиннинг по CA-fingerprint |
 | Роутер | `src/server.rs` | in-memory очередь + push, NTF-креденшелы, XFTP-пакеты, snapshot с AEAD-шифрованием |
 | Клиент | `src/client.rs`, `src/async_client.rs`, `src/reconnect.rs` | handshake, запрос/ответ по блокам, авто-reconnect с backoff, async-движок |
-| **NTF** | `src/ntf.rs` | `Notifications/Transport.hs` — отдельный протокол: блок **512B**, свой handshake (`NtfServerHandshake`/`NtfClientHandshake`), свой тегсет команд (`TNEW/SNEW/PING`), batch-трансмиссии (`u8 count` + `Large`), `implySessId` |
+| **NTF** | `src/ntf.rs` | `Notifications/Transport.hs` — отдельный протокол: блок **512B**, свой handshake (`NtfServerHandshake`/`NtfClientHandshake`), свой тегсет команд (`TNEW/SNEW/PING`), batch-трансмиссии (`u8 count` + `Large`), `implySessId`. Публичный API: `NtfClient` (`connect` с обязательным пиннингом CA, `request`, `ping`) |
 | E2E | `src/pqdr.rs` | `Ratchet.hs` — SNTRUP761 KEM + double ratchet, KDF HKDF-SHA512 (`SimpleXRootRatchet`/`SimpleXChainRatchet`) |
 | Agent | `src/agent.rs`, `src/chat.rs` | agent-протокол v7..v20, PQDR E2E **включён по умолчанию** |
 
 ## Проверка
 
 ```bash
-cargo test --offline -- --test-threads=1                     # 83 теста, все зелёные
+cargo test --offline -- --test-threads=1                     # 90 тестов, все зелёные
 SMP_STRICT=1 cargo test --offline --test strict_e2e --test ntf --test proxy   # 3/3
 cargo clippy --offline --all-targets                         # 0 warnings
 cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
@@ -40,7 +40,7 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 |---|---|
 | `smp11.simplex.im:5223` (SMP v17–v23) | полный цикл `PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG(decrypt), ACK→OK, DEL→OK` — все 7 версий |
 | `xftp1.simplex.im:443` (XFTP v4) | `PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (byte-exact decrypt), FDEL→OK` |
-| `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | handshake принят (пин CA-fingerprint подтверждён отрицательным контролем), **`PING→PONG`** |
+| `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | handshake принят, **`PING→PONG` через библиотечный `NtfClient`** (NTF v3, sessionId 32B, corrMatch=true); пин CA-fingerprint подтверждён отрицательным контролем (неверный пин → exit 3, ничего не отправляется) |
 | onion routing поверх SMP proxy | 2-hop round-trip + отрицательный тест (неверный hop-key) |
 
 Скрипты: `scripts/live_public_smp.sh`, `scripts/live_interop.sh`, `scripts/check.sh`.
@@ -52,6 +52,8 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
   Для публичных релеев и NTF используется openssl-слой (feature `v71-probes`): hs-tls требует
   ed448 в `signature_algorithms`, а rustls не умеет — это ограничение стека, не протокола.
 - `src/bin/*` — диагностические бинарники (behind `v71-probes`), не для production.
+- NTF: транспорт и `PING` доказаны вживую; подписанные команды (`SNEW`/`TNEW` с Ed25519-авторизацией)
+  ещё не реализованы — см. `docs/RELEASE-READINESS.md`.
 - Снапшот `--store`: при env `SMP_STORE_KEY` (hex 32B) шифруется XSalsa20-Poly1305
   (`SMP1` magic + nonce), без ключа — plaintext (legacy). Подробнее: `docs/SECURITY.md`.
 - PQDR: отклонения wire-формата задокументированы в `docs/SECURITY.md`.
