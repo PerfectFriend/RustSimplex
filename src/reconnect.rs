@@ -56,9 +56,9 @@ impl ReconnectingClient {
     }
 
     /// Re-dial with exponential backoff; returns Err only after `max_attempts`.
-    fn ensure(&mut self, max_attempts: u32) -> ClResult<&mut Client> {
+    fn ensure(&mut self, max_attempts: u32) -> ClResult<()> {
         if self.inner.is_some() {
-            return Ok(self.inner.as_mut().expect("checked"));
+            return Ok(());
         }
         let mut backoff = Duration::from_millis(50);
         let start = Instant::now();
@@ -66,10 +66,11 @@ impl ReconnectingClient {
         for attempt in 0..max_attempts.max(1) {
             match self.connect() {
                 Ok(()) => {
-                    if let (Some(sec), Some(c)) = (self.strict_secret, self.inner.as_mut()) {
+                    let sec = self.strict_secret;
+                    if let (Some(sec), Some(c)) = (sec, self.inner.as_mut()) {
                         c.enable_strict(&sec);
                     }
-                    return Ok(self.inner.as_mut().expect("just connected"));
+                    return Ok(());
                 }
                 Err(e) => {
                     last = Some(e);
@@ -83,33 +84,43 @@ impl ReconnectingClient {
         Err(last.unwrap_or_else(|| "connect failed".to_string()))
     }
 
-    /// request() with one transparent reconnect+retry on I/O error.
+    fn conn(&mut self) -> ClResult<&mut Client> {
+        self.inner.as_mut().ok_or_else(|| "no connection".to_string())
+    }
+
+    /// request() with one transparent reconnect+retry on error.
     pub fn request(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
-        match self.ensure(3)?.request(cmd.clone(), entity_id.clone(), auth) {
+        self.ensure(3)?;
+        match self.conn()?.request(cmd.clone(), entity_id.clone(), auth) {
             Ok(v) => Ok(v),
             Err(_) => {
                 self.inner = None; // drop broken conn, redial and retry once
-                self.ensure(3)?.request(cmd, entity_id, auth)
+                self.ensure(3)?;
+                self.conn()?.request(cmd, entity_id, auth)
             }
         }
     }
 
     pub fn send_only(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<()> {
-        match self.ensure(3)?.send_only(cmd.clone(), entity_id.clone(), auth) {
+        self.ensure(3)?;
+        match self.conn()?.send_only(cmd.clone(), entity_id.clone(), auth) {
             Ok(()) => Ok(()),
             Err(_) => {
                 self.inner = None;
-                self.ensure(3)?.send_only(cmd, entity_id, auth)
+                self.ensure(3)?;
+                self.conn()?.send_only(cmd, entity_id, auth)
             }
         }
     }
 
     pub fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
-        match self.ensure(3)?.recv_block() {
+        self.ensure(3)?;
+        match self.conn()?.recv_block() {
             Ok(v) => Ok(v),
             Err(_) => {
                 self.inner = None;
-                self.ensure(3)?.recv_block()
+                self.ensure(3)?;
+                self.conn()?.recv_block()
             }
         }
     }
@@ -128,7 +139,6 @@ mod tests {
     /// transparently and keep answering PING.
     #[test]
     fn reconnect_after_server_restart() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         // bind once to learn a free port, then drop
         let port = {
             let e = Engine::bind_plain("127.0.0.1:0").unwrap();
