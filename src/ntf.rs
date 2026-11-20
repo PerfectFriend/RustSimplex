@@ -19,6 +19,7 @@
 
 use crate::crypto::sha256;
 use crate::encoding::{w_short, w_u16, Reader};
+use std::io::{Read, Write};
 
 pub const NTF_BLOCK_SIZE: usize = 512;
 pub const NTF_VERSION_INITIAL: u16 = 1;
@@ -317,6 +318,123 @@ pub fn split_ntf_response(payload: &[u8]) -> Option<(NtfResponseTag, &[u8])> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NtfClient
+// ---------------------------------------------------------------------------
+
+/// A response received from the NTF server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NtfResponse {
+    pub corr_id: Vec<u8>,
+    pub entity_id: Vec<u8>,
+    pub tag: NtfResponseTag,
+    /// Payload after the tag (e.g. the error code or the new entity id).
+    pub payload: Vec<u8>,
+}
+
+/// NTF client over any byte stream (typically a TLS 1.3 stream with ALPN `ntf/1`).
+pub struct NtfClient<S: Read + Write> {
+    stream: S,
+    session_id: Vec<u8>,
+    version: u16,
+    /// Expected CA fingerprint (SHA-256 over the CA certificate DER) — pinning is mandatory.
+    expected_key_hash: [u8; 32],
+}
+
+impl<S: Read + Write> NtfClient<S> {
+    /// Perform the NTF handshake over `stream`.
+    ///
+    /// `ca_der` must be the DER of the **CA certificate** from the TLS chain; its SHA-256 must
+    /// equal `expected_key_hash`, otherwise the handshake is refused (fail-closed, before any
+    /// bytes are read or written).
+    pub fn connect(stream: S, ca_der: &[u8], expected_key_hash: [u8; 32]) -> Result<Self, String> {
+        let served = key_hash_from_ca_der(ca_der);
+        if served != expected_key_hash {
+            return Err(format!(
+                "ntf pin failure: served CA fingerprint {} != expected {}",
+                hex::encode(served),
+                hex::encode(expected_key_hash)
+            ));
+        }
+        let mut c = NtfClient { stream, session_id: Vec::new(), version: 0, expected_key_hash };
+        // server speaks first
+        let sh_block = c.read_block()?;
+        let sh_payload = unpad_ntf_block(&sh_block)?;
+        let sh = parse_ntf_server_handshake(&sh_payload)?;
+        let version = negotiate_ntf_version(&sh)?;
+        let ch = encode_ntf_client_handshake(&NtfClientHandshake { ntf_version: version, key_hash: expected_key_hash });
+        c.write_block(&ch)?;
+        c.session_id = sh.session_id;
+        c.version = version;
+        Ok(c)
+    }
+
+    pub fn session_id(&self) -> &[u8] {
+        &self.session_id
+    }
+
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn expected_key_hash(&self) -> [u8; 32] {
+        self.expected_key_hash
+    }
+
+    /// Send one command and wait for its response.
+    pub fn request(&mut self, command: &NtfCommand, entity_id: &[u8], authenticator: &[u8]) -> Result<NtfResponse, String> {
+        let corr_id: Vec<u8> = (0u8..24).collect();
+        self.request_with_corr(command, entity_id, authenticator, &corr_id)
+    }
+
+    /// Send one command with an explicit correlation id and wait for its response.
+    pub fn request_with_corr(
+        &mut self,
+        command: &NtfCommand,
+        entity_id: &[u8],
+        authenticator: &[u8],
+        corr_id: &[u8],
+    ) -> Result<NtfResponse, String> {
+        let t = NtfTransmission {
+            authenticator: authenticator.to_vec(),
+            corr_id: corr_id.to_vec(),
+            entity_id: entity_id.to_vec(),
+            command: command.encode(),
+        };
+        let batch = encode_ntf_batch(std::slice::from_ref(&t));
+        self.write_block(&batch)?;
+        let payload = unpad_ntf_block(&self.read_block()?)?;
+        let transmissions = parse_ntf_batch(&payload)?;
+        let mut last_err = None;
+        for tr in transmissions {
+            if let Some((tag, rest)) = split_ntf_response(&tr.command) {
+                if tr.corr_id == corr_id || tag == NtfResponseTag::Pong {
+                    return Ok(NtfResponse { corr_id: tr.corr_id, entity_id: tr.entity_id, tag, payload: rest.to_vec() });
+                }
+                last_err = Some(format!("unexpected response {tag:?} for corrId {}", hex::encode(&tr.corr_id)));
+            }
+        }
+        Err(last_err.unwrap_or_else(|| "no NTF response".into()))
+    }
+
+    /// PING → PONG (unauthenticated, no entity id).
+    pub fn ping(&mut self) -> Result<NtfResponse, String> {
+        self.request(&NtfCommand::new(NtfCommandTag::Ping), &[], &[])
+    }
+
+    fn read_block(&mut self) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; NTF_BLOCK_SIZE];
+        self.stream.read_exact(&mut buf).map_err(|e| format!("ntf read: {e}"))?;
+        Ok(buf)
+    }
+
+    fn write_block(&mut self, payload: &[u8]) -> Result<(), String> {
+        let block = pad_ntf_block(payload)?;
+        self.stream.write_all(&block).map_err(|e| format!("ntf write: {e}"))?;
+        self.stream.flush().map_err(|e| format!("ntf flush: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +554,31 @@ mod tests {
     fn batch_parse_rejects_truncated() {
         assert!(parse_ntf_batch(&[1, 0, 10]).is_err());
         assert!(parse_ntf_batch(&[0]).unwrap().is_empty());
+    }
+
+    /// The client must refuse to talk to a server whose CA fingerprint does not match the pin.
+    #[test]
+    fn connect_rejects_wrong_pin_before_any_io() {
+        // A stream that panics on read/write proves nothing is sent before the pin check.
+        struct PanicStream;
+        impl Read for PanicStream {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                panic!("must not read before the pin check");
+            }
+        }
+        impl Write for PanicStream {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                panic!("must not write before the pin check");
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let ca = vec![0xAAu8; 100];
+        let err = match NtfClient::connect(PanicStream, &ca, [0x00; 32]) {
+            Ok(_) => panic!("connect must fail on a pin mismatch"),
+            Err(e) => e,
+        };
+        assert!(err.contains("pin failure"), "unexpected error: {err}");
     }
 }
