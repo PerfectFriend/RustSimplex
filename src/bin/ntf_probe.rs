@@ -16,6 +16,33 @@ use std::time::Duration;
 
 type S = openssl::ssl::SslStream<TcpStream>;
 
+/// base64url decoder (no padding), tolerant of a trailing '='.
+fn b64url_dec(s: &str) -> Result<Vec<u8>, String> {
+    let mut tbl = [0xffu8; 256];
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".iter().enumerate() {
+        tbl[*c as usize] = i as u8;
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut nbits = 0;
+    for c in s.bytes() {
+        let v = tbl[c as usize];
+        if v == 0xff {
+            if c == b'=' {
+                break;
+            }
+            return Err(format!("bad b64 char {c}"));
+        }
+        acc = (acc << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 fn tls_connect(host: &str, port: u16) -> S {
     let addr: std::net::SocketAddr = format!("{host}:{port}").to_socket_addrs().expect("dns").next().expect("addr");
     let mut b = SslConnector::builder(SslMethod::tls()).expect("connector");
@@ -61,10 +88,38 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let host = args.first().cloned().unwrap_or_else(|| "ntf2.simplex.im".into());
     let port: u16 = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(443);
+    // Expected CA fingerprint (base64url, no padding). Pinning is mandatory: an NTF client that
+    // trusts whatever CA the peer presents can be MITM'd by anyone who serves their own chain.
+    let expected_fp = args
+        .get(2)
+        .cloned()
+        .or_else(|| std::env::var("NTF_EXPECTED_FP").ok())
+        .unwrap_or_else(|| {
+            eprintln!("usage: ntf-probe <host> <port> <expected-ca-fingerprint-b64url>");
+            eprintln!("       (or set NTF_EXPECTED_FP)");
+            std::process::exit(2);
+        });
+    let expected = {
+        let raw = b64url_dec(expected_fp.trim_end_matches('=')).unwrap_or_else(|e| {
+            eprintln!("bad expected fingerprint: {e}");
+            std::process::exit(2);
+        });
+        let arr: [u8; 32] = raw.try_into().unwrap_or_else(|_| {
+            eprintln!("expected fingerprint must be 32 bytes");
+            std::process::exit(2);
+        });
+        arr
+    };
     let mut s = tls_connect(&host, port);
 
     let kh = key_hash_from_ca_der(&ca_cert_der(&s));
     println!("keyHash(sha256 CA DER) = {}", hex::encode(kh));
+    // PIN: the served CA fingerprint MUST equal the expected one — otherwise refuse to proceed.
+    if kh != expected {
+        eprintln!("PIN FAILURE: served CA fingerprint {} != expected {}", hex::encode(kh), hex::encode(expected));
+        std::process::exit(3);
+    }
+    println!("pin ok: CA fingerprint matches the expected value");
     // negative control: NTF_BAD_HASH=1 sends a wrong fingerprint — the server must close the conn
     let kh = if std::env::var("NTF_BAD_HASH").is_ok() {
         let mut bad = kh;
