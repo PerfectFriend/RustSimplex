@@ -455,3 +455,8 @@ cargo clippy --all-targets         # 0 ошибок
 - ffi: mutex locks poison-tolerant (`unwrap_or_else(into_inner)`).
 - pqdr/store: remaining infallible unwraps removed.
 - Result: 0 unwrap/expect outside `#[cfg(test)]` in src/ (bins-probes keep theirs deliberately); suite 26/26 ok, strict 3/3, clippy 0/0 in default + v71-probes.
+
+## v0.96 — auto-reconnecting client (plan item #5)
+- New `src/reconnect.rs`: `ReconnectingClient` wraps `Client` with `Endpoint` params; on any request/send/recv error it drops the connection, re-dials with exponential backoff (50ms..8s, ≤30s budget, 3 attempts), re-runs the SMP handshake and re-enables strict v23 block encryption from the remembered DH secret (SMP is stateless per-connection, so agent/ratchet state survives).
+- Test `reconnect_after_server_restart`: live PING/PONG via local engine + dead-endpoint backoff path fails fast instead of hanging.
+- Suite 27/27 ok, clippy 0.

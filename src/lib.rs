@@ -24,6 +24,7 @@ pub mod protocol;
 pub mod pq;
 pub mod pqdr;
 pub mod proxy;
+pub mod reconnect;
 pub mod onion;
 pub mod server;
 pub mod store;
