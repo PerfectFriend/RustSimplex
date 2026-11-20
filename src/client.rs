@@ -69,6 +69,15 @@ impl Client {
         Ok((sid, eph, eph_priv))
     }
 
+    /// Run the SMP handshake over an already-connected stream (e.g. openssl probe),
+    /// then return a ready Client. `tls_binding` = TLS exporter for channel binding.
+    pub fn handshake_over(mut s: BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<Client> {
+        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, tls_binding)?;
+        let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() };
+        c.maybe_enable_strict_env();
+        Ok(c)
+    }
+
     /// Wrap an already-handshaken stream (used by async/proxy wrappers).
     pub fn from_stream(s: BoxStream, key_hash: [u8; 32]) -> Client {
         Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, eph_priv: None, pending: Vec::new() }

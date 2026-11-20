@@ -62,8 +62,8 @@ pub fn parse_server_hello_key(block: &[u8]) -> Result<ServerHelloKey, EncodeErro
     let max = r.u16()?;
     let sid = r.short()?;
     let auth = match r.u8()? {
-        b'0' => None,
-        b'1' => Some(r.short()?),
+        b'0' | 0x00 => None,   // ASCII '0' (SMP 5223) and binary 0x00 (NTF vhost) both seen live
+        b'1' | 0x01 => Some(r.short()?),
         t => return Err(EncodeError(format!("bad Maybe tag {t} in server hello"))),
     };
     Ok((min, max, sid, auth))
