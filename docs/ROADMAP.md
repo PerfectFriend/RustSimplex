@@ -52,7 +52,7 @@
 | **W3** | `Client::onion_send`, 3+ хопов, sessionId ↔ TLS 1.3 Finished, live XFTP 1 MiB, `upload_file_stream` | G2, G4, G11 |
 | **W4** ✅ | Настоящий async-клиент (`tokio`+`tokio-rustls`), backoff-цикл для мобильного | G3 (частично) |
 | **W5** | `crate-type = cdylib` → uniffi → Kotlin smoke-test | G10 |
-| **W6** | SUPERCOP KAT для sntrup761, key rotation + reorder window, multi-process locking в store, миграции store | G6, G11 |
+| **W6** 🔶 | SUPERCOP KAT для sntrup761 ✅ (cross-implementation, `tests/pqdr_supercop.rs`), key rotation + reorder window ✅; осталось: multi-process locking в store, миграции store | G6 (KAT+rotation ✅), G11 |
 | **W7** | CI-ассерт на probe-бины, регенерация `AUDIT-REPORT.md`, внешний аудит, `cargo publish`, SBOM, финальный аудит | G7, G8, G9, G12 |
 
 Полный разбор: `docs/plans/2026-11-21_v1-evolution-plan.md`.

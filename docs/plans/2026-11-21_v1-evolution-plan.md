@@ -27,7 +27,7 @@ sntrup761 0.4, uniffi (новый), cargo-audit / cargo-deny.
 | G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 70%, 75% |
 | G4 | sessionId ↔ TLS 1.3 Finished (реальный verify_data) | ROADMAP #1, `ПОСЛАНИЕ` #2 | `transport` | 90% |
 | G5 | Чистка `unwrap`/`expect` в `src/` (цель: 0 вне тестов) | `ПОСЛАНИЕ` #4 | весь `src/` | 2 остались |
-| G6 | PQDR: key rotation ✅, reorder window ✅, SUPERCOP KAT ⬜ | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 90% (остался KAT) |
+| G6 | PQDR: key rotation ✅, reorder window ✅, SUPERCOP KAT ✅ (cross-implementation: Rust ↔ supercop-20201130, `tests/pqdr_supercop.rs`) | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 100% |
 | G7 | Внешний аудит (3 зоны) | ROADMAP #6, `ПОСЛАНИЕ` #7 | проект | 0% |
 | G8 | Публикация v0.99.1 на crates.io + GitHub release | `README.md:49` | Packaging | 88% |
 | G9 | CI: ассерт, что дефолтная сборка не линкует probe-бины | `ПОСЛАНИЕ` (рекомендации) | CI | — |
@@ -495,7 +495,15 @@ cargo run --bin uniffi-bindgen generate --library target/debug/libsmp_rs.so --la
 
 ## W6 — PQDR, интеграция и живые проверки (G6, G11)
 
-### Task 6.1: SUPERCOP KAT для sntrup761 (G6)
+### Task 6.1: SUPERCOP KAT для sntrup761 (G6) — ✅ DONE
+
+**Итог:** эталон — вендоренный с simplexmq `supercop-20201130` `cbits/sntrup761.c`
+(sha256 `54f135627eb965bc41f3296e206b593694186060e08256c2a039bf1966e3e017`), C-харнесс
+`scripts/supercop_sntrup761_kat.c`, векторы `tests/fixtures/sntrup761_kat.txt`,
+тест `tests/pqdr_supercop.rs` (3 теста + regenerator), пересборка —
+`scripts/supercop_kat_regen.sh`. Проверены оба направления (Rust декапсулирует
+эталонный ct; эталон декапсулирует Rust-овский ct) + негативный контроль
+(искажение байта → тест падает).
 
 **Objective:** `docs/AUDITOR-LETTER.md:34` — «рекомендуется прогнать KAT против официальных
 SUPERCOP-векторов».
