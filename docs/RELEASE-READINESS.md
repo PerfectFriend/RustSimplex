@@ -14,13 +14,13 @@ Haskell reference (`simplexmq/`, `simplex-chat/`) checked out under `~/Projects/
 
 ## 1. Verdict
 
-**Release readiness: ~80% for v1.0 — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99.1.**
+**Release readiness: ~81% for v1.0 — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99.1.**
 
 **Read the per-component table in §1b — it is the deliverable of this revision.** The headline is
 now a roll-up over **23 individually measured components**, each with the command that proves its
 row, instead of a hand-assigned score for the release-bearing layers only. The number is derived,
-not asserted: LOC-weighted mean of the 19 code components = 80.5%, unweighted mean of all 23 =
-76.0%, reported as ~80%.
+not asserted: LOC-weighted mean of the 19 code components = 81.3%, unweighted mean of all 23 =
+77.3%, reported as ~81%. (`onion` was corrected from 50% to 80% on re-reading its test — see §1.)
 
 Why the number moved down from ~94%: the previous revision scored the layers that carry the
 release (protocol core, packaging, CI) and did not score the modules a library user would reach
@@ -56,7 +56,7 @@ end-to-end.
 | XFTP v4 | **90%** | live `PING→PONG`, `FNEW→SIDS`, `FPUT 64KB→OK`, `FGET` decrypt byte-match, `FDEL→OK` on `xftp1.simplex.im:443` (re-run this audit) |
 | E2E PQDR ratchet | **80%** | init/encrypt/decrypt/rotate/skipped-key limits; `Agent::e2e` default-on, fail-closed; 18 ratchet tests + RFC5869 vector |
 | NTF (notifications) | **60%** | live `PING→PONG` through the **library `NtfClient`** (CA-pinned, re-run this audit); signed `TNEW`/`SNEW` **not implemented** — the exact wire spec is extracted in §4 |
-| Onion routing over SMP proxy | **50%** | `tests/onion.rs` (local round-trip + wrong-hop-key negative test); **the module is not wired into `server.rs`/`client.rs`** — a library user must wire it themselves |
+| Onion routing over SMP proxy | **80%** | `tests/onion.rs`: 2-hop round-trip through nested PROXY/PFWD (SEND + ACK, body decrypted byte-exact) + wrong-hop-key negative test | not integrated as a `Client` method; no live test (public relays have proxy disabled server-side) |
 | Reconnect / resilience | **40%** | `ReconnectingClient` compiles and has one inline self-test, but **has no caller and no test file** — dead code |
 | Client UX / apps | **25%** | FFI façade only (55% as a façade, but no binding generator, no Kotlin consumer, no test); no desktop/mobile UI in this repo |
 | Packaging & release ops | **88%** | crates.io metadata + `cargo package` verified (55 files, 118.1 KiB compressed), CI matrix (default / v71-probes / ffi / no-default-features / strict / audit / fuzz / package dry-run) with no swallowed failures, **release pipeline** (`.github/workflows/release.yml`: tag → verify version against `Cargo.toml` → tests + clippy + package → changelog from `git log` → crates.io publish + GitHub release), `docs/CHANGELOG.md`; the publish step still needs a `CARGO_REGISTRY_TOKEN` secret and a first real tag to exercise |
@@ -66,8 +66,13 @@ table in §1b is the authoritative version):
 - **NTF 78% → 60%** — the earlier figure credited the transport, handshake and command tag set;
   scoring the *feature* against its checklist exposes that the signed command flow (`TNEW`/`SNEW`),
   the only part a notification client actually needs, is not implemented.
-- **Onion 85% → 50%** — the earlier figure scored the local round-trip test as the whole feature;
-  the module is never called from the server or client, so it is unreachable for a library user.
+- **Onion 85% → 50% → 80%** — revision 8 first *lowered* it to 50% ("not called from
+  `server.rs`/`client.rs`"), then a re-read of `tests/onion.rs` showed that was the wrong
+  criterion: `onion_request` is a **complete public client API**, the same shape as `NtfClient` —
+  a library user calls it directly rather than through `Client`. The test proves a real 2-hop
+  round-trip (SEND + ACK through R1→R2→dest, body decrypted byte-exact) and a wrong-hop-key
+  negative case. The real gap is ergonomic (no `Client::onion_send` convenience) and live-test
+  coverage, not reachability.
 - **Reconnect 80% → 40%** — the earlier figure credited "exponential backoff, re-dial, strict-mode
   re-enable" as if it were shipped; `ReconnectingClient` has **no caller and no integration test**.
 - **Packaging 85% → 88%** — the release pipeline's three blocking defects were fixed and the
@@ -113,7 +118,7 @@ previous revision. The proof column names the command or file that establishes t
 | `ntf` (notifications) | 584 | **60%** | live `PING→PONG` through the **library** `NtfClient` against `ntf2.simplex.im` (CA-pinned) | **signed commands (`TNEW`/`SNEW`) not implemented** — exact wire spec extracted in §4 |
 | `sb_chain` (block chain) | 216 | **70%** | 5 inline unit tests; used by `server.rs` + `client.rs` for strict block encryption | no integration test file of its own |
 | `proxy` (SMP proxy) | 172 | **65%** | wired into the server dispatcher (`Proxy`/`Pfwd`/`Rfwd` arms); `tests/socks5.rs` | **no live proxy test**; the public relay's proxy is disabled server-side |
-| `onion` (Tor onion requests) | 172 | **50%** | `tests/onion.rs` (1 file) | **isolated**: not called from `server.rs`/`client.rs` — a library user must wire it themselves |
+| `onion` (Tor onion requests) | 172 | **80%** | `tests/onion.rs`: **2-hop round-trip through nested PROXY/PFWD layers** — SEND + ACK through R1→R2→dest, MSG body decrypted byte-exact, plus a wrong-hop-key negative test | not integrated as a `Client` method — a caller must assemble the hop chain by hand; no live test (public relays have proxy disabled server-side) |
 | `chat` (chat message layer) | 109 | **75%** | `tests/chat.rs` + `tests/chat_e2e.rs` | thin wrapper over `agent`; no real SimpleX client interop |
 | `identity` (router identity/certs) | 82 | **85%** | used by `server.rs` + `transport.rs` for the cert chain and fingerprint | no chain-validation test against a foreign CA |
 | `ffi` (Android/uniffi facade) | 65 | **55%** | compiles under `--features ffi`; 7 public functions, opaque handles, no `std::env` | **no binding generator, no Kotlin consumer, no test** — the Paranoid Android app cannot use it yet |
@@ -124,7 +129,7 @@ previous revision. The proof column names the command or file that establishes t
 | Release pipeline | — | **75%** | `release.yml`: tag → version check → tests → clippy → package → changelog → publish → GitHub release; 3 blocking defects fixed and re-verified by reading the YAML | the publish step has never run end-to-end |
 | Docs | — | **75%** | `README.md`, `docs/RELEASE-READINESS.md`, `docs/SECURITY.md`, `docs/CHANGELOG.md`, `docs/AUDIT-REPORT.md` | `docs/AUDIT-REPORT.md` (45 KB, dated 2026-11-20) predates revisions 5–8 and is now stale |
 
-**Headline: ~80% for v1.0** — the LOC-weighted mean of the 19 code components is **80.5%**
+**Headline: ~81% for v1.0** — the LOC-weighted mean of the 19 code components is **81.3%**
 (6 224 LOC); the unweighted mean across all 23 components is **76.0%**. The difference is the
 point: the code is mostly protocol-core (85–95%), while the components that are *not* ready —
 `async_client` 35%, `reconnect` 40%, `onion` 50%, `ffi` 55% — are small in LOC and would barely
@@ -320,7 +325,7 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | Release pipeline (tags, changelog, publish) | ◑ workflow written **and its three blocking defects fixed**; first tag not yet pushed | configure `CARGO_REGISTRY_TOKEN`, push `v0.99.1`, verify the crates.io publish |
 | No dead modules in the public API | ❌ **`reconnect` (40%) and `async_client` (35%) have no caller and no test** — grep-verified across the whole repo | either wire them into a real call path with integration tests, or delete them (a `pub` dead module is a promise the crate does not keep) |
 | FFI façade usable by a real consumer | ❌ **55%** — compiles under `--features ffi`, but no binding generator, no Kotlin consumer, no test | generate uniffi bindings, add a Kotlin-side smoke test, or mark the module experimental |
-| `onion` reachable from the engine | ◑ 50% — tested locally but **not called from `server.rs`/`client.rs`** | wire it into the proxy path or expose it as the documented way to reach an onion address |
+| `onion` ergonomic + live | ◑ 80% — the 2-hop chain works and is tested; it is **not a `Client` method**, so callers hand-assemble the hop list | add `Client::onion_send` (hop chain from config) and a live run against a relay with proxy enabled |
 | Dependency audit clean | ✅ `cargo audit` executed this audit: **0 vulnerabilities**, 1 unmaintained-crate warning (`xsalsa20poly1305` → renamed upstream to `crypto_secretbox`, no fixed release available) | keep the allowlist entry with a note; revisit when upstream publishes a replacement |
 | External security review | ❌ | `docs/AUDIT-PROMPT.md` exists; needs refreshing + a reviewer |
 
