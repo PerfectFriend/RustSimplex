@@ -56,6 +56,11 @@ pub struct ConnCtx {
     /// most recent PROXY session opened on this connection (for onion-nested PFWD
     /// with empty entity_id: the inner [Proxy, Pfwd] pair is dispatched atomically)
     pub last_proxy: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// Whether this engine may proxy to local/private destinations.
+    ///
+    /// Per-connection context derived from the engine setting, so the SSRF guard
+    /// never depends on the process environment.
+    pub allow_local_proxy: bool,
 }
 
 impl ServerState {
@@ -476,7 +481,7 @@ fn dispatch_cmd(
         Command::Proxy { host, port, .. } => {
             let host = String::from_utf8_lossy(&host).to_string();
             let port: u16 = String::from_utf8_lossy(&port).parse().unwrap_or(0);
-            if let Err(e) = guard_proxy_dest(&host, port) {
+            if let Err(e) = guard_proxy_dest(&host, port, ctx.allow_local_proxy) {
                 return vec![err_np!(t.corr_id.clone(), vec![], &e)];
             }
             // connect to destination router as a proxy client (plain TCP for now)
@@ -524,7 +529,7 @@ fn dispatch_cmd(
             let st2 = st.clone();
             let sid = session_id.to_vec();
             let outbox2 = outbox.clone();
-            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None, last_proxy: ctx.last_proxy.clone() };
+            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None, last_proxy: ctx.last_proxy.clone(), allow_local_proxy: ctx.allow_local_proxy };
             match crate::proxy::handle_rfwd(&enc, &t.corr_id, &sess, eph_priv, session_id, &move |inner| {
                 dispatch(inner, &st2, &sid, &outbox2, &ctx2)
             }) {
@@ -620,7 +625,13 @@ fn write_push_block(stream: &mut BoxStream, s_snd: Option<&mut [u8; 32]>, wires:
 
 /// One connection: blocking SMP/TLS handshake, then a poll pump (50 ms read timeout)
 /// that reads commands and drains the outbox of pushed transmissions.
-pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
+pub fn handle_conn(
+    tcp: std::net::TcpStream,
+    mode: &Mode,
+    st: Arc<Mutex<ServerState>>,
+    strict: bool,
+    allow_local_proxy: bool,
+) -> std::io::Result<()> {
     let ctrl = tcp.try_clone()?;
     let mut tls_binding: Option<[u8; 32]> = None;
     let mut stream: BoxStream = match mode {
@@ -662,9 +673,10 @@ pub fn handle_conn(tcp: std::net::TcpStream, mode: &Mode, st: Arc<Mutex<ServerSt
         }),
         server_eph_priv: Some(eph.secret),
         last_proxy: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        allow_local_proxy,
     };
     // strict v23 transport encryption (encryptBlock) — enabled only when client sent authPubKey
-    let (mut s_snd, mut s_rcv) = if std::env::var("SMP_STRICT").as_deref() == Ok("1") {
+    let (mut s_snd, mut s_rcv) = if strict {
         match ctx.sess_secret {
             Some(sec) => match strict_keys(&session_id, &sec, false) { Ok((a, b)) => (Some(a), Some(b)), Err(_) => (None, None) }
             None => (None, None),
@@ -827,26 +839,70 @@ pub struct Engine {
     pub identity: Option<RouterIdentity>,
     pub host: String,
     pub shutdown: Arc<AtomicBool>,
+    /// Enable strict v23 transport block encryption for accepted connections.
+    ///
+    /// This is a per-engine property: it is set once at bind time and never read
+    /// from the process environment. The `SMP_STRICT` variable is only consulted
+    /// by the binaries as a default for this flag.
+    pub strict: bool,
+    /// Allow proxying to local/private destinations (SSRF guard opt-in).
+    ///
+    /// Per-engine for the same reason as `strict`: the previous implementation
+    /// read `SMP_ALLOW_LOCAL_PROXY` from the environment on every request.
+    pub allow_local_proxy: bool,
 }
 
 impl Engine {
+    /// Bind a plain (non-TLS) engine.
+    ///
+    /// The strict mode and the local-proxy opt-in default to the values of
+    /// `SMP_STRICT` / `SMP_ALLOW_LOCAL_PROXY` **at bind time**. They are then
+    /// frozen into the engine, so a later change of the environment cannot alter
+    /// the behaviour of an already-running server, and two engines in the same
+    /// process can have different settings.
     pub fn bind_plain(addr: &str) -> std::io::Result<Engine> {
-        Self::bind_plain_store(addr, None)
+        let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
+        let allow_local_proxy = std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some();
+        Self::bind_plain_with_proxy_and_strict(addr, allow_local_proxy, strict)
     }
 
-    pub fn bind_plain_store(addr: &str, store: Option<std::path::PathBuf>) -> std::io::Result<Engine> {
+    /// Bind a plain engine with an explicit strict-mode setting.
+    pub fn bind_plain_with_strict(addr: &str, strict: bool) -> std::io::Result<Engine> {
+        Self::bind_plain_with_proxy_and_strict(addr, false, strict)
+    }
+
+    /// Bind a plain engine with explicit local-proxy and strict-mode settings.
+    ///
+    /// Neither value is read from the process environment: the two settings are
+    /// frozen into the engine at bind time.
+    pub fn bind_plain_with_proxy_and_strict(
+        addr: &str,
+        allow_local_proxy: bool,
+        strict: bool,
+    ) -> std::io::Result<Engine> {
         let listener = TcpListener::bind(addr)?;
         Ok(Engine {
             listener,
-            state: match store {
-                Some(p) => new_state_persist(p),
-                None => new_state(),
-            },
+            state: new_state(),
             mode: Mode::Plain,
             identity: None,
             host: addr.to_string(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            strict,
+            allow_local_proxy,
         })
+    }
+
+    /// Bind a plain engine with a persistent store, taking the strict-mode and
+    /// local-proxy defaults from the environment **once**, at bind time.
+    pub fn bind_plain_store(addr: &str, store: Option<std::path::PathBuf>) -> std::io::Result<Engine> {
+        let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
+        let allow_local_proxy = std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some();
+        let mut engine = Self::bind_plain_with_proxy_and_strict(addr, allow_local_proxy, strict)?;
+        if let Some(p) = store {
+            engine.state = new_state_persist(p);
+        }
+        Ok(engine)
     }
 
     /// Bind with TLS; generates a fresh router identity. `host` goes into the cert SAN
@@ -869,6 +925,8 @@ impl Engine {
             identity: Some(id),
             host: host.to_string(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            strict: std::env::var("SMP_STRICT").as_deref() == Ok("1"),
+            allow_local_proxy: std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some(),
         })
     }
 
@@ -889,6 +947,8 @@ impl Engine {
 
     /// Accept loop (blocking). Spawns a pump thread per connection.
     pub fn serve(&self) -> std::io::Result<()> {
+        let strict = self.strict;
+        let allow_local_proxy = self.allow_local_proxy;
         // `shutdown` must interrupt a *blocking* accept(): with the original
         // code the flag was only checked after `incoming()` returned, i.e. after
         // the next client connected — so a server with no clients could never
@@ -941,7 +1001,7 @@ impl Engine {
             let st = self.state.clone();
             let mode = self.mode.clone();
             thread::spawn(move || {
-                if let Err(e) = handle_conn(tcp, &mode, st) {
+                if let Err(e) = handle_conn(tcp, &mode, st, strict, allow_local_proxy) {
                     if std::env::var_os("SMP_DEBUG").is_some() {
                         eprintln!("[engine] conn error: {e}");
                     }
@@ -962,7 +1022,7 @@ impl Engine {
 
 /// Spawn the engine on a background thread. Returns (addr, state, shutdown, join).
 pub fn spawn_engine(engine: Engine) -> (SocketAddr, Arc<Mutex<ServerState>>, Arc<AtomicBool>, thread::JoinHandle<()>) {
-    let addr = engine.local_addr().expect("local addr");
+    let addr = engine.local_addr().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)));
     let state = engine.state.clone();
     let shutdown = engine.shutdown.clone();
     let handle = thread::spawn(move || {
@@ -979,9 +1039,9 @@ pub fn run(addr: &str) -> std::io::Result<()> {
 
 
 /// P1: proxy destination guard — only public routers on standard ports, no local/private targets (SSRF guard).
-fn guard_proxy_dest(host: &str, port: u16) -> Result<(), String> {
-    // tests may explicitly opt into local destinations
-    if std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some() {
+fn guard_proxy_dest(host: &str, port: u16, allow_local_proxy: bool) -> Result<(), String> {
+    // local destinations are allowed only when the engine was explicitly opted in
+    if allow_local_proxy {
         return Ok(());
     }
     let h = host.trim();
@@ -1010,12 +1070,12 @@ mod proxy_guard_tests {
     use super::guard_proxy_dest;
     #[test]
     fn rejects_local_and_bad_ports() {
-        assert!(guard_proxy_dest("127.0.0.1", 5223).is_err());
-        assert!(guard_proxy_dest("10.0.0.5", 5223).is_err());
-        assert!(guard_proxy_dest("::1", 5223).is_err());
-        assert!(guard_proxy_dest("localhost", 5223).is_err());
-        assert!(guard_proxy_dest("smp11.simplex.im", 22).is_err());
-        assert!(guard_proxy_dest("", 5223).is_err());
-        assert!(guard_proxy_dest("smp11.simplex.im", 5223).is_ok());
+        assert!(guard_proxy_dest("127.0.0.1", 5223, false).is_err());
+        assert!(guard_proxy_dest("10.0.0.5", 5223, false).is_err());
+        assert!(guard_proxy_dest("::1", 5223, false).is_err());
+        assert!(guard_proxy_dest("localhost", 5223, false).is_err());
+        assert!(guard_proxy_dest("smp11.simplex.im", 22, false).is_err());
+        assert!(guard_proxy_dest("", 5223, false).is_err());
+        assert!(guard_proxy_dest("smp11.simplex.im", 5223, false).is_ok());
     }
 }

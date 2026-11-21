@@ -65,7 +65,11 @@ pub fn encode_ntf_client_handshake(hs: &NtfClientHandshake) -> Vec<u8> {
     let mut v = Vec::with_capacity(35);
     w_u16(&mut v, hs.ntf_version);
     // Haskell `KeyHash` uses the ByteString encoding: 1-byte length prefix + bytes
-    w_short(&mut v, &hs.key_hash).expect("fixed-size");
+    // The key hash is exactly 32 bytes, which always fits the 1-byte shortString
+    // length prefix; the error branch is unreachable but keeps the function total.
+    if w_short(&mut v, &hs.key_hash).is_err() {
+        return Vec::new();
+    }
     v
 }
 
@@ -249,8 +253,11 @@ pub fn sign_ntf_command(
     command: &[u8],
     sk: &ed25519_dalek::SigningKey,
 ) -> [u8; 64] {
-    let msg = ntf_authorized_bytes(session_id, corr_id, entity_id, command)
-        .expect("ntf_authorized_bytes: lengths are bounded by the 1-byte shortString limit");
+    // `ntf_authorized_bytes` only fails when a component exceeds the 1-byte
+    // shortString limit (255 bytes). Such a command cannot be represented on the
+    // wire, so it is signed over an empty message — the peer will reject it,
+    // which is preferable to panicking inside the library.
+    let msg = ntf_authorized_bytes(session_id, corr_id, entity_id, command).unwrap_or_default();
     sk.sign(&msg).to_bytes()
 }
 

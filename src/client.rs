@@ -74,7 +74,9 @@ impl Client {
     pub fn handshake_over(mut s: BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<Client> {
         let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, tls_binding)?;
         let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() };
-        c.maybe_enable_strict_env();
+        // The default is taken from the environment once, at connect time.
+        let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
+        c.maybe_enable_strict(strict);
         Ok(c)
     }
 
@@ -84,30 +86,64 @@ impl Client {
     }
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
+        // The default is taken from the environment once, at connect time; the
+        // resulting setting is per-connection and never re-read.
+        let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
+        Self::connect_plain_with_strict(addr, key_hash, strict)
+    }
+
+    /// Connect in plain mode with an explicit strict-mode setting.
+    ///
+    /// The strict flag is per-connection: it is not read from the process
+    /// environment, so two connections in the same process (or two tests running
+    /// in parallel) cannot influence each other.
+    pub fn connect_plain_with_strict(addr: SocketAddr, key_hash: &[u8], strict: bool) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict_env(); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict); Ok(c) }
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
         Self::connect_tls_sni(addr, host, key_hash, true)
     }
 
-    /// When SMP_STRICT=1 and the server sent authPubKey, derive sessSecret and enable block encryption.
-    pub fn maybe_enable_strict_env(&mut self) {
-        if std::env::var("SMP_STRICT").as_deref() != Ok("1") { return; }
+    /// Enable strict v23 block encryption for this connection if `strict` is set
+    /// and the server sent an authPubKey.
+    ///
+    /// The flag is passed in explicitly: it is a property of this connection, not
+    /// of the process.
+    pub fn maybe_enable_strict(&mut self, strict: bool) {
+        if !strict { return; }
         if let (Some(p), Some(srv)) = (self.eph_priv, self.server_eph_pub) {
             let secret = x25519_dh(&p.into(), &x25519_public(srv));
             self.enable_strict(&secret);
         }
     }
 
+    /// Whether strict v23 block encryption is active on this connection.
+    pub fn has_strict_keys(&self) -> bool {
+        self.strict_snd.is_some() && self.strict_rcv.is_some()
+    }
+
     /// v0.26: with_sni=false — public relays route SNI connections to the web handler;
     /// no-SNI gets the SMP protocol cert (same trick as XFTP v0.25).
     pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> ClResult<Client> {
+        // The default is taken from the environment once, at connect time.
+        let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
+        Self::connect_tls_sni_with_strict(addr, host, key_hash, with_sni, strict)
+    }
+
+    /// Connect over TLS with an explicit strict-mode setting.
+    pub fn connect_tls_sni_with_strict(
+        addr: SocketAddr,
+        host: &str,
+        key_hash: [u8; 32],
+        with_sni: bool,
+        strict: bool,
+    ) -> ClResult<Client> {
         let (mut s, binding) = crate::transport::connect_tls_sni_bound(addr, host, key_hash, with_sni).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict_env(); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict); Ok(c) }
     }
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).

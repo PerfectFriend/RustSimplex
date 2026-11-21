@@ -1,2 +1,5 @@
 # Hermes scratch working copies (repo-visible plans live in docs/plans/)
 .hermes/
+
+# superpowers SDD workspace (ledger + briefs, scratch)
+.superpowers/

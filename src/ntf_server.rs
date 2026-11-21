@@ -188,7 +188,7 @@ pub fn spawn_engine(
     Arc<AtomicBool>,
     std::thread::JoinHandle<()>,
 ) {
-    let addr = engine.local_addr().expect("local addr");
+    let addr = engine.local_addr().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)));
     let state = engine.state.clone();
     let shutdown = engine.shutdown.clone();
     let handle = std::thread::spawn(move || {
@@ -244,7 +244,7 @@ fn handle_conn(
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short client handshake"));
     }
     let client_version = u16::from_be_bytes([hs_payload[0], hs_payload[1]]);
-    if client_version < crate::ntf::NTF_VERSION_INITIAL || client_version > crate::ntf::NTF_VERSION_SERVER_MAX {
+    if !(crate::ntf::NTF_VERSION_INITIAL..=crate::ntf::NTF_VERSION_SERVER_MAX).contains(&client_version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("unsupported NTF version {client_version}"),
@@ -371,7 +371,13 @@ fn handle_tnew(
     let token_id = random_bytes(16);
     let dh_pub_key: [u8; 32] = random_bytes(32).try_into().unwrap_or([0u8; 32]);
     {
-        let mut st = state.lock().unwrap();
+        // A poisoned lock means another thread panicked while holding it; the
+        // state may be inconsistent, so the command is rejected instead of
+        // unwinding the connection thread.
+        let mut st = match state.lock() {
+            Ok(st) => st,
+            Err(_) => return (error_response(&corr_id, NtfError::Auth), None),
+        };
         st.tokens.insert(
             token_id.clone(),
             TokenRecord { verify_key, dh_pub_key },
@@ -425,7 +431,10 @@ fn handle_snew(
 
     // The signature must verify against the token's verify key.
     let token = {
-        let st = state.lock().unwrap();
+        let st = match state.lock() {
+            Ok(st) => st,
+            Err(_) => return (error_response(&corr_id, NtfError::Auth), None),
+        };
         st.tokens.get(&tkn_id).cloned()
     };
     let Some(token) = token else {
@@ -443,7 +452,10 @@ fn handle_snew(
     // Register the subscription and answer `IDSUB <entId>`.
     let sub_id = random_bytes(16);
     {
-        let mut st = state.lock().unwrap();
+        let mut st = match state.lock() {
+            Ok(st) => st,
+            Err(_) => return (error_response(&corr_id, NtfError::Auth), None),
+        };
         st.subscriptions.insert(
             sub_id.clone(),
             SubscriptionRecord { token_id: tkn_id, notifier_id: _notifier_id, notifier_key },
