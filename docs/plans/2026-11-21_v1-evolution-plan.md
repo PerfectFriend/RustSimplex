@@ -515,7 +515,9 @@ SUPERCOP-векторов».
 **Step 3:** FAIL (если расхождение) → PASS (если совпало; расхождение = реальный дефект KEM).
 **Step 4:** Commit.
 
-### Task 6.2: Key rotation + reorder window (G6)
+### Task 6.2: Key rotation + reorder window (G6) — ✅ DONE
+
+**Итог:** `RotationSchedule`/`RatchetConfig`, `DEFAULT_ROTATE_EVERY = 1024`, `MAX_SKIPPED_TOTAL = 4096`, ротация только в mirror-точке (после ackpeer'а) — `tests/pqdr_rotation.rs` (8 тестов).
 
 **Objective:** `ПОСЛАНИЕ` #6: key rotation расписание и skipped-message limits.
 

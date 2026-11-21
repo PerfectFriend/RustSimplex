@@ -52,7 +52,7 @@
 | **W3** | `Client::onion_send`, 3+ хопов, sessionId ↔ TLS 1.3 Finished, live XFTP 1 MiB, `upload_file_stream` | G2, G4, G11 |
 | **W4** ✅ | Настоящий async-клиент (`tokio`+`tokio-rustls`), backoff-цикл для мобильного | G3 (частично) |
 | **W5** | `crate-type = cdylib` → uniffi → Kotlin smoke-test | G10 |
-| **W6** ✅ | SUPERCOP KAT для sntrup761 ✅ (cross-implementation, `tests/pqdr_supercop.rs`), key rotation + reorder window ✅, multi-process locking в store ✅ (`store::update_store`, single-instance guard в `smp-server`), миграции версий store с rollback ✅ (`store::migrate_store`, v1→v2) | G6 ✅, G11 ✅ |
+| **W6** 🔶 | SUPERCOP KAT для sntrup761 ✅ (cross-implementation, `tests/pqdr_supercop.rs`), key rotation + reorder window ✅, multi-process locking в store ✅ (`store::update_store`, single-instance guard в `smp-server`), миграции версий store с rollback ✅ (`store::migrate_store`, v1→v2); осталось: Task 6.3 — live-прогон NTF/PROXY с зафиксированным выводом | G6 ✅, G11 ✅ |
 | **W7** | CI-ассерт на probe-бины, регенерация `AUDIT-REPORT.md`, внешний аудит, `cargo publish`, SBOM, финальный аудит | G7, G8, G9, G12 |
 
 Полный разбор: `docs/plans/2026-11-21_v1-evolution-plan.md`.
