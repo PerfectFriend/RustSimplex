@@ -5,6 +5,7 @@
 #    (CA-pinned; the probe refuses to run without a pin)
 # 2b) the same cycle with a chunked 1MiB body (sha256-verified)
 # 3) NTF PING->PONG on ntf2.simplex.im:443 through the library NtfClient (CA-pinned)
+# 4) live PROXY attempt (expected to be refused: public relays disable proxy server-side)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/build/bin:$PATH"
@@ -43,6 +44,21 @@ if echo "$ntf_out" | grep -aq "LIVE NTF OK: PING -> PONG"; then
   echo "NTF v3 PING->PONG via library NtfClient (CA pinned): OK"
 else
   echo "NTF PING->PONG: FAILED"; echo "$ntf_out" | tail -5; exit 1
+fi
+
+# 4) Live PROXY attempt against the public relay.
+#    The public relays disable the SMP proxy server-side, so the PRXY is expected to be
+#    rejected. The attempt stays in the harness on purpose: the fact is then re-verified on
+#    every run instead of being remembered from a one-off observation.
+#    (The relay key hash is a public certificate fingerprint, not a credential.)
+KH=1OwYGt-yqOfe2IyVHhxz3ohqo3aCCMjtB-8wn4X_aoY
+SB="$CARGO_TARGET_DIR/debug/smp-v71"
+px_out=$(SMP_NTF=0 SMP_PROXY=1 SMP_V=23 timeout 10 "$SB" 23.128.248.121:5223 "$KH" 2>&1 | tr -d '\0' || true)
+echo "proxy attempt: $(echo "$px_out" | grep -a 'PRXY probe' | tail -1 | cut -c1-160)"
+if echo "$px_out" | grep -aq 'Pkey'; then
+  echo "LIVE PROXY: the public relay ACCEPTED a proxy session - the proxy is ENABLED there"
+else
+  echo "LIVE PROXY: public relay disables proxy server-side - expected"
 fi
 
 echo "LIVE INTEROP HARNESS: SMP v17..v23 OK + XFTP v4 transport PONG OK (CA pinned) + NTF PONG OK (CA pinned)"

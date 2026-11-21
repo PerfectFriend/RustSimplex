@@ -44,7 +44,7 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 | `smp11.simplex.im:5223` (SMP v17–v23) | полный цикл `PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG(decrypt), ACK→OK, DEL→OK` — все 7 версий |
 | `xftp1.simplex.im:443` (XFTP v4) | `PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (byte-exact decrypt), FDEL→OK`; CA fingerprint **обязателен** (неверный пин → exit 3 до первого байта XFTP) |
 | `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | handshake принят, **`PING→PONG` через библиотечный `NtfClient`** (NTF v3, sessionId 32B, corrMatch=true); пин CA-fingerprint подтверждён отрицательным контролем (неверный пин → exit 3, ничего не отправляется) |
-| onion routing поверх SMP proxy | **локально** (не live): 2-hop round-trip через вложенные PROXY/PFWD + отрицательный тест (неверный hop-key). Публичные релеи отключили proxy серверной стороне |
+| onion routing поверх SMP proxy | **локально** (не live): 2-hop round-trip через вложенные PROXY/PFWD + отрицательный тест (неверный hop-key), 3-hop цепочка через `Client::onion_send`. Публичные релеи отключили proxy серверной стороне: живая попытка PRXY → `ERR CMD SYNTAX` (проверено 2026-11-21) |
 
 Скрипты: `scripts/live_public_smp.sh`, `scripts/live_interop.sh` (SMP + XFTP + NTF, все с пином),
 `scripts/check.sh`.
