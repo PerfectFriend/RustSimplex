@@ -254,14 +254,146 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
     Some(st)
 }
 
-/// Atomic save: write to `<path>.tmp` then rename.
-pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
-    save_with_key(path, st, env_key().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?)
+// --- the versioned store envelope ------------------------------------------------
+
+/// The magic prefix of a versioned store file.
+const STORE_MAGIC: &[u8; 8] = b"SMPSTORE";
+/// magic (8) + version (4) + payload length (8) + checksum (8)
+const STORE_HEADER_LEN: usize = 28;
+/// The current store format version.
+///
+/// v1 — the snapshot payload with no header (the original format).
+/// v2 — magic + version + payload length + checksum + the same payload.
+pub const CURRENT_STORE_VERSION: u32 = 2;
+
+/// FNV-1a 64 — a non-cryptographic checksum that catches accidental
+/// corruption of a plaintext store (keyed stores are already sealed).
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
-/// Atomic save with an explicit key (does not read `SMP_STORE_KEY`).
-pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> std::io::Result<()> {
-    let sealed = seal_with_key(snapshot_bytes(st), key).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+/// Wraps a snapshot payload in the versioned store envelope.
+fn envelope(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(STORE_HEADER_LEN + payload.len());
+    out.extend_from_slice(STORE_MAGIC);
+    out.extend_from_slice(&CURRENT_STORE_VERSION.to_le_bytes());
+    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(&fnv1a64(payload).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// The version of a store payload and the snapshot bytes inside it.
+///
+/// A payload without the magic is a legacy (v1) store: the bytes are the
+/// snapshot itself. A version newer than this build is refused — loading it
+/// would mean writing a format we do not understand.
+fn unenvelope(bytes: &[u8]) -> Result<(u32, &[u8]), String> {
+    if bytes.len() < STORE_HEADER_LEN || &bytes[..STORE_MAGIC.len()] != STORE_MAGIC {
+        return Ok((1, bytes));
+    }
+    let version = u32::from_le_bytes(
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| "truncated store version".to_string())?,
+    );
+    if version > CURRENT_STORE_VERSION {
+        return Err(format!(
+            "store version {version} is newer than the supported version {CURRENT_STORE_VERSION}"
+        ));
+    }
+    let len = u64::from_le_bytes(
+        bytes[12..20]
+            .try_into()
+            .map_err(|_| "truncated store length".to_string())?,
+    ) as usize;
+    let sum = u64::from_le_bytes(
+        bytes[20..28]
+            .try_into()
+            .map_err(|_| "truncated store checksum".to_string())?,
+    );
+    let body = &bytes[STORE_HEADER_LEN..];
+    if body.len() != len {
+        return Err(format!(
+            "store length mismatch: the header says {len}, the file carries {}",
+            body.len()
+        ));
+    }
+    if fnv1a64(body) != sum {
+        return Err("store checksum mismatch — the file is corrupt".to_string());
+    }
+    Ok((version, body))
+}
+
+/// The outcome of a store migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Migration {
+    /// The store is already in the current format.
+    UpToDate,
+    /// The store was upgraded; the previous bytes are kept in `backup`.
+    Upgraded {
+        from: u32,
+        to: u32,
+        backup: PathBuf,
+    },
+}
+
+/// Upgrades a store file to the current format.
+///
+/// The store is never damaged: the new payload is built and validated before
+/// anything on disk is touched, the previous bytes are kept next to the store
+/// as `<store>.v{from}.bak`, and the replacement itself is an atomic write.
+/// A failed migration therefore leaves the store exactly as it was.
+pub fn migrate_store(path: &Path, key: Option<[u8; 32]>) -> std::io::Result<Migration> {
+    let raw = fs::read(path)?;
+    let payload = match key {
+        Some(k) => unseal_with_key(&raw, Some(k)).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the store cannot be decrypted with this key",
+            )
+        })?,
+        None => raw.clone(),
+    };
+    let (version, body) = unenvelope(&payload)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if version >= CURRENT_STORE_VERSION {
+        return Ok(Migration::UpToDate);
+    }
+    if parse_snapshot(body).is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the store payload is not a valid snapshot — the store was left untouched",
+        ));
+    }
+    let upgraded = envelope(body);
+    let new_raw = match key {
+        Some(k) => seal_with_key(upgraded, Some(k)).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?,
+        None => upgraded,
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "store".to_string());
+    let backup = path.with_file_name(format!("{name}.v{version}.bak"));
+    fs::write(&backup, &raw)?;
+    write_atomic(path, &new_raw)?;
+    Ok(Migration::Upgraded {
+        from: version,
+        to: CURRENT_STORE_VERSION,
+        backup,
+    })
+}
+
+/// Writes bytes to `path` atomically: a unique temp file, fsync, rename.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // A unique name per write: two threads of the same process would
     // otherwise share the temp path and interleave their writes.
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -274,7 +406,7 @@ pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> st
     {
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
-        f.write_all(&sealed)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)?;
@@ -286,6 +418,18 @@ pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> st
     Ok(())
 }
 
+/// Atomic save: write to `<path>.tmp` then rename.
+pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
+    save_with_key(path, st, env_key().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?)
+}
+
+/// Atomic save with an explicit key (does not read `SMP_STORE_KEY`).
+pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> std::io::Result<()> {
+    let payload = envelope(&snapshot_bytes(st));
+    let sealed = seal_with_key(payload, key).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    write_atomic(path, &sealed)
+}
+
 pub fn load(path: &Path) -> Option<ServerState> {
     load_with_key(path, env_key().ok().flatten())
 }
@@ -293,7 +437,21 @@ pub fn load(path: &Path) -> Option<ServerState> {
 /// Load with an explicit key (does not read `SMP_STORE_KEY`).
 pub fn load_with_key(path: &Path, key: Option<[u8; 32]>) -> Option<ServerState> {
     let buf = fs::read(path).ok()?;
-    parse_snapshot(&unseal_with_key(&buf, key)?)
+    let payload = unseal_with_key(&buf, key)?;
+    let (_version, body) = unenvelope(&payload).ok()?;
+    parse_snapshot(body)
+}
+
+/// The format version of a store file, without decrypting it.
+///
+/// `None` means the file is not a store of this format at all.
+pub fn store_version(path: &Path) -> Option<u32> {
+    let buf = fs::read(path).ok()?;
+    let payload = match unseal_with_key(&buf, None) {
+        Some(p) => p,
+        None => return None,
+    };
+    unenvelope(&payload).ok().map(|(v, _)| v)
 }
 
 pub fn default_store_path() -> PathBuf {
