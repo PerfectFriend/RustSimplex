@@ -447,10 +447,7 @@ pub fn load_with_key(path: &Path, key: Option<[u8; 32]>) -> Option<ServerState> 
 /// `None` means the file is not a store of this format at all.
 pub fn store_version(path: &Path) -> Option<u32> {
     let buf = fs::read(path).ok()?;
-    let payload = match unseal_with_key(&buf, None) {
-        Some(p) => p,
-        None => return None,
-    };
+    let payload = unseal_with_key(&buf, None)?;
     unenvelope(&payload).ok().map(|(v, _)| v)
 }
 
