@@ -27,7 +27,7 @@ sntrup761 0.4, uniffi (новый), cargo-audit / cargo-deny.
 | G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 70%, 75% |
 | G4 | sessionId ↔ TLS 1.3 Finished (реальный verify_data) | ROADMAP #1, `ПОСЛАНИЕ` #2 | `transport` | 90% |
 | G5 | Чистка `unwrap`/`expect` в `src/` (цель: 0 вне тестов) | `ПОСЛАНИЕ` #4 | весь `src/` | 2 остались |
-| G6 | PQDR: key rotation, reorder window, SUPERCOP KAT | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 80% |
+| G6 | PQDR: key rotation ✅, reorder window ✅, SUPERCOP KAT ⬜ | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 90% (остался KAT) |
 | G7 | Внешний аудит (3 зоны) | ROADMAP #6, `ПОСЛАНИЕ` #7 | проект | 0% |
 | G8 | Публикация v0.99.1 на crates.io + GitHub release | `README.md:49` | Packaging | 88% |
 | G9 | CI: ассерт, что дефолтная сборка не линкует probe-бины | `ПОСЛАНИЕ` (рекомендации) | CI | — |
