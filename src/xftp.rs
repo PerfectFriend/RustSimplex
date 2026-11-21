@@ -213,6 +213,24 @@ pub fn delete_file(c: &mut crate::client::Client, packet_id: &[u8], sender: &Ed2
 #[allow(dead_code)]
 fn _u(_r: &mut Reader) {}
 
+/// Read one full chunk, returning the number of bytes read (0 at EOF).
+///
+/// A short read is NOT treated as the end of the file: the chunk is completed
+/// first, so the chunk boundaries are identical in the digest scan and in the
+/// upload itself.
+fn read_chunk(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut got = 0usize;
+    while got < buf.len() {
+        let r = f.read(&mut buf[got..])?;
+        if r == 0 {
+            break;
+        }
+        got += r;
+    }
+    Ok(got)
+}
+
 /// Streaming upload from a file path — never holds the whole file in RAM.
 /// `progress(bytes_done, total_bytes)` is called after each FPUT.
 pub fn upload_file_stream(
@@ -222,7 +240,6 @@ pub fn upload_file_stream(
     mut progress: impl FnMut(u64, u64),
 ) -> Result<FileDesc, String> {
     use sha2::Digest;
-    use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let total = f.metadata().map_err(|e| e.to_string())?.len();
     let key = { let v = random_bytes(32); let mut k=[0u8;32]; k.copy_from_slice(&v); k };
@@ -230,17 +247,24 @@ pub fn upload_file_stream(
     let mut buf = vec![0u8; XFTP_CHUNK_PLAIN];
     let mut n = 0u32;
     let sender_spki = spki_ed25519(&sender.verifying.to_bytes());
-    // FNEW needs padded size + digest: pre-scan for digest (streaming, low RAM)
+    // FNEW needs the padded size + digest: pre-scan for the digest (streaming, low RAM).
+    // The scan must use the SAME chunk boundaries as the upload below — otherwise the
+    // chunk count and the digest would not describe the file that is uploaded.
     let mut f2 = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let rem = total as usize % XFTP_CHUNK_PLAIN;
     let mut scan = vec![0u8; XFTP_CHUNK_PLAIN];
     loop {
-        let r = f2.read(&mut scan).map_err(|e| e.to_string())?;
+        let r = read_chunk(&mut f2, &mut scan).map_err(|e| e.to_string())?;
         if r == 0 { break; }
         hasher.update(&scan[..r]);
         n += 1;
+        if r < XFTP_CHUNK_PLAIN {
+            // the last chunk is partial: the digest covers it zero-padded, and it is
+            // still ONE chunk — counting the padding as a chunk would inflate both
+            // the chunk count and the padded size
+            hasher.update(vec![0u8; XFTP_CHUNK_PLAIN - r]);
+            break;
+        }
     }
-    if rem != 0 { hasher.update(vec![0u8; XFTP_CHUNK_PLAIN - rem]); n += 1; }
     let digest = hasher.finalize();
     let mut digest_arr = [0u8; 32]; digest_arr.copy_from_slice(&digest);
     let padded_size = (n as usize) * XFTP_CHUNK_PLAIN;
@@ -249,9 +273,15 @@ pub fn upload_file_stream(
     let mut done = 0u64;
     let mut off = 0u32;
     loop {
-        let got = f.read(&mut buf).map_err(|e| e.to_string())?;
+        let got = read_chunk(&mut f, &mut buf).map_err(|e| e.to_string())?;
         if got == 0 { break; }
-        let chunk_plain = if got == XFTP_CHUNK_PLAIN { &buf[..] } else { &buf[..got] };
+        if got < XFTP_CHUNK_PLAIN {
+            // the last chunk is zero-padded: every chunk carries the same plaintext
+            // size, so the size and the digest describe the padded file — exactly
+            // what the buffered upload produces
+            buf[got..].fill(0);
+        }
+        let chunk_plain: &[u8] = &buf[..];
         let enc = { let nb = random_bytes(24); let mut nonce=[0u8;24]; nonce.copy_from_slice(&nb); let mut out = nb; out.extend_from_slice(&raw_secretbox_encrypt(&key, &nonce, chunk_plain)); out };
         let r = c.request(Command::Fput { packet_id: packet_id.clone(), offset: off, chunk: enc }, vec![], Some(sender)).map_err(|e| e.to_string())?;
         if !matches!(r[0], BrokerMsg::Ok) { return Err(format!("FPUT chunk {off} failed: {:?}", r[0])); }
