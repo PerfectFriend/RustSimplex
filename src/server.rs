@@ -889,12 +889,27 @@ impl Engine {
 
     /// Accept loop (blocking). Spawns a pump thread per connection.
     pub fn serve(&self) -> std::io::Result<()> {
-        for conn in self.listener.incoming() {
+        // The accept loop must notice `shutdown` *before* blocking in accept(),
+        // otherwise the flag never takes effect: `incoming()` parks in the
+        // kernel until a connection arrives, so a server with no clients can
+        // never be stopped. Poll a non-blocking listener instead, sleeping
+        // briefly between empty polls.
+        self.listener.set_nonblocking(true)?;
+        loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let tcp = match conn {
-                Ok(t) => t,
+            let tcp = match self.listener.accept() {
+                Ok((t, _peer)) => {
+                    // A non-blocking listener yields WouldBlock when idle; the
+                    // accepted socket must be switched back to blocking.
+                    t.set_nonblocking(false)?;
+                    t
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[engine] incoming: {e}");
                     continue;

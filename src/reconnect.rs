@@ -23,6 +23,44 @@ pub struct Endpoint {
     pub with_sni: bool,
 }
 
+/// The transport surface an SMP session needs.
+///
+/// Implemented by [`crate::client::Client`] (direct connection) and
+/// [`ReconnectingClient`] (transparent reconnect + retry). [`crate::agent::Agent`]
+/// is generic over this trait, so a long-lived agent session can be built on
+/// either — a plain connection for tests, a reconnecting one for production.
+pub trait SmpTransport {
+    /// Send a command and wait for the broker's reply.
+    fn request(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>>;
+    /// Send a command without waiting for a reply (fire-and-forget ACK path).
+    fn send_only(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<()>;
+    /// Read the next block of broker messages.
+    fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>>;
+    /// The TLS session id negotiated with the server.
+    /// `None` when there is no session yet (not connected, or plain TCP).
+    fn session_id(&self) -> Option<&[u8]>;
+    /// Enable strict (v23) encrypted blocks with the derived DH secret.
+    fn enable_strict(&mut self, dh_secret: &[u8; 32]);
+}
+
+impl SmpTransport for Client {
+    fn request(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
+        Client::request(self, cmd, entity_id, auth)
+    }
+    fn send_only(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<()> {
+        Client::send_only(self, cmd, entity_id, auth)
+    }
+    fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
+        Client::recv_block(self)
+    }
+    fn session_id(&self) -> Option<&[u8]> {
+        Some(Client::session_id(self))
+    }
+    fn enable_strict(&mut self, dh_secret: &[u8; 32]) {
+        Client::enable_strict(self, dh_secret)
+    }
+}
+
 pub struct ReconnectingClient {
     ep: Endpoint,
     inner: Option<Client>,
@@ -127,6 +165,24 @@ impl ReconnectingClient {
 
     pub fn session_id(&self) -> Option<&[u8]> {
         self.inner.as_ref().map(|c| c.session_id())
+    }
+}
+
+impl SmpTransport for ReconnectingClient {
+    fn request(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
+        ReconnectingClient::request(self, cmd, entity_id, auth)
+    }
+    fn send_only(&mut self, cmd: Command, entity_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<()> {
+        ReconnectingClient::send_only(self, cmd, entity_id, auth)
+    }
+    fn recv_block(&mut self) -> ClResult<Vec<BrokerMsg>> {
+        ReconnectingClient::recv_block(self)
+    }
+    fn session_id(&self) -> Option<&[u8]> {
+        ReconnectingClient::session_id(self)
+    }
+    fn enable_strict(&mut self, dh_secret: &[u8; 32]) {
+        ReconnectingClient::enable_strict(self, *dh_secret)
     }
 }
 

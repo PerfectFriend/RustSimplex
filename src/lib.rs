@@ -14,7 +14,6 @@ pub use sb_chain as blockchain;
 pub mod client;
 pub mod identity;
 pub mod agent;
-pub mod async_client;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod chat;

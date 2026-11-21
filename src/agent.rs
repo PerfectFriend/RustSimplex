@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
+use crate::reconnect::SmpTransport;
 use crate::crypto::*;
 use crate::encoding::*;
 use crate::protocol::*;
@@ -190,8 +191,8 @@ pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
 
 // ---------- duplex connection over SMP ----------
 
-pub struct Agent {
-    pub client: Client,
+pub struct Agent<T: SmpTransport = Client> {
+    pub client: T,
     pub rcv_auth: Ed25519Keypair,
     pub rcv_dh: X25519Keypair,
     pub rcv_id: Vec<u8>,
@@ -217,14 +218,14 @@ pub struct Agent {
     pub e2e: bool,
 }
 
-impl Agent {
+impl<T: SmpTransport> Agent<T> {
     fn dh_secret(&self) -> Result<[u8; 32], String> {
         let srv_raw = parse_spki(&self.srv_dh).map_err(|e| e.to_string())?.1;
         Ok(x25519_dh(&self.rcv_dh.secret, &x25519_public(srv_raw)))
     }
 
     /// Initiator: create a contact queue and produce a connection link.
-    pub fn create_contact(mut client: Client, host: &str, port: u16, key_hash: &[u8], profile: &str) -> Result<(Agent, String), String> {
+    pub fn create_contact(mut client: T, host: &str, port: u16, key_hash: &[u8], profile: &str) -> Result<(Agent<T>, String), String> {
         let rcv_auth = ed25519_keypair();
         let rcv_dh = x25519_keypair();
         let r = client
@@ -304,7 +305,7 @@ impl Agent {
     }
 
     /// Joiner: parse link, create reply queue, send "D" confirmation to the initiator.
-    pub fn join_contact(mut client: Client, link: &str) -> Result<Agent, String> {
+    pub fn join_contact(mut client: T, link: &str) -> Result<Agent<T>, String> {
         // smp://keyHash@host:port#rcv_id?snd=..&ci=..
         let rest = link.strip_prefix("smp://").ok_or("bad link scheme")?;
         let (kh_host, frag) = rest.split_once('#').ok_or("bad link frag")?;
