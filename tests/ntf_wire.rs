@@ -85,10 +85,6 @@ fn nmsg_wire_layout() {
 use smp_rs::crypto::{ed25519_keypair, ed25519_verify, spki_ed25519, spki_x25519};
 use smp_rs::ntf::*;
 
-fn hex_of(b: &[u8]) -> String {
-    hex::encode(b)
-}
-
 /// `authorized` bytes that are signed for an NTF command.
 ///
 /// Haskell `Protocol.hs:2347`: `tForAuth = smpEncode sessionId <> t'` where

@@ -30,3 +30,4 @@ pub mod store;
 pub mod transport;
 pub mod xftp;
 pub mod ntf;
+pub mod ntf_server;

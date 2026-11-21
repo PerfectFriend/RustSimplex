@@ -540,8 +540,11 @@ impl<S: Read + Write> NtfClient<S> {
     }
 
     /// Send one command and wait for its response.
+    ///
+    /// The correlation id is random (24 bytes), matching the SMP client
+    /// (`client.rs`: `random_bytes(24)`) and the Haskell `ChaChaDRG` source.
     pub fn request(&mut self, command: &NtfCommand, entity_id: &[u8], authenticator: &[u8]) -> Result<NtfResponse, String> {
-        let corr_id: Vec<u8> = (0u8..24).collect();
+        let corr_id = crate::crypto::random_bytes(24);
         self.request_with_corr(command, entity_id, authenticator, &corr_id)
     }
 
@@ -578,6 +581,86 @@ impl<S: Read + Write> NtfClient<S> {
     /// PING → PONG (unauthenticated, no entity id).
     pub fn ping(&mut self) -> Result<NtfResponse, String> {
         self.request(&NtfCommand::new(NtfCommandTag::Ping), &[], &[])
+    }
+
+    /// Register a new device token (`TNEW` → `IDTKN`).
+    ///
+    /// Haskell `Notifications/Client.hs:49-51`:
+    /// ```haskell
+    /// ntfRegisterToken c nm pKey newTkn =
+    ///   sendNtfCommand c nm (Just pKey) NoEntity (TNEW newTkn) >>= \case
+    ///     NRTknId tknId dhKey -> pure (tknId, dhKey)
+    /// ```
+    ///
+    /// * `token` — the device token to register;
+    /// * `verify_key` — the Ed25519 public auth key (SPKI DER) proving ownership of the token;
+    /// * `dh_pub_key` — the X25519 public key (SPKI DER) for the notification channel.
+    ///
+    /// The command is signed with `signing_key` over the `authorized` bytes
+    /// (`sessionId || corrId || entityId || command`); `TNEW` uses an empty entity id.
+    /// Returns the assigned token id and the server's DH public key (SPKI DER).
+    pub fn new_token(
+        &mut self,
+        token: &[u8],
+        verify_key: &[u8],
+        dh_pub_key: &[u8],
+        signing_key: &SigningKey,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let command = build_tnew(token, verify_key, dh_pub_key)?;
+        let corr_id = crate::crypto::random_bytes(24);
+        // TNEW uses sigNoEntity => the entity id is empty (Notifications/Protocol.hs:248).
+        let sig = sign_ntf_command(&self.session_id, &corr_id, &[], &command, signing_key);
+        let resp = self.request_with_corr(&NtfCommand::with_payload(NtfCommandTag::Tnew, command[5..].to_vec()), &[], &sig, &corr_id)?;
+        match resp.tag {
+            NtfResponseTag::IdTkn => {
+                // Haskell: `e (NRTknId_, ' ', entId, dhKey)` — both fields are ByteStrings.
+                let mut r = Reader::new(&resp.payload);
+                let ent_id = r.short().map_err(|e| e.to_string())?;
+                let dh_key = r.short().map_err(|e| e.to_string())?;
+                Ok((ent_id, dh_key))
+            }
+            NtfResponseTag::Err => Err(format!("NTF TNEW failed: {}", String::from_utf8_lossy(&resp.payload))),
+            other => Err(format!("unexpected NTF response to TNEW: {other:?}")),
+        }
+    }
+
+    /// Create a new SMP subscription (`SNEW` → `IDSUB`).
+    ///
+    /// Haskell `Notifications/Client.hs:74-76`:
+    /// ```haskell
+    /// ntfCreateSubscription c pKey newSub =
+    ///   sendNtfCommand c NRMBackground (Just pKey) NoEntity (SNEW newSub) >>= \case
+    ///     NRSubId subId -> pure subId
+    /// ```
+    ///
+    /// * `tkn_id` — the notification token id the subscription belongs to;
+    /// * `smp_server` — the SMP server address of the subscription;
+    /// * `notifier_id` — the notifier (queue) id of the subscription;
+    /// * `notifier_key` — the Ed25519 public auth key of the notifier (SPKI DER).
+    ///
+    /// Returns the assigned subscription id.
+    pub fn new_subscription(
+        &mut self,
+        tkn_id: &[u8],
+        smp_server: &[u8],
+        notifier_id: &[u8],
+        notifier_key: &[u8],
+        signing_key: &SigningKey,
+    ) -> Result<Vec<u8>, String> {
+        let command = build_snew(tkn_id, smp_server, notifier_id, notifier_key)?;
+        let corr_id = crate::crypto::random_bytes(24);
+        // SNEW uses sigNoEntity => the entity id is empty (Notifications/Protocol.hs:249).
+        let sig = sign_ntf_command(&self.session_id, &corr_id, &[], &command, signing_key);
+        let resp = self.request_with_corr(&NtfCommand::with_payload(NtfCommandTag::Snew, command[5..].to_vec()), &[], &sig, &corr_id)?;
+        match resp.tag {
+            NtfResponseTag::IdSub => {
+                // Haskell: `e (NRSubId_, ' ', entId)`.
+                let mut r = Reader::new(&resp.payload);
+                r.short().map_err(|e| e.to_string())
+            }
+            NtfResponseTag::Err => Err(format!("NTF SNEW failed: {}", String::from_utf8_lossy(&resp.payload))),
+            other => Err(format!("unexpected NTF response to SNEW: {other:?}")),
+        }
     }
 
     fn read_block(&mut self) -> Result<Vec<u8>, String> {
