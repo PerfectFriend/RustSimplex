@@ -221,7 +221,19 @@ required for `TNEW` to be accepted, so this gate cannot be closed against the pu
 **Recommendation:** publish **v0.99.1 as a library release** (crates.io + GitHub tag `v0.99.1`) for
 closed-beta integrators — the package builds and verifies locally, the public API is exercised live
 against `ntf2.simplex.im` and `xftp1.simplex.im`, every probe is CA-pinned, and the release pipeline is
-ready to run. Gate **v1.0** on: the signed NTF command round-trip (`SNEW→IDSUB`) and
+ready to run. The crate name `smp-rs` is still free on crates.io (404), so this is the first
+publication and the version number is unconstrained by history.
+
+**Release checklist (the exact steps to cut v0.99.1):**
+1. Configure the `CARGO_REGISTRY_TOKEN` secret in the repository settings (crates.io → account →
+   API tokens → publish token for the `smp-rs` crate).
+2. `git tag v0.99.1 && git push origin v0.99.1` — the workflow verifies the tag against
+   `Cargo.toml` (`0.99.1`), runs the tests, clippy and `cargo package`, appends the changelog and
+   publishes.
+3. Verify the result: `cargo info smp-rs` shows the new version, the GitHub release page exists, and
+   `cargo add smp-rs@0.99.1` resolves in a scratch project.
+
+Gate **v1.0** on: the signed NTF command round-trip (`SNEW→IDSUB`, spec in §4) and
 reproducible-release-build attestation (SBOM/provenance).
 
 ---
