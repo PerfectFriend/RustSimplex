@@ -50,7 +50,7 @@
 | **W1** ✅ | `async_client` удалён, `reconnect` подключён через трейт `SmpTransport`, shutdown-флаг сервера починен | G3 (частично) |
 | **W2** | **NTF подписанные команды** `TNEW`/`SNEW` + локальный NTF-сервер для e2e | G1 |
 | **W3** | `Client::onion_send`, 3+ хопов, sessionId ↔ TLS 1.3 Finished, live XFTP 1 MiB, `upload_file_stream` | G2, G4, G11 |
-| **W4** | Настоящий async-клиент, backoff-цикл для мобильного | G3 |
+| **W4** ✅ | Настоящий async-клиент (`tokio`+`tokio-rustls`), backoff-цикл для мобильного | G3 (частично) |
 | **W5** | `crate-type = cdylib` → uniffi → Kotlin smoke-test | G10 |
 | **W6** | SUPERCOP KAT для sntrup761, key rotation + reorder window, multi-process locking в store, миграции store | G6, G11 |
 | **W7** | CI-ассерт на probe-бины, регенерация `AUDIT-REPORT.md`, внешний аудит, `cargo publish`, SBOM, финальный аудит | G7, G8, G9, G12 |
@@ -59,9 +59,10 @@
 
 ## Caveats
 - Probe bins (`smp-v71`, `xftp-h2-v71`, `ntf-probe`) — за feature-флагом `v71-probes`, не для production.
-- `src/async_client.rs` удалён (спринт W1): фасад над *синхронным* клиентом через
-  `spawn_blocking`, ни одного вызывающего. Настоящий async-клиент с auto-reconnect —
-  задача W4.
+- `src/async_client.rs` (спринт W4): настоящий async-клиент на `tokio::net::TcpStream` +
+  `tokio-rustls` — TLS 1.3, пинning по keyHash, strict v23 блоки, никакого `spawn_blocking`
+  над синхронным клиентом. Фасад из W1 удалён. Остаток G3: у async-клиента пока нет
+  собственного auto-reconnect-цикла (backoff живёт в синхронном `ReconnectingClient`).
 - `src/reconnect.rs` подключён (спринт W1): `Agent` обобщён над трейтом `SmpTransport`,
   `ReconnectingClient` реализует его; покрыт `tests/reconnect_e2e.rs`.
 - Публичные релеи отключили SMP proxy серверной стороне: живая попытка PRXY возвращает
@@ -100,3 +101,42 @@ Linux: принятый сокет наследует `O_NONBLOCK` от listener
 Верификация выполняется в чистом target-директории.
 
 **Прогон:** 95 тестов, 0 падений; 3 прогона подряд — без флаков.
+
+### W4 — Real async client + backoff cycle (2026-11-21)
+
+| Task | Result | Proof |
+|---|---|---|
+| W4.1 Реальный async-клиент (`tokio` + `tokio-rustls`) | ✅ | `tests/async_client.rs` (8 тестов) |
+| W4.2 Backoff-цикл (экспонента, потолок, наблюдаемость) | ✅ | `tests/reconnect_backoff.rs` (5 тестов) |
+
+**W4.1:** `src/async_client.rs` переписан с нуля. Прежний модуль был фасадом —
+он оборачивал *синхронный* клиент в `spawn_blocking`, то есть обещал async и не
+выполнял обещание. Теперь весь I/O асинхронный: `tokio::net::TcpStream` +
+`tokio-rustls` (TLS 1.3), SMP-хендшейк, покадровая разметка блоков и strict v23
+шифрование блоков — всё awaited. Протокольный и крипто-слой общие с синхронным
+клиентом, поэтому два клиента не могут разойтись на проводе.
+
+Покрыто: plain-хендшейк + PING/PONG, TLS 1.3 + PING/PONG с 32-байтовым channel
+binding, отказ при чужом keyHash (пиннинг), два одновременных клиента, strict v23
+блоки через async-транспорт и проверка, что pending-connect **не блокирует**
+рантайм tokio (это и есть доказательство, что клиент настоящий async, а не facade).
+
+Инвариант `tests/public_api.rs` инвертирован: W1 требовал, чтобы `pub mod
+async_client` НЕ существовал (модуль был мёртвым facade'ом); W4 закрепляет
+обратное — модуль существует, вызывается из тестов и не содержит
+`spawn_blocking`.
+
+**W4.2:** backoff стал наблюдаемым и настраиваемым: `ReconnectingClient::with_backoff`
+задаёт базу и потолок, `backoff_for(attempt)` считает `base * 2^attempt` с
+насыщением (переполнение и `u32::MAX` дают потолок, а не панику), а
+`applied_backoffs()/backoff_count()/total_backoff()` показывают, что реально
+применилось. Политика принадлежит клиенту, а не окружению: два клиента в одном
+процессе не могут изменить поведение друг друга.
+
+**Найдено по ходу (не в плане):** тестовый сервер с non-blocking listener отдавал
+принятому сокетам `O_NONBLOCK` (на Linux accepted socket наследует флаг
+listener'а) — серверный read-path получал EAGAIN. Ровно та же ловушка, что описана
+в W1.4; лечится `set_nonblocking(false)` на принятом сокете.
+
+**Прогон:** 129 тестов, 0 падений; `cargo clippy --offline --all-targets` — 0
+предупреждений; `scripts/check_no_unwrap.sh` — OK.

@@ -24,7 +24,7 @@ sntrup761 0.4, uniffi (новый), cargo-audit / cargo-deny.
 |---|---|---|---|---:|
 | G1 | Подписанные NTF-команды `TNEW`/`SNEW` (Ed25519-авторизация) | `README.md:64`, ROADMAP #2 | `ntf` | 60% |
 | G2 | Onion routing поверх SMP proxy — **stated platform goal** | ROADMAP #4, `ПОСЛАНИЕ` #1 | `onion` | 80% |
-| G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 35%, 40% |
+| G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 70%, 75% |
 | G4 | sessionId ↔ TLS 1.3 Finished (реальный verify_data) | ROADMAP #1, `ПОСЛАНИЕ` #2 | `transport` | 90% |
 | G5 | Чистка `unwrap`/`expect` в `src/` (цель: 0 вне тестов) | `ПОСЛАНИЕ` #4 | весь `src/` | 2 остались |
 | G6 | PQDR: key rotation, reorder window, SUPERCOP KAT | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 80% |
