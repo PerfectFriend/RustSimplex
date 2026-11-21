@@ -58,6 +58,45 @@ pub fn open_proxy_session(dest_host: &str, dest_port: u16, dest_key_hash: &[u8])
     Ok(ProxyConn { stream, sess_secret, dest_session_id: dest_sid, dest_session_pub: dest_pub, v_min, v_max })
 }
 
+/// Error code returned when a forwarded payload carries more than one
+/// transaction. Haskell uses the `BLOCK` error type for this case.
+pub const FORWARD_BLOCK_ERR: &str = "BLOCK: only single forwarded transactions allowed";
+
+/// Enforce the Haskell rule that a forwarded transaction carries exactly ONE
+/// transmission ("only allowing single forwarded transactions",
+/// `Simplex/Messaging/Server.hs:2134`).
+///
+/// The reference implementation parses the forwarded payload as a non-empty list
+/// of transmissions and accepts it only when the list has a single element
+/// (`t :| []`); anything else is a `BLOCK`. Without this rule a peer could smuggle
+/// several commands through one forwarded transaction and get them dispatched
+/// atomically, which is exactly the smuggling the reference implementation
+/// refuses.
+///
+/// The one documented extension is this crate's onion nesting, which sends
+/// exactly two transmissions — a `[PRXY, PFWD]` pair dispatched atomically so
+/// that the inner PFWD can use the proxy session the PRXY just opened. Any other
+/// combination of two or more transmissions is rejected.
+pub fn check_forwarded_transmissions(wires: &[Vec<u8>]) -> Result<(), &'static str> {
+    match wires.len() {
+        0 => Err(FORWARD_BLOCK_ERR),
+        1 => Ok(()),
+        2 => {
+            let tags: Vec<String> = wires
+                .iter()
+                .filter_map(|w| decode_transmission(w).ok())
+                .map(|t| crate::protocol::tag_of(&t.command))
+                .collect();
+            if tags.len() == 2 && tags[0] == "PRXY" && tags[1] == "PFWD" {
+                Ok(())
+            } else {
+                Err(FORWARD_BLOCK_ERR)
+            }
+        }
+        _ => Err(FORWARD_BLOCK_ERR),
+    }
+}
+
 /// Proxy router: handle PFWD — wrap the client-encrypted transmission into RFWD and relay.
 /// Returns the client-encrypted response (PRES payload).
 pub fn relay_pfwd(conn: &Arc<Mutex<ProxyConn>>, pfwd_corr: &[u8], version: u16, command_key: &[u8], client_enc: &[u8]) -> Result<Vec<u8>, String> {
@@ -138,11 +177,33 @@ pub fn handle_rfwd(
     };
     if std::env::var_os("SMP_DEBUG").is_some() { eprintln!("[rfwd] content_len={} wires={} tags={:?}", content.len(), wires.len(), wires.iter().map(|w| crate::protocol::tag_of(w).chars().take(8).collect::<String>()).collect::<Vec<_>>()); }
     let mut resp_wires: Vec<Vec<u8>> = Vec::new();
-    for w in &wires {
-        let t = decode_transmission(w).map_err(|e| e.to_string())?;
-        let responses = dispatch(&t);
-        for resp in &responses {
-            resp_wires.push(encode_transmission(resp).map_err(|e| e.to_string())?);
+    match check_forwarded_transmissions(&wires) {
+        Ok(()) => {
+            for w in &wires {
+                let t = decode_transmission(w).map_err(|e| e.to_string())?;
+                let responses = dispatch(&t);
+                for resp in &responses {
+                    resp_wires.push(encode_transmission(resp).map_err(|e| e.to_string())?);
+                }
+            }
+        }
+        Err(code) => {
+            // Haskell `processForwardedCommand` maps a rejection to
+            // `either (Just . ERR) id`: the error travels INSIDE the forwarded
+            // response, so the client gets a well-formed RRES carrying ERR BLOCK
+            // rather than a transport-level failure.
+            let corr = wires
+                .first()
+                .and_then(|w| decode_transmission(w).ok())
+                .map(|t| t.corr_id)
+                .unwrap_or_default();
+            let err_t = Transmission {
+                authenticator: Vec::new(),
+                corr_id: corr,
+                entity_id: Vec::new(),
+                command: format!("ERR {code}").into_bytes(),
+            };
+            resp_wires.push(encode_transmission(&err_t).map_err(|e| e.to_string())?);
         }
     }
     // single response: raw transmission (legacy single-hop); multiple: block content

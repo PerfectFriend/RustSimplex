@@ -53,6 +53,33 @@ pub fn onion_request(
         return Err("onion_request: at least one hop required".into());
     }
     let mut entry = Client::connect_plain(hops[0].addr, &[0u8; 32])?;
+    onion_request_with(
+        &mut entry,
+        hops,
+        dest,
+        dest_pub,
+        cmd,
+        entity,
+        auth_kp,
+    )
+}
+
+/// Core of the onion request: uses an ALREADY OPEN connection to the first hop.
+///
+/// The caller owns the entry connection, so the chain can be sent over a
+/// connection that has already been authenticated, pinned or proxied.
+pub fn onion_request_with(
+    entry: &mut Client,
+    hops: &[OnionHop],
+    dest: SocketAddr,
+    dest_pub: [u8; 32],
+    cmd: Command,
+    entity: Vec<u8>,
+    auth_kp: Option<&Ed25519Keypair>,
+) -> Result<Vec<BrokerMsg>, String> {
+    if hops.is_empty() {
+        return Err("onion_request: at least one hop required".into());
+    }
 
     // innermost wire: the real transmission to the destination
     let mut t_d = Transmission {

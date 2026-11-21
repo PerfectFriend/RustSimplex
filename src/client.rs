@@ -219,6 +219,45 @@ impl Client {
         &self.session_id
     }
 
+    /// Send a command to `dest` through the onion chain `hops`, reusing THIS
+    /// connection as the entry point into the first hop.
+    ///
+    /// The connection must already be established to `hops[0]`: the outermost
+    /// onion layer is keyed with that hop's server public key, so a connection
+    /// to any other peer would produce an unroutable chain. The mismatch is
+    /// detected here and reported instead of failing later as a decrypt error.
+    ///
+    /// `dest` carries both the destination address and its server public key.
+    pub fn onion_send(
+        &mut self,
+        hops: &[crate::onion::OnionHop],
+        dest: &crate::onion::OnionHop,
+        cmd: crate::protocol::Command,
+        entity: Vec<u8>,
+        auth_kp: Option<&crate::crypto::Ed25519Keypair>,
+    ) -> Result<Vec<crate::protocol::BrokerMsg>, String> {
+        let first = hops
+            .first()
+            .ok_or_else(|| "onion_send: at least one hop required".to_string())?;
+        match self.server_eph_pub {
+            Some(pub_key) if pub_key == first.server_pub => {}
+            _ => {
+                return Err(
+                    "onion_send: the client connection is not to the first hop".to_string()
+                )
+            }
+        }
+        crate::onion::onion_request_with(
+            self,
+            hops,
+            dest.addr,
+            dest.server_pub,
+            cmd,
+            entity,
+            auth_kp,
+        )
+    }
+
     /// Write one raw 16384-byte block (used by onion routing to send a nested [Proxy, Pfwd] block).
     pub fn write_raw_block(&mut self, block: &[u8]) -> ClResult<()> {
         crate::transport::write_block(&mut self.stream, block).map_err(map_e)
