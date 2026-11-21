@@ -17,6 +17,23 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bind = arg(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5223".into());
     let store = arg(&args, "--store").map(std::path::PathBuf::from);
+    // Single-instance guard: the store is a whole-file snapshot, so two
+    // relays on one store would overwrite each other's queues. The lock is
+    // held for the lifetime of the process.
+    let _store_lock = match &store {
+        Some(p) => match smp_rs::store::try_lock_store(p) {
+            Ok(Some(l)) => Some(l),
+            Ok(None) => {
+                eprintln!("[smp-server] store {} is locked by another process", p.display());
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("[smp-server] cannot lock store {}: {e}", p.display());
+                exit(1);
+            }
+        },
+        None => None,
+    };
     match arg(&args, "--tls") {
         Some(host) => match Engine::bind_tls_store(&bind, &host, store) {
             Ok(e) => {

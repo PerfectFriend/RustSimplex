@@ -537,13 +537,24 @@ proxy невозможна. Зафиксировать это как прове�
 **Step 3:** Обновить `docs/SECURITY.md` — снять «не проверено» со строки proxy.
 **Step 4:** Commit.
 
-### Task 6.4: Гонка store → multi-process locking
+### Task 6.4: Гонка store → multi-process locking — ✅ DONE
 
-**Files:** Modify `src/store.rs`; Test: `tests/persist.rs`
+**Files:** Modify `src/store.rs`, `src/bin/smp_server.rs`; Test: `tests/persist.rs`
 
-**Step 1:** Падающий тест: два процесса пишут в один файл → без блокировки теряется запись.
-**Step 2:** FAIL. **Step 3:** Ввести advisory lock (flock на Unix) + атомарный rename.
-**Step 4:** PASS. **Step 5:** Commit.
+**Итог:**
+- `store::StoreLock` + `lock_store`/`try_lock_store` — advisory lock (`fs2`: flock на
+  Unix, LockFileEx на Windows) на отдельном файле `<store>.lock` (не на самом store:
+  store заменяется rename'ом → новый inode, лок на старом не защищает новый ✓);
+- `store::update_store(path, key, f)` — атомарный read-modify-write: лок держится
+  на время load → мутация → save;
+- `smp-server` берёт лок на весь процесс → второй релей на том же store падает
+  сразу с внятной ошибкой, а не молча затирает очереди;
+- имя временного файла теперь уникально на запись (pid + счётчик) — два потока
+  одного процесса больше не пишут в один temp;
+- тесты `tests/persist.rs` (3 новых): два РЕАЛЬНЫХ дочерних процесса, запуск через
+  re-exec тест-бинаря, барьер (ready/go) чтобы гонка была детерминированной:
+  без лока — теряется одна из двух очередей (ожидаемый FAIL-эквивалент),
+  с локом — обе очереди на месте; плюс проверка, что лок не выдаётся дважды.
 
 ### Task 6.5: Миграции версий store с rollback (рекомендация `ПОСЛАНИЕ`)
 

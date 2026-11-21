@@ -1,6 +1,6 @@
 //! Persistence: queues + pending messages survive an engine restart when a store path is set.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use smp_rs::client::Client;
 use smp_rs::crypto::*;
@@ -126,4 +126,171 @@ fn v0_20_wrong_key_rejected_and_legacy_plaintext_loads() {
     let p2 = scratch_file("test-smp-legacy.bin");
     std::fs::write(&p2, store::snapshot_bytes(&st)).unwrap();
     assert!(store::load_with_key(&p2, None).is_some(), "legacy plaintext snapshot must load");
+}
+
+// --- Task 6.4: multi-process locking of the store ----------------------------
+
+/// A scratch store path unique to this process and call.
+fn scratch_store(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let p = std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()));
+    let _ = std::fs::remove_file(&p);
+    p
+}
+
+/// A minimal queue that survives a snapshot round trip.
+fn test_queue(rcv_id: Vec<u8>) -> smp_rs::server::Queue {
+    smp_rs::server::Queue {
+        snd_id: rcv_id.clone(),
+        rcv_auth_raw: [0u8; 32],
+        rcv_auth_x: false,
+        snd_auth: None,
+        rcv_dh_secret: [0u8; 32],
+        messages: std::collections::VecDeque::new(),
+        subscriber: None,
+        ntf_id: None,
+        ntf_auth_raw: None,
+        rcv_ntf_dh_secret: None,
+        ntf_subscriber: None,
+        rcv_id,
+    }
+}
+
+/// Spawns this test binary again as a child that performs one store cycle.
+///
+/// The child waits at a barrier (a "ready" file per child, released by a
+/// "go" file) so that both children read the state BEFORE either writes it —
+/// otherwise the race under test would be a coin flip.
+fn spawn_store_child(
+    path: &Path,
+    marker: &[u8],
+    use_lock: bool,
+    ready: &Path,
+    go: &Path,
+) -> std::process::Child {
+    let spec = format!(
+        "{}|{}|{}|{}|{}",
+        path.display(),
+        hex::encode(marker),
+        if use_lock { "1" } else { "0" },
+        ready.display(),
+        go.display()
+    );
+    std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "store_lock_child", "--ignored", "--nocapture"])
+        .env("SMP_STORE_CHILD", spec)
+        .spawn()
+        .expect("spawn child")
+}
+
+/// The child worker: one read-modify-write cycle of the store.
+#[test]
+#[ignore]
+fn store_lock_child() {
+    let Ok(spec) = std::env::var("SMP_STORE_CHILD") else {
+        return; // not spawned by the parent — nothing to do
+    };
+    let mut parts = spec.split('|');
+    let path = PathBuf::from(parts.next().expect("path"));
+    let marker = hex::decode(parts.next().expect("marker")).expect("marker hex");
+    let use_lock = parts.next().unwrap_or("0") == "1";
+    let ready = PathBuf::from(parts.next().expect("ready"));
+    let go = PathBuf::from(parts.next().expect("go"));
+
+    if use_lock {
+        // the whole cycle under the store lock
+        std::fs::write(&ready, b"1").expect("ready marker");
+        wait_for(&go);
+        store::update_store(&path, None, |st| {
+            st.by_rcv.insert(marker.clone(), test_queue(marker.clone()));
+        })
+        .expect("update_store");
+    } else {
+        let mut st = store::load(&path).unwrap_or_default();
+        std::fs::write(&ready, b"1").expect("ready marker");
+        wait_for(&go);
+        st.by_rcv.insert(marker.clone(), test_queue(marker.clone()));
+        store::save(&path, &st).expect("save");
+    }
+}
+
+fn wait_for(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !path.exists() {
+        assert!(std::time::Instant::now() < deadline, "barrier timeout: {path:?}");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// Runs two store-writing child processes against one store file.
+///
+/// With `use_lock` the children serialize their read-modify-write cycle
+/// through the advisory store lock; without it they overwrite each other.
+fn two_children_race(path: &Path, use_lock: bool) {
+    let ready_dir = path.with_extension("ready");
+    std::fs::create_dir_all(&ready_dir).expect("ready dir");
+    let go = path.with_extension("go");
+    let _ = std::fs::remove_file(&go);
+    let markers: [&[u8]; 2] = [b"queue-a", b"queue-b"];
+
+    let mut kids = Vec::new();
+    for m in markers {
+        let ready = ready_dir.join(hex::encode(m));
+        kids.push(spawn_store_child(path, m, use_lock, &ready, &go));
+    }
+    // wait until both children have read the state
+    for m in markers {
+        wait_for(&ready_dir.join(hex::encode(m)));
+    }
+    // release them
+    std::fs::write(&go, b"1").expect("go marker");
+
+    for k in &mut kids {
+        let status = k.wait().expect("child wait");
+        assert!(status.success(), "child failed: {status}");
+    }
+}
+
+#[test]
+fn two_processes_without_the_lock_lose_an_update() {
+    let path = scratch_store("store-race-nolock");
+    store::save(&path, &smp_rs::server::ServerState::default()).expect("seed store");
+    two_children_race(&path, false);
+    let st = store::load(&path).expect("load store");
+    assert_eq!(
+        st.by_rcv.len(),
+        1,
+        "without the lock the second writer overwrites the first one's queue"
+    );
+}
+
+#[test]
+fn two_processes_with_the_lock_keep_both_updates() {
+    let path = scratch_store("store-race-lock");
+    store::save(&path, &smp_rs::server::ServerState::default()).expect("seed store");
+    two_children_race(&path, true);
+    let st = store::load(&path).expect("load store");
+    assert_eq!(
+        st.by_rcv.len(),
+        2,
+        "with the lock both updates must survive"
+    );
+}
+
+#[test]
+fn a_second_lock_holder_is_refused_while_the_first_holds_it() {
+    let path = scratch_store("store-lock-refused");
+    let held = store::lock_store(&path).expect("lock");
+    assert!(
+        store::try_lock_store(&path).expect("try lock").is_none(),
+        "the store lock must not be handed out twice"
+    );
+    drop(held);
+    assert!(
+        store::try_lock_store(&path).expect("try lock").is_some(),
+        "the lock must be available again once released"
+    );
 }

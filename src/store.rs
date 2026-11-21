@@ -13,6 +13,9 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use fs2::FileExt;
 
 use crate::crypto::{random_bytes, secretbox_decrypt, secretbox_encrypt};
 use crate::server::{Queue, ServerState};
@@ -259,7 +262,15 @@ pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
 /// Atomic save with an explicit key (does not read `SMP_STORE_KEY`).
 pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> std::io::Result<()> {
     let sealed = seal_with_key(snapshot_bytes(st), key).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    // A unique name per write: two threads of the same process would
+    // otherwise share the temp path and interleave their writes.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "store".to_string());
+    let tmp = path.with_file_name(format!(".{name}.tmp{}-{seq}", std::process::id()));
     {
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
@@ -287,4 +298,102 @@ pub fn load_with_key(path: &Path, key: Option<[u8; 32]>) -> Option<ServerState> 
 
 pub fn default_store_path() -> PathBuf {
     PathBuf::from(std::env::var("SMP_STORE").unwrap_or_else(|_| "smp-queues.bin".to_string()))
+}
+
+/// Path of the lock file that guards `path`.
+///
+/// The lock lives in its own file, NOT in the store file: the store is
+/// replaced by rename, which installs a NEW inode — a lock held on the old
+/// inode would not protect the new file.
+pub fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// Exclusive advisory lock over a store file.
+///
+/// The store is a whole-file snapshot, so a writer that read the state before
+/// another writer saved will silently drop the other writer's queues. Holding
+/// this lock across the load-mutate-save cycle closes that window.
+///
+/// The lock is released when the guard is dropped (or the process exits).
+pub struct StoreLock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl StoreLock {
+    /// The lock file behind this lock.
+    pub fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        // the fs2 trait method, not std's inherent File::unlock (Rust 1.89+;
+        // the crate's MSRV is 1.87)
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn open_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    let lp = lock_path(path);
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(lp)
+}
+
+/// Take the exclusive store lock, waiting for a concurrent holder.
+///
+/// Use this around a load-mutate-save cycle; see [`update_store`].
+pub fn lock_store(path: &Path) -> std::io::Result<StoreLock> {
+    let file = open_lock_file(path)?;
+    file.lock_exclusive()?;
+    Ok(StoreLock {
+        file,
+        path: lock_path(path),
+    })
+}
+
+/// Take the exclusive store lock without waiting.
+///
+/// `Ok(None)` means another process holds it — the caller decides whether that
+/// is an error (a second relay on the same store) or a normal condition.
+pub fn try_lock_store(path: &Path) -> std::io::Result<Option<StoreLock>> {
+    let file = open_lock_file(path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(StoreLock {
+            file,
+            path: lock_path(path),
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomic read-modify-write of the store, safe across processes.
+///
+/// The lock is held while the state is loaded, while `f` mutates it and while
+/// the result is written, so a concurrent writer cannot lose its update (and
+/// cannot interleave with ours).
+///
+/// `f` receives the current state; a missing store is an empty state.
+pub fn update_store<F>(path: &Path, key: Option<[u8; 32]>, f: F) -> std::io::Result<()>
+where
+    F: FnOnce(&mut ServerState),
+{
+    let _lock = lock_store(path)?;
+    let mut st = load_with_key(path, key).unwrap_or_default();
+    f(&mut st);
+    save_with_key(path, &st, key)
 }

@@ -73,6 +73,8 @@ sha2 = "0.10"
 hkdf = "0.12"
 rand = "0.8"
 hex = "0.4"
+# Advisory store locking (flock/LockFileEx) for multi-process store access.
+fs2 = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std"] }
 rustls-webpki = "0.103"
 rcgen = "0.14"
