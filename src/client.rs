@@ -13,9 +13,12 @@ pub type ClResult<T> = Result<T, String>;
 /// Channel binding (spec appendix A): client asserts sessionIdentifier == tls-unique.
 /// TLS 1.3 has empty tls-unique (RFC 5929) and plain TCP uses "" — so sessionId must be empty.
 pub fn check_session_binding(sid: &[u8]) -> ClResult<()> {
-    // v0.26: TLS 1.3 sessionId = client Finished verify_data (32B); plain TCP may be empty.
+    // v0.26: in TLS mode the sessionId is a TLS channel binding; plain TCP may be empty.
+    // The upstream binding is the TLS 1.3 Finished verify_data, whose length is the
+    // negotiated suite's hash length: 32 bytes for SHA-256, 48 for SHA-384. The
+    // rustls exporter binding is always 32 bytes.
     // Length is enforced here; equality with the live TLS binding is verify_channel_binding().
-    if !(sid.is_empty() || sid.len() == 32) {
+    if !(sid.is_empty() || sid.len() == 32 || sid.len() == 48) {
         return Err("bad session id length".into());
     }
     Ok(())

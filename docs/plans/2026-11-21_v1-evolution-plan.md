@@ -385,6 +385,23 @@ finished-ключей; если нет — реализовать через `ru
 **Step 4:** PASS.
 **Step 5:** Commit `git commit -m "feat(transport): bind sessionId to TLS 1.3 finished keys"`.
 
+> **Ruling (Task 3.3, реализовано 2026-11-21).** Premise of the step was wrong for rustls:
+> the RFC 8446 exporter has **no** label that reproduces the TLS 1.3 Finished verify_data, and
+> rustls 0.23 does not expose the Finished at all (it exists only inside the handshake state
+> machine — verified in the vendored `rustls-0.23` source). Upstream's `tlsUnique` is the **raw**
+> Finished bytes, not an exporter output. So:
+> * `SessionIdBinding` makes the choice explicit: `Exporter` (rustls, 32 B, symmetric,
+>   transcript-bound, but NOT byte-equal to upstream) or `Finished` (raw verify_data, upstream
+>   byte-compatible — reachable only on stacks that expose it, i.e. openssl);
+> * `derive_session_id` never falls back silently: a missing/malformed Finished is an error;
+> * the Finished length is the negotiated suite's hash length — **32 B (SHA-256) or 48 B
+>   (SHA-384)** — and upstream carries it verbatim, so the length is not normalised.
+>   The live public relay confirmed this: `xftp1.simplex.im` presents a **48-byte** sessionId.
+>   `check_session_binding` therefore accepts 32 and 48 bytes (empty = plain TCP).
+> * Evidence: `tests/tls_finished_binding.rs` (feature `v71-probes`) proves with openssl on both
+>   ends that the client's own Finished == the server's `peer_finished` (the upstream property),
+>   and that the rustls server's session id != the TLS Finished (the deviation, pinned).
+
 ### Task 3.4: Live XFTP chunked >64KB (G11)
 
 **Objective:** `ПОСЛАНИЕ` просит добавить chunked >64KB round-trip в live-набор; сейчас 64KB.

@@ -389,6 +389,87 @@ pub fn connect_tls_sni_alpn_noverify(addr: SocketAddr, host: &str, with_sni: boo
     Ok(Box::new(stream))
 }
 
+/// How the SMP session id is bound to the TLS session.
+///
+/// Upstream (simplexmq on hs-tls) binds it to the TLS 1.3 Finished verify_data:
+/// the server sets `sessionId = getPeerFinished` (the CLIENT's Finished) and the
+/// client aborts unless the server's session id equals its own `getFinished`.
+///
+/// rustls 0.23 cannot reproduce that value: the Finished exists only inside the
+/// handshake state machine, and RFC 8446's exporter has no label that derives
+/// it. The rustls path therefore binds the session id to the exporter output
+/// instead — the same 32-byte, symmetric, transcript-bound property, but not
+/// byte-equal to upstream's `tlsUnique`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIdBinding {
+    /// RFC 8446 exporter output with a local label (rustls).
+    Exporter,
+    /// The raw TLS 1.3 Finished verify_data (upstream-compatible).
+    Finished,
+}
+
+/// Derive the SMP session id from the TLS session.
+///
+/// A `Finished` binding never falls back to the exporter: if the stack did not
+/// expose the Finished, or exposed a malformed one, this is an error. A silent
+/// fallback would break the upstream contract with no visible symptom.
+pub fn derive_session_id(
+    binding: SessionIdBinding,
+    exporter: &[u8; 32],
+    finished: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    match binding {
+        SessionIdBinding::Exporter => Ok(exporter.to_vec()),
+        SessionIdBinding::Finished => match finished {
+            // The Finished verify_data is as long as the negotiated cipher suite's
+            // hash: 32 bytes for SHA-256, 48 for SHA-384. Upstream carries it
+            // verbatim in the session id, so the length must not be normalised.
+            Some(f) if f.len() == 32 || f.len() == 48 => Ok(f.to_vec()),
+            Some(f) => Err(format!(
+                "TLS 1.3 Finished must be 32 or 48 bytes, got {}",
+                f.len()
+            )),
+            None => Err("TLS 1.3 Finished is not available from this TLS stack".to_string()),
+        },
+    }
+}
+
+/// The raw TLS 1.3 Finished verify_data — upstream's `tlsUnique`.
+///
+/// Only stacks that expose it can provide this; rustls 0.23 does not.
+#[cfg(feature = "v71-probes")]
+pub fn tls13_finished(ssl: &openssl::ssl::SslRef) -> Option<Vec<u8>> {
+    let mut buf = [0u8; 64];
+    let n = ssl.finished(&mut buf);
+    if n != 32 && n != 48 {
+        return None;
+    }
+    Some(buf[..n].to_vec())
+}
+
+/// The peer's TLS 1.3 Finished verify_data — what upstream's server puts into
+/// `sessionId` (`getPeerFinished`).
+#[cfg(feature = "v71-probes")]
+pub fn tls13_peer_finished(ssl: &openssl::ssl::SslRef) -> Option<Vec<u8>> {
+    let mut buf = [0u8; 64];
+    let n = ssl.peer_finished(&mut buf);
+    if n != 32 && n != 48 {
+        return None;
+    }
+    Some(buf[..n].to_vec())
+}
+
+/// Derive the upstream-compatible session id from an openssl connection.
+///
+/// This is the binding upstream expects: the client's own TLS 1.3 Finished.
+#[cfg(feature = "v71-probes")]
+pub fn derive_session_id_finished(ssl: &openssl::ssl::SslRef) -> Result<Vec<u8>, String> {
+    match tls13_finished(ssl) {
+        Some(f) => derive_session_id(SessionIdBinding::Finished, &[0u8; 32], Some(&f)),
+        None => Err("TLS 1.3 Finished is not available from this connection".to_string()),
+    }
+}
+
 /// TLS connect that also completes the handshake and returns a TLS channel binding
 /// (exporter label) for SEC-04 `verify_channel_binding`.
 pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sni: bool) -> std::io::Result<(BoxStream, [u8; 32])> {
@@ -411,11 +492,23 @@ pub fn connect_tls_sni_bound(addr: SocketAddr, host: &str, key_hash: [u8; 32], w
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut stream = StreamOwned::new(conn, tcp);
     stream.conn.complete_io(&mut stream.sock).map_err(std::io::Error::other)?;
-    let mut binding = [0u8; 32];
+    let mut exporter = [0u8; 32];
     stream
         .conn
-        .export_keying_material(&mut binding, b"SimpleX-channel-binding", None)
+        .export_keying_material(&mut exporter, b"SimpleX-channel-binding", None)
         .map_err(std::io::Error::other)?;
+    // rustls cannot expose the TLS 1.3 Finished, so the session id is bound to
+    // the exporter output. See `SessionIdBinding` for the rationale.
+    let binding_vec = derive_session_id(SessionIdBinding::Exporter, &exporter, None)
+        .map_err(std::io::Error::other)?;
+    if binding_vec.len() != 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the channel binding must be 32 bytes",
+        ));
+    }
+    let mut binding = [0u8; 32];
+    binding.copy_from_slice(&binding_vec);
     Ok((Box::new(stream), binding))
 }
 

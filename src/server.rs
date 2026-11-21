@@ -633,7 +633,7 @@ pub fn handle_conn(
     allow_local_proxy: bool,
 ) -> std::io::Result<()> {
     let ctrl = tcp.try_clone()?;
-    let mut tls_binding: Option<[u8; 32]> = None;
+    let mut tls_binding: Option<Vec<u8>> = None;
     let mut stream: BoxStream = match mode {
         Mode::Plain => Box::new(tcp),
         Mode::Tls(cfg) => {
@@ -642,18 +642,24 @@ pub fn handle_conn(
                 tcp,
             );
             // complete the TLS 1.3 handshake BEFORE the SMP server hello, so that
-            // sessionId can be bound to the TLS channel binding (Finished transcript)
+            // sessionId can be bound to the TLS session
             so.conn.complete_io(&mut so.sock).map_err(io_err)?;
-            let mut b = [0u8; 32];
+            let mut exporter = [0u8; 32];
             so.conn
-                .export_keying_material(&mut b, b"SimpleX-channel-binding", None)
+                .export_keying_material(&mut exporter, b"SimpleX-channel-binding", None)
                 .map_err(io_err)?;
-            tls_binding = Some(b);
+            // rustls cannot expose the TLS 1.3 Finished verify_data that upstream
+            // uses as its channel binding, so the session id is bound to the
+            // exporter output instead. See `SessionIdBinding`.
+            tls_binding = Some(
+                derive_session_id(SessionIdBinding::Exporter, &exporter, None)
+                    .map_err(io_err)?,
+            );
             Box::new(so)
         }
     };
     // in TLS mode sessionId = TLS channel binding; in plain mode it stays empty
-    let session_id: Vec<u8> = tls_binding.map(|b| b.to_vec()).unwrap_or_default();
+    let session_id: Vec<u8> = tls_binding.unwrap_or_default();
     // --- phase 1: blocking handshake (drives the TLS handshake too) ---
     // per-engine stable ephemeral X25519 key (authPubKey in server hello)
     let eph = x25519_from_secret(st.lock().unwrap_or_else(|e| e.into_inner()).eph_secret);

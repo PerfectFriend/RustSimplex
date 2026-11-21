@@ -301,3 +301,45 @@ fn channel_binding_rejects_rewritten_sid() {
     assert!(verify_channel_binding(&[8u8; 32], &real).is_err());
     assert!(verify_channel_binding(b"", b"").is_err());
 }
+
+/// Task 3.3 (G4) — the TLS channel binding used for the SMP session id must be
+/// explicit: either the RFC 8446 exporter output (rustls) or the raw TLS 1.3
+/// Finished verify_data (upstream-compatible).
+///
+/// The invariants matter more than the choice: a `Finished` binding must never
+/// silently fall back to the exporter when the Finished value is missing or the
+/// wrong length, because that would break the upstream contract without any
+/// visible symptom.
+#[test]
+fn session_id_binding_derive_invariants() {
+    use smp_rs::transport::{derive_session_id, SessionIdBinding};
+
+    let exporter = [7u8; 32];
+    assert_eq!(
+        derive_session_id(SessionIdBinding::Exporter, &exporter, None).unwrap(),
+        exporter.to_vec()
+    );
+
+    let finished = [9u8; 32];
+    assert_eq!(
+        derive_session_id(SessionIdBinding::Finished, &exporter, Some(&finished)).unwrap(),
+        finished.to_vec()
+    );
+
+    // No silent fallback: a missing or malformed Finished is an error.
+    assert!(derive_session_id(SessionIdBinding::Finished, &exporter, None).is_err());
+    assert!(derive_session_id(SessionIdBinding::Finished, &exporter, Some(&[1u8; 16])).is_err());
+    assert!(derive_session_id(SessionIdBinding::Finished, &exporter, Some(&[])).is_err());
+}
+
+/// Task 3.3 (G4) — in TLS mode the server hands out a 32-byte channel-bound
+/// session id, and the client accepts it only because it matches its own
+/// derivation over the same TLS session.
+#[test]
+fn tls_session_id_is_32_byte_channel_binding() {
+    let (addr, kh) = start_tls();
+    let c = Client::connect_tls(addr, "127.0.0.1", kh).unwrap();
+    assert_eq!(c.session_id().len(), 32);
+    assert_ne!(c.session_id(), &[0u8; 32][..]);
+}
+
