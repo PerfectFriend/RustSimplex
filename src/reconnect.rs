@@ -61,17 +61,130 @@ impl SmpTransport for Client {
     }
 }
 
+/// Default delay before the first reconnect attempt.
+pub const DEFAULT_BASE_BACKOFF: Duration = Duration::from_millis(50);
+/// Default cap for the delay between reconnect attempts.
+pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(8);
+/// How many applied delays are remembered for inspection (the counter and the
+/// total keep counting past this).
+const MAX_RECORDED_BACKOFFS: usize = 1024;
+
 pub struct ReconnectingClient {
     ep: Endpoint,
     inner: Option<Client>,
     /// strict DH secret captured after handshake so reconnect can re-derive keys
     strict_secret: Option<[u8; 32]>,
+    /// first delay between reconnect attempts
+    base_backoff: Duration,
+    /// cap for the delay between reconnect attempts
     max_backoff: Duration,
+    /// the delays actually applied, oldest first
+    applied: Vec<Duration>,
+    /// how many delays were applied
+    backoff_count: u64,
+    /// the sum of all applied delays
+    total_backoff: Duration,
 }
 
 impl ReconnectingClient {
     pub fn new(ep: Endpoint) -> Self {
-        ReconnectingClient { ep, inner: None, strict_secret: None, max_backoff: Duration::from_secs(8) }
+        Self::with_backoff(ep, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_BACKOFF)
+    }
+
+    /// A client with an explicit backoff policy.
+    ///
+    /// The policy is per client, never read from the process environment: two
+    /// clients in the same process (or two tests in parallel) cannot change
+    /// each other's reconnect behaviour.
+    pub fn with_backoff(ep: Endpoint, base: Duration, max_backoff: Duration) -> Self {
+        ReconnectingClient {
+            ep,
+            inner: None,
+            strict_secret: None,
+            base_backoff: base,
+            max_backoff,
+            applied: Vec::new(),
+            backoff_count: 0,
+            total_backoff: Duration::ZERO,
+        }
+    }
+
+    /// The delay before attempt number `attempt` (0-based): `base * 2^attempt`,
+    /// capped at `max_backoff`.
+    ///
+    /// Saturating by construction: an overflowing duration or a huge attempt
+    /// number returns the cap instead of panicking, and a zero base returns
+    /// zero without looping.
+    pub fn backoff_for(&self, attempt: u32) -> Duration {
+        if self.base_backoff.is_zero() {
+            return Duration::ZERO;
+        }
+        let mut delay = self.base_backoff;
+        let mut i = 0u32;
+        while i < attempt {
+            match delay.checked_mul(2) {
+                Some(next) if next < self.max_backoff => {
+                    delay = next;
+                    i += 1;
+                }
+                _ => return self.max_backoff,
+            }
+        }
+        delay.min(self.max_backoff)
+    }
+
+    /// The configured first delay between reconnect attempts.
+    pub fn base_backoff(&self) -> Duration {
+        self.base_backoff
+    }
+
+    /// The configured cap for the delay between reconnect attempts.
+    pub fn max_backoff(&self) -> Duration {
+        self.max_backoff
+    }
+
+    /// The delays that were actually applied, oldest first.
+    pub fn applied_backoffs(&self) -> &[Duration] {
+        &self.applied
+    }
+
+    /// How many delays were applied.
+    pub fn backoff_count(&self) -> u64 {
+        self.backoff_count
+    }
+
+    /// The sum of all applied delays.
+    pub fn total_backoff(&self) -> Duration {
+        self.total_backoff
+    }
+
+    /// The most recently applied delay.
+    pub fn last_backoff(&self) -> Option<Duration> {
+        self.applied.last().copied()
+    }
+
+    /// Whether the live connection has strict v23 block encryption active.
+    pub fn has_strict_keys(&self) -> bool {
+        self.inner.as_ref().map(|c| c.has_strict_keys()).unwrap_or(false)
+    }
+
+    /// Drop the current connection so the next operation redials.
+    pub fn force_reconnect(&mut self) {
+        self.inner = None;
+    }
+
+    /// Keep dialing until the connection is up or the attempt budget is spent,
+    /// waiting `backoff_for(attempt)` between attempts.
+    pub fn connect_with_retry(&mut self, max_attempts: u32) -> ClResult<()> {
+        self.ensure(max_attempts)
+    }
+
+    fn record_backoff(&mut self, delay: Duration) {
+        self.backoff_count = self.backoff_count.saturating_add(1);
+        self.total_backoff = self.total_backoff.saturating_add(delay);
+        if self.applied.len() < MAX_RECORDED_BACKOFFS {
+            self.applied.push(delay);
+        }
     }
 
     /// Force a fresh connection now (also used by `ensure` after failures).
@@ -98,7 +211,6 @@ impl ReconnectingClient {
         if self.inner.is_some() {
             return Ok(());
         }
-        let mut backoff = Duration::from_millis(50);
         let start = Instant::now();
         let mut last: Option<String> = None;
         for attempt in 0..max_attempts.max(1) {
@@ -113,8 +225,9 @@ impl ReconnectingClient {
                 Err(e) => {
                     last = Some(e);
                     if attempt + 1 < max_attempts && start.elapsed() < Duration::from_secs(30) {
-                        std::thread::sleep(backoff);
-                        backoff = (backoff * 2).min(self.max_backoff);
+                        let delay = self.backoff_for(attempt);
+                        self.record_backoff(delay);
+                        std::thread::sleep(delay);
                     }
                 }
             }
