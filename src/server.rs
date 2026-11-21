@@ -889,31 +889,54 @@ impl Engine {
 
     /// Accept loop (blocking). Spawns a pump thread per connection.
     pub fn serve(&self) -> std::io::Result<()> {
-        // The accept loop must notice `shutdown` *before* blocking in accept(),
-        // otherwise the flag never takes effect: `incoming()` parks in the
-        // kernel until a connection arrives, so a server with no clients can
-        // never be stopped. Poll a non-blocking listener instead, sleeping
-        // briefly between empty polls.
-        self.listener.set_nonblocking(true)?;
-        loop {
+        // `shutdown` must interrupt a *blocking* accept(): with the original
+        // code the flag was only checked after `incoming()` returned, i.e. after
+        // the next client connected — so a server with no clients could never
+        // be stopped.
+        //
+        // The listening socket stays blocking. Putting it into O_NONBLOCK
+        // instead would be wrong on Linux: an accepted socket inherits the
+        // listener's O_NONBLOCK, which would leak into every per-connection
+        // read path and surface as spurious EAGAIN ("Resource temporarily
+        // unavailable") on the client side.
+        //
+        // Instead a watcher thread polls the flag and, once it is set, opens a
+        // throwaway connection to wake the accept loop. The loop then observes
+        // the flag and exits.
+        let shutdown_flag = self.shutdown.clone();
+        let watcher_stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher_stop_thread = watcher_stop.clone();
+        let watcher = self.listener.local_addr().ok().map(|addr| {
+            thread::spawn(move || {
+                while !watcher_stop_thread.load(Ordering::Relaxed) {
+                    if shutdown_flag.load(Ordering::Relaxed) {
+                        // Wake the accept loop with a connection it will drop.
+                        let _ = std::net::TcpStream::connect(addr);
+                        return;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        });
+
+        let result = loop {
             if self.shutdown.load(Ordering::Relaxed) {
-                break;
+                break Ok(());
             }
             let tcp = match self.listener.accept() {
-                Ok((t, _peer)) => {
-                    // A non-blocking listener yields WouldBlock when idle; the
-                    // accepted socket must be switched back to blocking.
-                    t.set_nonblocking(false)?;
-                    t
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                }
+                Ok((t, _peer)) => t,
                 Err(e) => {
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        break Ok(());
+                    }
                     eprintln!("[engine] incoming: {e}");
                     continue;
                 }
+            };
+            // The wake-up connection (or any connection arriving after the
+            // flag was set) must not be served.
+            if self.shutdown.load(Ordering::Relaxed) {
+                break Ok(());
             };
             let st = self.state.clone();
             let mode = self.mode.clone();
@@ -924,8 +947,13 @@ impl Engine {
                     }
                 }
             });
+        };
+
+        watcher_stop.store(true, Ordering::Relaxed);
+        if let Some(w) = watcher {
+            let _ = w.join();
         }
-        Ok(())
+        result
     }
 }
 
