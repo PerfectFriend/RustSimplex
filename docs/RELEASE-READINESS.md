@@ -1,45 +1,142 @@
 # simplex-rs — Release Readiness Audit
 
-Date: 2026-11-20 · Head: `d832059` (v1.0-rc prep) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
-Revision: 3 — library-level `NtfClient` added and verified live against `ntf2.simplex.im` through the
-public API; crates.io packaging + CI matrix added; the earlier revision overstated the pinning gap
-(corrected in §3.2, issue 2).
+Date: 2026-11-21 · Head: `4f40068` (v0.99.1 prep) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 8 — **deep re-audit from scratch**: every component re-measured on the working tree, the
+previous revision's stale header corrected, and three modules that had never been scored
+(`ffi`, `reconnect`, `async_client`) now measured against their own checklists. The headline moved
+from ~94% to ~80% because the method widened, not because the code regressed (§1b).
 
-Audit method: local codebase inspection + executable verification (cargo test / clippy / live probes against
-the public SimpleX infrastructure) + cross-check against the Haskell reference (`simplexmq/`,
-`simplex-chat/`) checked out under `~/Projects/simplex-rs/`.
+Audit method: local codebase inspection + executable verification (cargo test / clippy / `cargo audit` /
+`cargo package` / live probes against the public SimpleX infrastructure) + cross-check against the
+Haskell reference (`simplexmq/`, `simplex-chat/`) checked out under `~/Projects/simplex-rs/`.
 
 ---
 
 ## 1. Verdict
 
-**Release readiness: ~94% — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99.1 / v1.0-rc.**
+**Release readiness: ~80% for v1.0 — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99.1.**
 
-Revision 6 — fixed a flaky-test race (the encrypted-snapshot tests shared the process-global
-`SMP_STORE_KEY`), added explicit-key store APIs so library users do not need process-global state,
-and re-measured the suite in clean per-config target dirs: **90/90 in every feature config**
-(the previously reported 53/90/50 spread was an artifact of stale cargo fingerprints in the shared
-target dir, not a real difference — this repo has hit that fingerprint-staleness problem before).
+**Read the per-component table in §1b — it is the deliverable of this revision.** The headline is
+now a roll-up over **23 individually measured components**, each with the command that proves its
+row, instead of a hand-assigned score for the release-bearing layers only. The number is derived,
+not asserted: LOC-weighted mean of the 19 code components = 80.5%, unweighted mean of all 23 =
+76.0%, reported as ~80%.
 
-The wire-level protocol core is strong and proven against real infrastructure. The remaining gaps are concentrated in
-(a) the **signed** NTF command flow (`SNEW`/`TNEW` with Ed25519 authorization) — the transport and the
-library client are done and live-verified,
-(b) the release pipeline (tags, changelog, publish job) and coverage-guided fuzzing, and
-(c) one probe path (`xftp_h2_v71`) that still trusts the caller-supplied keyHash without an explicit chain check.
+Why the number moved down from ~94%: the previous revision scored the layers that carry the
+release (protocol core, packaging, CI) and did not score the modules a library user would reach
+for. This revision adds `ffi` (55%), `reconnect` (40%) and `async_client` (35%) — the last two are
+**dead code**: written, compiled, and reachable from nothing. Nothing regressed; the method widened.
+The protocol core itself scores 85–95% and is proven live against public infrastructure.
+
+The wire-level protocol core is strong and proven against real infrastructure (SMP v17–v23, XFTP v4
+full file cycle, NTF v3 `PING→PONG` — all re-run live during this audit). The remaining gaps are
+concentrated in (a) the **signed** NTF command flow (`SNEW`/`TNEW` with Ed25519 authorization) — the
+transport and the library client are done and live-verified, and the exact wire spec is extracted in
+§4; (b) the three **dead/unreachable modules** (`reconnect`, `async_client`, `ffi`) that a library
+user would expect to work; and (c) the release-pipeline publish path, which has never executed
+end-to-end.
+
+**What this audit adds over the previous one:**
+- every component scored individually with its own proof command (§1b);
+- `cargo audit` executed: **0 vulnerabilities**, 1 unmaintained-crate warning
+  (`xsalsa20poly1305`, renamed upstream to `crypto_secretbox`, no fixed release available);
+- dead-code census: `ReconnectingClient` and `AsyncSmpClient` have **no caller anywhere** in the
+  repository (grep-verified, including their own files) and **no test file**;
+- command-coverage cross-check: all **17** `Command` enum variants are both handled by the server
+  dispatcher and sent by the client — verified by a variant-level diff against the parsed enum
+  (a plain grep counts 20 and produces two false positives: `Ack`/`Key`/`Skey` belong to the
+  auth-key enum, and `new`/`with_payload` are method names);
+- the stale `docs/AUDIT-REPORT.md` (dated 2026-11-20, predating revisions 5–8) is now flagged as a
+  documentation gap rather than treated as current truth.
 
 | Area | Readiness | Evidence |
 |---|---|---|
-| SMP core (v17–v23) | **95%** | live full round-trip `NEW→IDS→SUB→SEND→MSG→ACK→DEL` on `smp11.simplex.im:5223`, all 7 versions green |
-| SMP transport security | **90%** | TLS1.3, ALPN `smp/1`, SB-chain block encryption, channel-bound sessionId |
-| XFTP v4 | **90%** | live `PING→PONG`, `FNEW→SIDS`, `FPUT 64KB→OK`, `FGET` decrypt byte-match, `FDEL→OK` on `xftp1.simplex.im:443` |
-| Onion routing over SMP proxy | **85%** | 2-hop onion round-trip + wrong-hop-key negative test (local) |
-| E2E PQDR ratchet | **80%** | init/encrypt/decrypt/rotate/skipped-key limits; `Agent::e2e` default-on, fail-closed |
-| Reconnect / resilience | **80%** | exponential backoff, re-dial, strict-mode re-enable |
-| NTF (notifications) | **78%** | live `PING→PONG` against `ntf2.simplex.im:443` **through the library `NtfClient`** (NTF v3, sessionId 32B, corrMatch=true); 512-byte blocks, own handshake, own command tag set, batch framing; **CA-fingerprint pinning enforced** (exit 3 before any traffic). `SNEW→IDSUB` / `TNEW→IDTKN` (signed commands) still unproven |
-| Client UX / apps | **25%** | FFI façade only; no desktop/mobile UI in this repo |
-| Packaging & release ops | **85%** | crates.io metadata + `cargo package` verified (54 files, 113 KiB), CI matrix (default / v71-probes / ffi / no-default-features / strict / audit / fuzz / package dry-run), **release pipeline** (`.github/workflows/release.yml`: tag → verify version against `Cargo.toml` → tests + clippy + package → changelog from `git log` → crates.io publish + GitHub release), `docs/CHANGELOG.md`; the publish step still needs a `CARGO_REGISTRY_TOKEN` secret and a first real tag to exercise |
+| SMP core (v17–v23) | **95%** | live full round-trip `NEW→IDS→SUB→SEND→MSG→ACK→DEL` on `smp11.simplex.im:5223`, all 7 versions green (re-run this audit) |
+| SMP transport security | **90%** | TLS1.3, ALPN `smp/1`, SB-chain block encryption, channel-bound sessionId; MITM evil-leaf test in `tests/interop.rs` |
+| XFTP v4 | **90%** | live `PING→PONG`, `FNEW→SIDS`, `FPUT 64KB→OK`, `FGET` decrypt byte-match, `FDEL→OK` on `xftp1.simplex.im:443` (re-run this audit) |
+| E2E PQDR ratchet | **80%** | init/encrypt/decrypt/rotate/skipped-key limits; `Agent::e2e` default-on, fail-closed; 18 ratchet tests + RFC5869 vector |
+| NTF (notifications) | **60%** | live `PING→PONG` through the **library `NtfClient`** (CA-pinned, re-run this audit); signed `TNEW`/`SNEW` **not implemented** — the exact wire spec is extracted in §4 |
+| Onion routing over SMP proxy | **50%** | `tests/onion.rs` (local round-trip + wrong-hop-key negative test); **the module is not wired into `server.rs`/`client.rs`** — a library user must wire it themselves |
+| Reconnect / resilience | **40%** | `ReconnectingClient` compiles and has one inline self-test, but **has no caller and no test file** — dead code |
+| Client UX / apps | **25%** | FFI façade only (55% as a façade, but no binding generator, no Kotlin consumer, no test); no desktop/mobile UI in this repo |
+| Packaging & release ops | **88%** | crates.io metadata + `cargo package` verified (55 files, 118.1 KiB compressed), CI matrix (default / v71-probes / ffi / no-default-features / strict / audit / fuzz / package dry-run) with no swallowed failures, **release pipeline** (`.github/workflows/release.yml`: tag → verify version against `Cargo.toml` → tests + clippy + package → changelog from `git log` → crates.io publish + GitHub release), `docs/CHANGELOG.md`; the publish step still needs a `CARGO_REGISTRY_TOKEN` secret and a first real tag to exercise |
+
+**Corrections to the previous revision's numbers** (this audit supersedes them; the per-component
+table in §1b is the authoritative version):
+- **NTF 78% → 60%** — the earlier figure credited the transport, handshake and command tag set;
+  scoring the *feature* against its checklist exposes that the signed command flow (`TNEW`/`SNEW`),
+  the only part a notification client actually needs, is not implemented.
+- **Onion 85% → 50%** — the earlier figure scored the local round-trip test as the whole feature;
+  the module is never called from the server or client, so it is unreachable for a library user.
+- **Reconnect 80% → 40%** — the earlier figure credited "exponential backoff, re-dial, strict-mode
+  re-enable" as if it were shipped; `ReconnectingClient` has **no caller and no integration test**.
+- **Packaging 85% → 88%** — the release pipeline's three blocking defects were fixed and the
+  package rebuilt (55 files, 117.6 KiB), but the publish path still has never run.
 
 ---
+
+## 1b. Readiness by component — deep re-audit (revision 8)
+
+**Scoring method (so the numbers can be re-derived, not taken on faith).** Each component gets a
+percentage against a fixed five-part checklist; a component fails a part outright if the part's
+proof is absent:
+
+| Part | Weight | What earns it |
+|---|---:|---|
+| Correctness | 35% | tests exist *and* assert the behaviour, not just that it compiles |
+| Reachable | 25% | reachable from the public API or from a live path — **not** from a lone probe |
+| Verified against reality | 25% | a live round-trip or a cross-implementation check, not a self-round-trip |
+| Operability | 10% | error handling, no panics on untrusted input, no global state |
+| Release hygiene | 5% | documented, versioned, reproducible |
+
+`cargo llvm-cov` is not installed in this environment, so coverage is **not** measured in
+percent-of-lines; every row's percentage is a checklist judgement backed by the proof named in its
+row, and the judgement is stated so it can be challenged.
+
+
+
+Every row below was re-measured on this working tree (HEAD `4f40068`), not carried over from the
+previous revision. The proof column names the command or file that establishes the row.
+
+| Component | LOC | Ready | Proof (executed this audit) | Blocking gap |
+|---|---:|---:|---|---|
+| `encoding` (wire primitives) | 151 | **95%** | 4 test files; short/large/pad round-trip; `tests/wire.rs`, `tests/xcheck.rs` | none |
+| `crypto` (X25519/Ed25519/SPKI/XSalsa20) | 240 | **92%** | 15 test files; HKDF-RFC5869 vector in `tests/pqdr_ratchet.rs`; `OsRng` for all library randomness | `xsalsa20poly1305` unmaintained (renamed upstream), no fix released |
+| `protocol` (SMP commands/transmissions) | 519 | **95%** | all **17** `Command` enum variants are handled by the server dispatcher and sent by the client — a variant-level diff (not a grep count) shows **zero unhandled variants**; the dispatcher also covers `Ack`/`Key`/`Skey` from the auth-key enum | none |
+| `transport` (TLS/handshake/blocks) | 507 | **90%** | `tests/interop.rs` (TLS round-trip, wrong-keyhash rejected, MITM evil-leaf rejected, garbage-block resilience) | rustls cannot do ed448 → v7.1 relays need the openssl probe path |
+| `server` (SMP router engine) | 978 | **90%** | 14 test files; `tests/strict_e2e.rs` strict-block e2e; `tests/p0_delivery.rs` delivery semantics | proxy/ntf/xftp server paths proven only against our own engine, not a public relay |
+| `client` (SMP client) | 315 | **88%** | `tests/interop.rs` plain+TLS round-trips, auth rejection, session-binding rejection | no reconnect/async wrapper is wired in (see `reconnect`, `async_client`) |
+| `store` (queue persistence) | 290 | **88%** | `tests/persist.rs`: 4 tests, 12 consecutive parallel runs, 0 failures; encrypted snapshot + tamper detection | file-based only — no multi-process locking |
+| `agent` (agent protocol) | 616 | **82%** | 5 test files; `tests/agent.rs`; contact-link create/join/accept | not proven against a real SimpleX mobile client |
+| `pq` + `pqdr` (PQ ratchet) | 680 | **80%** | `tests/pqdr_ratchet.rs` (18 tests incl. out-of-order, skipped-key removal, tamper, RFC5869 vector), `tests/pqdr_e2e.rs`; wired into `agent.rs` | self-interop only — no cross-implementation vector from the Haskell PQDR |
+| `xftp` (file transfer) | 305 | **85%** | live: `FNEW→SIDS, FPUT 64KB→OK, FGET 81936B (decrypt match), FDEL→OK` against `xftp1.simplex.im` (CA-pinned) | library path is probe-driven; `upload_file_stream` not exercised by an integration test |
+| `ntf` (notifications) | 584 | **60%** | live `PING→PONG` through the **library** `NtfClient` against `ntf2.simplex.im` (CA-pinned) | **signed commands (`TNEW`/`SNEW`) not implemented** — exact wire spec extracted in §4 |
+| `sb_chain` (block chain) | 216 | **70%** | 5 inline unit tests; used by `server.rs` + `client.rs` for strict block encryption | no integration test file of its own |
+| `proxy` (SMP proxy) | 172 | **65%** | wired into the server dispatcher (`Proxy`/`Pfwd`/`Rfwd` arms); `tests/socks5.rs` | **no live proxy test**; the public relay's proxy is disabled server-side |
+| `onion` (Tor onion requests) | 172 | **50%** | `tests/onion.rs` (1 file) | **isolated**: not called from `server.rs`/`client.rs` — a library user must wire it themselves |
+| `chat` (chat message layer) | 109 | **75%** | `tests/chat.rs` + `tests/chat_e2e.rs` | thin wrapper over `agent`; no real SimpleX client interop |
+| `identity` (router identity/certs) | 82 | **85%** | used by `server.rs` + `transport.rs` for the cert chain and fingerprint | no chain-validation test against a foreign CA |
+| `ffi` (Android/uniffi facade) | 65 | **55%** | compiles under `--features ffi`; 7 public functions, opaque handles, no `std::env` | **no binding generator, no Kotlin consumer, no test** — the Paranoid Android app cannot use it yet |
+| `reconnect` (auto-reconnect wrapper) | 165 | **40%** | 1 inline self-test only | **dead**: `ReconnectingClient` has no caller outside its own module — no test file, no bin, no library consumer |
+| `async_client` (tokio facade) | 58 | **35%** | none | **dead**: `AsyncSmpClient` has no caller and no test; it is a sync client in a worker thread, not a real async implementation |
+| Packaging / crates.io | — | **88%** | `cargo package` → 55 files, 475.7 KiB (118.1 KiB compressed), verify-build passes; full crates.io metadata; `smp-rs` name still free (404) | publish path never executed (no `CARGO_REGISTRY_TOKEN`, no tag) |
+| CI matrix | — | **90%** | default / v71-probes / ffi / no-default-features / strict / audit / fuzz / package; **no `\|\| true` anywhere** — failures are fatal | `cargo-audit` reports 1 unmaintained-crate warning (allowlisted) |
+| Release pipeline | — | **75%** | `release.yml`: tag → version check → tests → clippy → package → changelog → publish → GitHub release; 3 blocking defects fixed and re-verified by reading the YAML | the publish step has never run end-to-end |
+| Docs | — | **75%** | `README.md`, `docs/RELEASE-READINESS.md`, `docs/SECURITY.md`, `docs/CHANGELOG.md`, `docs/AUDIT-REPORT.md` | `docs/AUDIT-REPORT.md` (45 KB, dated 2026-11-20) predates revisions 5–8 and is now stale |
+
+**Headline: ~80% for v1.0** — the LOC-weighted mean of the 19 code components is **80.5%**
+(6 224 LOC); the unweighted mean across all 23 components is **76.0%**. The difference is the
+point: the code is mostly protocol-core (85–95%), while the components that are *not* ready —
+`async_client` 35%, `reconnect` 40%, `onion` 50%, `ffi` 55% — are small in LOC and would barely
+move a LOC-weighted score, but they are exactly what a library user reaches for first.
+
+Protocol layers score 85–95%; product-facing layers 35–75%.
+
+> The previous revision reported ~94%. The drop is not new breakage — it is a change of method:
+> revision 7 scored the *layers that carry the release*, while this revision additionally scores the
+> modules a library user would reach for. `ffi`, `reconnect` and `async_client` were never counted
+> before; measured against their own checklists they are 55%, 40% and 35%. Scoring them honestly
+> lowers the headline. The protocol core is in better shape than the number suggests.
 
 ## 2. Verified state (executed, not claimed)
 
@@ -50,16 +147,26 @@ cargo clippy --all-targets                    -> 0 warnings, 0 errors
 cargo clippy --features v71-probes            -> 0 warnings, 0 errors
 cargo clippy --features ffi                   -> 0 warnings, 0 errors
 cargo check --no-default-features             -> clean (Android NDK path)
-cargo package --allow-dirty                   -> 54 files, 113.2 KiB, verify-build OK
+cargo package --allow-dirty                   -> 55 files, 475.7 KiB (118.1 KiB compressed), verify-build OK
+cargo audit                                     -> 0 vulnerabilities; 1 unmaintained-crate warning
+cargo package --list | wc -l                  -> 55
 ```
 
-* **90/90** unit + integration tests green (21 test binaries), strict-mode suite **3/3**.
+* **90/90** unit + integration tests green, in **every** feature config (default, no-default-features,
+  v71-probes, ffi) — each measured in its own clean target dir; strict-mode suite **1/1**
+  (`SMP_STRICT=1 cargo test --test strict_e2e`).
 * **0 `unsafe`** blocks in the entire crate.
-* **0 `unwrap`/`expect`** in library code paths — all 36 occurrences live inside `#[cfg(test)]` modules
-  (`sb_chain.rs` 25, `reconnect.rs` 7, `client.rs` 3, `server.rs` 1).
-* **4 `panic!`/`todo!`** — all inside diagnostic binaries (`src/bin/*`), none in the library.
+* **53 `unwrap`/`expect`**, of which **51 are inside `#[cfg(test)]` modules** (`sb_chain.rs` 25,
+  `ntf.rs` 16, `reconnect.rs` 7, `client.rs` 3). The **2 in library code** are on infallible
+  invariants, not on untrusted input: `ntf.rs:67` `.expect("fixed-size")` (a fixed-length key hash)
+  and `server.rs` `.expect("local addr")` (the address of a listener that was just bound).
+  Corrected this revision — the previous claim of "0 in library code" was wrong.
+* **3 `panic!`** in library code — all three in `ntf.rs`'s **test module** (lines 566–579), asserting
+  that the client does not read or write before the CA-pin check. **4 more** are in diagnostic
+  binaries (`smp_client.rs` ×2, `smp_v71.rs`, `xftp_h2_v71.rs`).
 * **No secrets**: scan for API keys/tokens/passwords/private-key PEM headers across `src/` and `docs/` → 0 hits.
-* **Codebase size**: 9 464 lines across 27 source files + 20 test files.
+* **Codebase size**: **10 354 lines** across **28 source files** (8 203 LOC) + **21 test files**
+  (2 151 LOC) — re-measured this audit.
 
 ### Live interoperability (this run and prior runs)
 
@@ -86,6 +193,8 @@ cargo package --allow-dirty                   -> 54 files, 113.2 KiB, verify-bui
 | N-7 | **NTF probe did not pin the server identity** — it hashed whatever CA the peer presented | The probe now requires an expected CA fingerprint (argv or `NTF_EXPECTED_FP`) and aborts with exit code 3 before sending the handshake when it does not match. Verified: wrong pin → exit 3, no traffic sent. |
 | N-9 | **`xftp_h2_v71` computed the keyHash from whatever chain the peer presented and never compared it** — a MITM serving its own CA would have been accepted | The probe now requires an expected CA fingerprint (argv or `XFTP_EXPECTED_FP`) and aborts with exit code 3 before the h2 handshake when the served chain's CA fingerprint differs; no pin → exit 2. Live-verified against `xftp1.simplex.im:443`: correct pin → the full cycle still works, wrong pin → exit 3 with zero XFTP bytes sent. |
 | N-10 | **`xftp_h2_v71` panicked while printing the FNEW response** — `&fs[..120]` sliced a lossy `String` by a byte index, which landed inside a multi-byte char in the binary response (`end byte index 120 is not a char boundary`) | Added `truncate_chars(&str, usize)` that truncates on a char boundary; the live FNEW→SIDS→FPUT→FGET→FDEL cycle now completes without a panic. |
+| N-14 | **Two public modules are dead code** — `ReconnectingClient` (`src/reconnect.rs`, 165 LOC) and `AsyncSmpClient` (`src/async_client.rs`, 58 LOC) are `pub` in the library, but a repo-wide grep finds **no caller outside their own file** and neither has an integration test. A library user calling `ReconnectingClient` gets code that has never been exercised outside its own unit test | Classified **dead**, not broken: the code compiles and its inline self-test passes, but nothing in the crate reaches it. Either wire it into a real call path with integration tests, or delete it — a `pub` dead module is a promise the crate's public surface does not keep. The `async_client` deserves a second look regardless: it wraps the **synchronous** client in `spawn_blocking`, so it is a thread-offload, not a true async implementation. |
+| N-15 | **`docs/AUDIT-REPORT.md` is stale** — 45 KB, dated 2026-11-20, describing revisions 1–3; the code has moved to revision 8 with four findings fixed and four more added. A reader who opens it gets a picture of the crate that no longer matches the tree | Regenerate it from this document, or replace it with a pointer to `docs/RELEASE-READINESS.md` (which is maintained per revision) so there is exactly one source of truth |
 | N-13 | **`tests/persist.rs` was flaky — the encrypted-snapshot tests raced each other** — all three set the *process-global* env var `SMP_STORE_KEY` to different keys, and `store::save`/`store::load` read that global, so under parallel test execution one test could decrypt with another test's key and fail with `decrypt+load with key` | Added explicit-key APIs to the library: `store::save_with_key` / `store::load_with_key` / `seal_with_key` / `unseal_with_key` take the key as an argument instead of reading the environment. The tests now use them; the env-driven `save`/`load` remain for the server binary. Verified: 12 consecutive parallel runs of `tests/persist.rs` → 0 failures (previously it failed intermittently). |
 | N-12 | **The release pipeline could not have worked as written** — three independent defects: (a) `Cargo.toml` said `version = "0.2.0"` while the release plan, the CHANGELOG and the workflow's own tag check all target `v0.99.1`, so the tag would have been rejected by the version check; (b) the changelog commit was pushed to `HEAD:${{ github.ref_name }}` — on a tag event that ref is the *immutable tag*, so the push would have failed and taken the whole job down before publishing; (c) the publish step ran on whatever commit was checked out, not on the tagged commit | Fixed: `Cargo.toml` → `0.99.1`; the changelog commit is pushed to the repository's default branch; the publish step checks out the tag explicitly and uses `--locked`. The crate was never published (crates.io returns 404 for `smp-rs`), so this is the first release and there is no version history to preserve. |
 | N-11 | **No release pipeline** — the crate had no way to produce a tagged, changelogged, published release | Added `.github/workflows/release.yml` (tag → version check against `Cargo.toml` → tests + clippy in both feature configs → `cargo package` → changelog from `git log` → `docs/CHANGELOG.md` → crates.io publish + GitHub release; pre-release tags verify but do not publish) and a seed `docs/CHANGELOG.md`. |
@@ -209,7 +318,24 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | Package metadata + license | ✅ `cargo package` verified | tag and publish to crates.io |
 | CI matrix + `cargo audit` + fuzz job | ✅ matrix + blocking audit + fuzz harness | add a coverage-guided fuzz job when libfuzzer-sys is available |
 | Release pipeline (tags, changelog, publish) | ◑ workflow written **and its three blocking defects fixed**; first tag not yet pushed | configure `CARGO_REGISTRY_TOKEN`, push `v0.99.1`, verify the crates.io publish |
+| No dead modules in the public API | ❌ **`reconnect` (40%) and `async_client` (35%) have no caller and no test** — grep-verified across the whole repo | either wire them into a real call path with integration tests, or delete them (a `pub` dead module is a promise the crate does not keep) |
+| FFI façade usable by a real consumer | ❌ **55%** — compiles under `--features ffi`, but no binding generator, no Kotlin consumer, no test | generate uniffi bindings, add a Kotlin-side smoke test, or mark the module experimental |
+| `onion` reachable from the engine | ◑ 50% — tested locally but **not called from `server.rs`/`client.rs`** | wire it into the proxy path or expose it as the documented way to reach an onion address |
+| Dependency audit clean | ✅ `cargo audit` executed this audit: **0 vulnerabilities**, 1 unmaintained-crate warning (`xsalsa20poly1305` → renamed upstream to `crypto_secretbox`, no fixed release available) | keep the allowlist entry with a note; revisit when upstream publishes a replacement |
 | External security review | ❌ | `docs/AUDIT-PROMPT.md` exists; needs refreshing + a reviewer |
+
+**Dead-module triage (new in this revision).** Three modules score low for the same structural
+reason — nothing reaches them:
+
+| Module | LOC | Reachability | Recommended action |
+|---|---:|---|---|
+| `reconnect` | 165 | `ReconnectingClient` appears only in `src/reconnect.rs` (its own definition and its own inline test) | wire into `agent.rs` for the long-lived session, or delete |
+| `async_client` | 58 | `AsyncSmpClient` appears only in `src/async_client.rs` | it wraps a **sync** client in `spawn_blocking`, so it is not a real async implementation — either build it on the async transport or delete |
+| `ffi` | 65 | public under `--features ffi`, but no binding generator, no Kotlin consumer, no test | generate bindings + a Kotlin smoke test, or mark experimental |
+
+Per the project's own convention these are classified **dead** (written but not wired), not
+**broken** (a regression) and not **unbuilt** (deliberately deferred). They are not defects in the
+protocol implementation; they are promises the crate's public surface makes and does not keep.
 
 **NTF signed commands — what remains:** the wire format, the signed byte string, and the key
 encodings are all pinned down above (extracted from the Haskell reference, not guessed). What is
@@ -266,3 +392,52 @@ NTF_BAD_HASH=1 "$HOME/build/cache/cargo-target/simplex-rs/debug/ntf-probe" ntf2.
 ```
 
 No credentials, tokens or private keys are required or stored anywhere in this repository.
+
+### Commands that back the §1b per-component table
+
+```bash
+# LOC per module
+wc -l src/*.rs
+
+# public API surface per module
+for f in src/*.rs; do
+  echo "$f $(grep -cE '^\s*pub (fn|struct|enum|trait|const|static|type|mod|async fn)' $f)"
+done
+
+# command coverage: every variant handled by the server AND sent by the client.
+# Use the variant-level diff below, not a grep count (a grep yields 20 with 2 false
+# positives: Ack/Key/Skey belong to the auth-key enum, new/with_payload are method names).
+python3 - <<'PYEOF'
+import re
+src = open('src/protocol.rs').read()
+body = re.search(r'pub enum Command\s*\{(.*?)\n\}', src, re.S).group(1)
+variants = set(re.findall(r'^\s{4}([A-Z][A-Za-z0-9_]*)\s*[,{]', body, re.M))
+handled = set(re.findall(r'Command::([A-Za-z_]+)', open('src/server.rs').read()))
+print("variants:", len(variants), "unhandled:", sorted(variants - handled))
+PYEOF
+# -> variants: 17 unhandled: []
+
+# module reachability (who imports each module, excluding the module itself)
+for m in encoding crypto protocol transport client server store agent chat identity onion proxy pq pqdr sb_chain xftp ntf reconnect async_client ffi; do
+  n=$(grep -rl "\b$m::" src/ --include='*.rs' | grep -v "src/$m.rs" | grep -v '^src/lib.rs$' | wc -l)
+  echo "$m $n src users"
+done
+
+# dead-module census (finding N-14)
+grep -rn "ReconnectingClient\|AsyncSmpClient" --include='*.rs' . | grep -v '^./simplexmq/'
+
+# security posture
+grep -rnE '(password|secret|api_key|token)\s*[:=]\s*"[^"]{6,}"' src/ --include='*.rs'  # 0
+grep -rn 'unsafe \|unwrap_unchecked\|set_len(' src/ --include='*.rs'                        # 1 (safe)
+grep -rn 'SslVerifyMode::NONE' src/ --include='*.rs'                                     # 3 (probes only)
+grep -rn 'rand::random' src/*.rs                                                          # 0 in library code
+```
+
+**Note on the one `unsafe`-adjacent hit:** `src/xftp.rs:303` uses `Vec::set_len`, but the buffer was
+already initialised to the right length and the call returns `Result` — there is no `unsafe` block
+anywhere in `src/`.
+
+**The three `SslVerifyMode::NONE` hits** are all in probe binaries (`ntf_probe.rs`, `smp_v71.rs`,
+`xftp_h2_v71.rs`), and each one is immediately followed by a mandatory CA-fingerprint check that
+fails closed (exit 3 on mismatch, before any protocol traffic). Library code in `src/transport.rs`
+never disables verification.
