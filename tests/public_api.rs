@@ -93,15 +93,33 @@ fn public_modules_are_not_dead() {
 }
 
 #[test]
-fn async_client_is_not_exposed_while_dead() {
-    // W1-Task 1.1: the spawn_blocking facade over the *synchronous* client was
-    // never a real async client, and nothing called it. It is replaced in W4 by
-    // a tested async reconnect driver built on ReconnectingClient.
+fn async_client_is_exposed_and_really_async() {
+    // W4-Task 4.1 supersedes W1-Task 1.1: `async_client` is back as a REAL async
+    // client (tokio::net::TcpStream + tokio_rustls), required by gate G3 ("async
+    // engine with auto-reconnect", ROADMAP #5). The old W1 assertion that
+    // `pub mod async_client` must NOT exist encoded the state where the module
+    // was a dead spawn_blocking facade over the sync client — obsolete now.
+    // This test pins the new invariant instead: exposed, called from tests, and
+    // genuinely async (no spawn_blocking facade).
     let lib = std::fs::read_to_string(crate_root().join("src/lib.rs")).expect("read src/lib.rs");
     assert!(
-        !lib.contains("pub mod async_client"),
-        "async_client is dead code (spawn_blocking over the sync client, no caller) \
-         — remove it or wire it"
+        lib.contains("pub mod async_client"),
+        "async_client must be exposed: gate G3 needs a real async engine (W4-Task 4.1)"
+    );
+    let src =
+        std::fs::read_to_string(crate_root().join("src/async_client.rs")).expect("read src/async_client.rs");
+    assert!(
+        src.contains("tokio::net::TcpStream"),
+        "async_client must run on tokio TCP, not std::net"
+    );
+    assert!(
+        src.contains("tokio_rustls"),
+        "async_client must do a real async TLS 1.3 handshake via tokio-rustls"
+    );
+    assert!(
+        !src.contains("spawn_blocking"),
+        "async_client must NOT be a spawn_blocking facade over the sync client — \
+         that is exactly what W1-Task 1.1 deleted as a lie"
     );
 }
 

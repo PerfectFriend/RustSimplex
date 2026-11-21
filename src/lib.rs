@@ -12,6 +12,7 @@
 pub mod sb_chain;
 pub use sb_chain as blockchain;
 pub mod client;
+pub mod async_client;
 pub mod identity;
 pub mod agent;
 #[cfg(feature = "ffi")]
