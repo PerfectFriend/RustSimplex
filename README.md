@@ -49,8 +49,9 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 ## Релиз
 
 Тег `vX.Y.Z` запускает `.github/workflows/release.yml`: сверка версии с `Cargo.toml` → тесты +
-clippy (оба feature-конфига) + `cargo package` → changelog из `git log` в `docs/CHANGELOG.md` →
-публикация на crates.io + GitHub release. Пре-релизные теги (`-rc.N`) только проверяются.
+clippy (оба feature-конфига) + `cargo package` → changelog из `git log` в `docs/CHANGELOG.md`
+(коммит уходит в ветку по умолчанию, тег остаётся неизменным) → публикация **ровно тегированного**
+коммита на crates.io (`--locked`) + GitHub release. Пре-релизные теги (`-rc.N`) только проверяются.
 Требуется секрет `CARGO_REGISTRY_TOKEN`.
 
 ## Границы и отклонения
@@ -64,6 +65,9 @@ clippy (оба feature-конфига) + `cargo package` → changelog из `git
   ещё не реализованы — см. `docs/RELEASE-READINESS.md`.
 - Снапшот `--store`: при env `SMP_STORE_KEY` (hex 32B) шифруется XSalsa20-Poly1305
   (`SMP1` magic + nonce), без ключа — plaintext (legacy). Подробнее: `docs/SECURITY.md`.
+  Для библиотечного кода есть варианты с явным ключом — `store::save_with_key(path, st, Some(k))`
+  и `store::load_with_key(path, Some(k))`: они не читают process-global env и безопасны для
+  конкурентного использования.
 - PQDR: отклонения wire-формата задокументированы в `docs/SECURITY.md`.
 
 ## Документы

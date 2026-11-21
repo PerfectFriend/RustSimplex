@@ -36,8 +36,13 @@ fn env_key() -> Result<Option<[u8; 32]>, String> {
     }
 }
 
-fn seal(plain: Vec<u8>) -> Result<Vec<u8>, String> {
-    match env_key()? {
+/// Encrypt with an explicitly supplied key (no process-global env lookup).
+///
+/// The env-driven `seal`/`unseal` are convenient for the server binary but unusable from
+/// concurrent code: `SMP_STORE_KEY` is process-global state, so two threads saving with
+/// different keys race each other. These variants take the key as an argument.
+pub fn seal_with_key(plain: Vec<u8>, key: Option<[u8; 32]>) -> Result<Vec<u8>, String> {
+    match key {
         Some(k) => {
             let nb = random_bytes(24);
             let nonce: [u8; 24] = nb.as_slice().try_into().unwrap_or([0u8; 24]);
@@ -51,8 +56,8 @@ fn seal(plain: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
-fn unseal(buf: &[u8]) -> Option<Vec<u8>> {
-    let key = env_key().ok()?;
+/// Decrypt with an explicitly supplied key (no process-global env lookup).
+pub fn unseal_with_key(buf: &[u8], key: Option<[u8; 32]>) -> Option<Vec<u8>> {
     if buf.len() >= 4 && &buf[..4] == ENC_MAGIC {
         let k = key?; // encrypted snapshot requires a key — no silent empty state
         if buf.len() < 4 + 24 {
@@ -248,7 +253,12 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
 
 /// Atomic save: write to `<path>.tmp` then rename.
 pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
-    let sealed = seal(snapshot_bytes(st)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    save_with_key(path, st, env_key().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?)
+}
+
+/// Atomic save with an explicit key (does not read `SMP_STORE_KEY`).
+pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> std::io::Result<()> {
+    let sealed = seal_with_key(snapshot_bytes(st), key).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -266,8 +276,13 @@ pub fn save(path: &Path, st: &ServerState) -> std::io::Result<()> {
 }
 
 pub fn load(path: &Path) -> Option<ServerState> {
+    load_with_key(path, env_key().ok().flatten())
+}
+
+/// Load with an explicit key (does not read `SMP_STORE_KEY`).
+pub fn load_with_key(path: &Path, key: Option<[u8; 32]>) -> Option<ServerState> {
     let buf = fs::read(path).ok()?;
-    parse_snapshot(&unseal(&buf)?)
+    parse_snapshot(&unseal_with_key(&buf, key)?)
 }
 
 pub fn default_store_path() -> PathBuf {

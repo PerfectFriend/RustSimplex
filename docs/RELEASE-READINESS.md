@@ -13,10 +13,13 @@ the public SimpleX infrastructure) + cross-check against the Haskell reference (
 
 ## 1. Verdict
 
-**Release readiness: ~92% — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99 / v1.0-rc.**
+**Release readiness: ~94% — NOT ready for a public production release; ready for a closed beta and for library publication as v0.99.1 / v1.0-rc.**
 
-Revision 4 — closed the XFTP probe pinning gap (mandatory CA pin, live-verified) and added the
-release pipeline (tag → verify → test → changelog → publish) plus `docs/CHANGELOG.md`.
+Revision 6 — fixed a flaky-test race (the encrypted-snapshot tests shared the process-global
+`SMP_STORE_KEY`), added explicit-key store APIs so library users do not need process-global state,
+and re-measured the suite in clean per-config target dirs: **90/90 in every feature config**
+(the previously reported 53/90/50 spread was an artifact of stale cargo fingerprints in the shared
+target dir, not a real difference — this repo has hit that fingerprint-staleness problem before).
 
 The wire-level protocol core is strong and proven against real infrastructure. The remaining gaps are concentrated in
 (a) the **signed** NTF command flow (`SNEW`/`TNEW` with Ed25519 authorization) — the transport and the
@@ -83,6 +86,8 @@ cargo package --allow-dirty                   -> 54 files, 113.2 KiB, verify-bui
 | N-7 | **NTF probe did not pin the server identity** — it hashed whatever CA the peer presented | The probe now requires an expected CA fingerprint (argv or `NTF_EXPECTED_FP`) and aborts with exit code 3 before sending the handshake when it does not match. Verified: wrong pin → exit 3, no traffic sent. |
 | N-9 | **`xftp_h2_v71` computed the keyHash from whatever chain the peer presented and never compared it** — a MITM serving its own CA would have been accepted | The probe now requires an expected CA fingerprint (argv or `XFTP_EXPECTED_FP`) and aborts with exit code 3 before the h2 handshake when the served chain's CA fingerprint differs; no pin → exit 2. Live-verified against `xftp1.simplex.im:443`: correct pin → the full cycle still works, wrong pin → exit 3 with zero XFTP bytes sent. |
 | N-10 | **`xftp_h2_v71` panicked while printing the FNEW response** — `&fs[..120]` sliced a lossy `String` by a byte index, which landed inside a multi-byte char in the binary response (`end byte index 120 is not a char boundary`) | Added `truncate_chars(&str, usize)` that truncates on a char boundary; the live FNEW→SIDS→FPUT→FGET→FDEL cycle now completes without a panic. |
+| N-13 | **`tests/persist.rs` was flaky — the encrypted-snapshot tests raced each other** — all three set the *process-global* env var `SMP_STORE_KEY` to different keys, and `store::save`/`store::load` read that global, so under parallel test execution one test could decrypt with another test's key and fail with `decrypt+load with key` | Added explicit-key APIs to the library: `store::save_with_key` / `store::load_with_key` / `seal_with_key` / `unseal_with_key` take the key as an argument instead of reading the environment. The tests now use them; the env-driven `save`/`load` remain for the server binary. Verified: 12 consecutive parallel runs of `tests/persist.rs` → 0 failures (previously it failed intermittently). |
+| N-12 | **The release pipeline could not have worked as written** — three independent defects: (a) `Cargo.toml` said `version = "0.2.0"` while the release plan, the CHANGELOG and the workflow's own tag check all target `v0.99.1`, so the tag would have been rejected by the version check; (b) the changelog commit was pushed to `HEAD:${{ github.ref_name }}` — on a tag event that ref is the *immutable tag*, so the push would have failed and taken the whole job down before publishing; (c) the publish step ran on whatever commit was checked out, not on the tagged commit | Fixed: `Cargo.toml` → `0.99.1`; the changelog commit is pushed to the repository's default branch; the publish step checks out the tag explicitly and uses `--locked`. The crate was never published (crates.io returns 404 for `smp-rs`), so this is the first release and there is no version history to preserve. |
 | N-11 | **No release pipeline** — the crate had no way to produce a tagged, changelogged, published release | Added `.github/workflows/release.yml` (tag → version check against `Cargo.toml` → tests + clippy in both feature configs → `cargo package` → changelog from `git log` → `docs/CHANGELOG.md` → crates.io publish + GitHub release; pre-release tags verify but do not publish) and a seed `docs/CHANGELOG.md`. |
 | N-8 | **The NTF module was unreachable from library code** — `src/ntf.rs` was only used by the probe binary, so the protocol had no public API | Added `NtfClient<S: Read + Write>` with `connect` (mandatory CA pin, fail-closed **before any I/O**), `request`/`request_with_corr`, `ping`; plus the full command/response tag set and transmission/batch framing helpers. 11 unit + 3 e2e tests (mock NTF server). **The live probe was rewritten to use this API**, so the live run now proves the public path: `PING→PONG` OK, wrong pin → exit 3, corrupted keyHash → server closes. |
 
@@ -194,7 +199,7 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 
 | Gate | Current | Action |
 |---|---|---|
-| All tests green, clippy clean | ✅ 83/83 + 0 warnings | keep in CI |
+| All tests green, clippy clean | ✅ **90/90 in every config** (default, `no-default-features`, `v71-probes`, `ffi`) — measured in clean, separate target dirs; clippy `-D warnings` clean in all three feature configs | keep in CI |
 | SMP live interop v17–v23 | ✅ verified | re-run `scripts/live_interop.sh` per release |
 | XFTP live interop | ✅ verified | same |
 | NTF live command round-trip | ◑ `PING→PONG` proven through the **library client**; signed commands pending | implement the authorization envelope per the §4 spec (extracted from the Haskell reference), prove `SNEW→IDSUB` |
@@ -203,7 +208,7 @@ No unbuilt item is reported as a defect, and no defect is reported as unbuilt.
 | No secrets in tree | ✅ verified | keep CI grep |
 | Package metadata + license | ✅ `cargo package` verified | tag and publish to crates.io |
 | CI matrix + `cargo audit` + fuzz job | ✅ matrix + blocking audit + fuzz harness | add a coverage-guided fuzz job when libfuzzer-sys is available |
-| Release pipeline (tags, changelog, publish) | ◑ workflow written; first tag not yet pushed | configure `CARGO_REGISTRY_TOKEN`, push `v0.99.1`, verify the crates.io publish |
+| Release pipeline (tags, changelog, publish) | ◑ workflow written **and its three blocking defects fixed**; first tag not yet pushed | configure `CARGO_REGISTRY_TOKEN`, push `v0.99.1`, verify the crates.io publish |
 | External security review | ❌ | `docs/AUDIT-PROMPT.md` exists; needs refreshing + a reviewer |
 
 **NTF signed commands — what remains:** the wire format, the signed byte string, and the key

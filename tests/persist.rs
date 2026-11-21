@@ -84,51 +84,46 @@ fn queues_survive_restart() {
 #[test]
 fn v0_20_encrypted_snapshot_roundtrip() {
     let key = [0x5Au8; 32];
-    std::env::set_var("SMP_STORE_KEY", hex::encode(key));
     let p = scratch_file("test-smp-enc.bin");
     // build a small state via snapshot_bytes/parse_snapshot directly
     let st = {
         let _e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
         smp_rs::server::ServerState::new()
     };
-    store::save(&p, &st).unwrap();
+    // Explicit-key API: `SMP_STORE_KEY` is process-global state, so using it here would
+    // race the other tests in this binary (which use different keys) under parallel test
+    // execution — a flaky failure, not a real encryption bug.
+    store::save_with_key(&p, &st, Some(key)).unwrap();
     let raw = std::fs::read(&p).unwrap();
     assert!(raw.starts_with(b"SMP1"), "encrypted snapshot must carry SMP1 magic");
-    assert!(!raw.windows(4).any(|w| w == b"SMP1" && &raw[..4] != b"SMP1") || true);
-    let loaded = store::load(&p).expect("decrypt+load with key");
+    let loaded = store::load_with_key(&p, Some(key)).expect("decrypt+load with key");
     assert_eq!(loaded.by_rcv.len(), st.by_rcv.len());
-    std::env::remove_var("SMP_STORE_KEY");
 }
 
 #[test]
 fn v0_20_encrypted_snapshot_tamper_detected() {
     let key = [0x5Bu8; 32];
-    std::env::set_var("SMP_STORE_KEY", hex::encode(key));
     let p = scratch_file("test-smp-tamper.bin");
     let _e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
     let st = smp_rs::server::ServerState::new();
-    store::save(&p, &st).unwrap();
+    store::save_with_key(&p, &st, Some(key)).unwrap();
     let mut raw = std::fs::read(&p).unwrap();
     let n = raw.len();
     raw[n - 1] ^= 0x01; // flip last ciphertext byte -> MAC failure
     std::fs::write(&p, &raw).unwrap();
-    assert!(store::load(&p).is_none(), "tampered snapshot must be rejected");
-    std::env::remove_var("SMP_STORE_KEY");
+    assert!(store::load_with_key(&p, Some(key)).is_none(), "tampered snapshot must be rejected");
 }
 
 #[test]
 fn v0_20_wrong_key_rejected_and_legacy_plaintext_loads() {
     let key = [0x5Cu8; 32];
-    std::env::set_var("SMP_STORE_KEY", hex::encode(key));
     let p = scratch_file("test-smp-key.bin");
     let _e = Engine::bind_plain_store("127.0.0.1:0", None).unwrap();
     let st = smp_rs::server::ServerState::new();
-    store::save(&p, &st).unwrap();
-    std::env::set_var("SMP_STORE_KEY", hex::encode([0x77u8; 32]));
-    assert!(store::load(&p).is_none(), "wrong key must fail MAC");
-    std::env::remove_var("SMP_STORE_KEY");
+    store::save_with_key(&p, &st, Some(key)).unwrap();
+    assert!(store::load_with_key(&p, Some([0x77u8; 32])).is_none(), "wrong key must fail MAC");
     // legacy plaintext snapshot (no key at write time) still loads without key
     let p2 = scratch_file("test-smp-legacy.bin");
     std::fs::write(&p2, store::snapshot_bytes(&st)).unwrap();
-    assert!(store::load(&p2).is_some(), "legacy plaintext snapshot must load");
+    assert!(store::load_with_key(&p2, None).is_some(), "legacy plaintext snapshot must load");
 }
