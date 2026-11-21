@@ -1,6 +1,7 @@
 # simplex-rs — Release Readiness Audit
 
 Date: 2026-11-21 · Head: `4f40068` (v0.99.1 prep) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 9 — **sprint summary** (see §0; the component table below is revision 8)
 Revision: 8 — **deep re-audit from scratch**: every component re-measured on the working tree, the
 previous revision's stale header corrected, and three modules that had never been scored
 (`ffi`, `reconnect`, `async_client`) now measured against their own checklists. The headline moved
@@ -9,6 +10,81 @@ from ~94% to ~80% because the method widened, not because the code regressed (§
 Audit method: local codebase inspection + executable verification (cargo test / clippy / `cargo audit` /
 `cargo package` / live probes against the public SimpleX infrastructure) + cross-check against the
 Haskell reference (`simplexmq/`, `simplex-chat/`) checked out under `~/Projects/simplex-rs/`.
+
+---
+
+## 0. Сводка готовности к релизу — конец спринта (ревизия 9)
+
+Дата: 2026-11-22 · метод: тот же чек-лист из §1b (Correctness 35% / Reachable 25% /
+Verified against reality 25% / Operability 10% / Release hygiene 5%), LOC — кодовые строки
+(непустые, без комментариев), пересчитаны на текущем дереве.
+
+**Итог: ~88% для v1.0** (LOC-взвешенное среднее по 19 кодовым компонентам, 6274 LOC;
+невзвешенное среднее по всем 23 — 85.4%). Ревизия 8 давала 81.9% LOC-взвешенно
+(79.4% невзвешенно) — **+6.0 п.п.**, и это не переоценка: прирост дали четыре
+измеренных работы (async-клиент, reconnect, PQDR-верификация, store).
+
+| Компонент | LOC | ревизия 8 | сейчас | что изменилось |
+|---|---:|---:|---:|---|
+| `encoding` | 131 | 95% | **95%** | — |
+| `crypto` | 195 | 92% | **92%** | — |
+| `protocol` | 451 | 95% | **95%** | — |
+| `transport` | 472 | 90% | **90%** | — |
+| `server` | 926 | 90% | **90%** | — |
+| `client` | 290 | 92% | **95%** | W4: async-клиент больше не дыра |
+| `store` | 433 | 88% | **95%** | W6-4.4 advisory-lock + single-instance; W6-4.5 версии store + rollback |
+| `agent` | 538 | 82% | **82%** | — |
+| `pq+pqdr` | 718 | 80% | **92%** | W6-4.1 SUPERCOP KAT (cross-implementation); 4.2 rotation + reorder window |
+| `xftp` | 278 | 90% | **90%** | — |
+| `ntf` | 583 | 85% | **85%** | — |
+| `sb_chain` | 179 | 70% | **70%** | — |
+| `proxy` | 171 | 70% | **70%** | — |
+| `onion` | 157 | 90% | **90%** | — |
+| `chat` | 87 | 75% | **75%** | — |
+| `identity` | 64 | 85% | **85%** | — |
+| `ffi` | 56 | 55% | **80%** | W5: cdylib + uniffi-scaffolding + Kotlin-биндинги + smoke-тест (не гоняется в CI) |
+| `reconnect` | 242 | 40% | **85%** | W1 подключён к Agent; W4-4.2 backoff-цикл + recorded delays |
+| `async_client` | 303 | 35% | **78%** | W4-4.1 настоящий tokio-клиент (был sync-фейс в worker thread) |
+| Packaging / crates.io | — | 88% | **88%** | — |
+| CI matrix | — | 90% | **90%** | — |
+| Release pipeline | — | 75% | **75%** | — |
+| Docs | — | 75% | **78%** | план/ROADMAP актуальны; AUDIT-REPORT.md ещё устарел |
+
+**Что это означает по существу.** Протокольное ядро (wire/crypto/protocol/transport/XFTP/NTF) —
+85–95%, оно проверено живыми раунд-трипами против публичной инфраструктуры. Дыры, которые
+остались, не в протоколе, а в слоях вокруг него: FFI-фасад не проверяется в CI, async-клиент
+не имеет собственного auto-reconnect, публикация на crates.io ни разу не выполнялась,
+внешний аудит (G7) не заказан, а `docs/AUDIT-REPORT.md` устарел.
+
+### Гейты плана эволюции (G1–G12)
+
+| # | Цель | Было | Стало | Комментарий |
+|---|---|---:|---:|---|
+| G1 | Подписанные NTF `TNEW`/`SNEW` | 60% | **85%** | W2 закрыт локально (e2e + wire-векторы); публичный NTF не выдаёт токены сторонним клиентам — live-критерий невыполним |
+| G2 | Onion routing поверх SMP proxy | 80% | **90%** | 2-хоповый e2e + 3-хоповая цепочка и `Client::onion_send` (W3); live невозможен — релей отключил proxy |
+| G3 | Async-движок с auto-reconnect | 70% / 75% | **78% / 85%** | настоящий tokio-клиент + backoff-цикл; у async-клиента своего reconnect пока нет |
+| G4 | sessionId ↔ TLS 1.3 Finished | 90% | **90%** | ограничение rustls-exporter задокументировано |
+| G5 | Чистка `unwrap`/`expect` в `src/` | 2 остались | **100%** | нетестовых panic-site'ов — **0** (`scripts/check_no_unwrap.sh`) |
+| G6 | PQDR: rotation, reorder, KAT | 100% | **100%** | SUPERCOP KAT — кросс-реализационный (Rust ↔ supercop-20201130) |
+| G7 | Внешний аудит (3 зоны) | 0% | **0%** | не заказан — блокер релиза |
+| G8 | Публикация v0.99.1 на crates.io | 88% | **88%** | путь publish не выполнялся ни разу (нет тега и токена) |
+| G9 | CI: дефолтная сборка без probe-бинов | — | **50%** | факт проверен (probe-бинов в дефолтной сборке нет), но CI-ассерта в workflow нет |
+| G10 | FFI-фасад для Android/Paranoid | 55% | **80%** | cdylib + uniffi + Kotlin-биндинги + smoke-тест; smoke не гоняется в CI |
+| G11 | Live NTF/XFTP против публичных релеев | частично | **85%** | live `PING→PONG` и XFTP 1 MiB byte-exact; NTF-токены публичным сервером не выдаются |
+| G12 | Актуальная документация | 75% | **78%** | план/ROADMAP актуальны; `docs/AUDIT-REPORT.md` ещё устарел |
+
+### Что осталось до v1.0
+
+| Волна | Статус | Осталось |
+|---|---|---|
+| W0–W4 | ✅ | — |
+| W5 | 🔶 2/3 | прогнать Kotlin-smoke в CI (джоб в `ci.yml`) |
+| W6 | 🔶 5/6 | Task 6.3 — live-прогон NTF/PROXY с зафиксированным выводом |
+| W7 | ⬜ 0/7 | CI-ассерт probe-бинов, регенерация `AUDIT-REPORT.md`, обновление `AUDIT.md`, **внешний аудит**, `cargo publish`, SBOM+provenance, финальный аудит-проход |
+
+**Вердикт:** для закрытой беты и публикации библиотеки как v0.99.1 — готово (~88%),
+для публичного production-релиза v1.0 — нет: блокеры — внешний аудит (G7), непрогнанный
+publish-путь (G8) и неаудированные продуктовые слои (FFI в CI, reconnect у async-клиента).
 
 ---
 

@@ -22,18 +22,18 @@ sntrup761 0.4, uniffi (новый), cargo-audit / cargo-deny.
 
 | # | Цель | Источник | Компонент | Текущий % |
 |---|---|---|---|---:|
-| G1 | Подписанные NTF-команды `TNEW`/`SNEW` (Ed25519-авторизация) | `README.md:64`, ROADMAP #2 | `ntf` | 60% |
-| G2 | Onion routing поверх SMP proxy — **stated platform goal** | ROADMAP #4, `ПОСЛАНИЕ` #1 | `onion` | 80% |
-| G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 70%, 75% |
+| G1 | Подписанные NTF-команды `TNEW`/`SNEW` (Ed25519-авторизация) | `README.md:64`, ROADMAP #2 | `ntf` | 85% (W2 закрыт локально) |
+| G2 | Onion routing поверх SMP proxy — **stated platform goal** | ROADMAP #4, `ПОСЛАНИЕ` #1 | `onion` | 90% (2+3 хопа e2e) |
+| G3 | Async-движок с auto-reconnect | ROADMAP #5, `ПОСЛАНИЕ` #5 | `async_client`, `reconnect` | 78%, 85% (W1+W4) |
 | G4 | sessionId ↔ TLS 1.3 Finished (реальный verify_data) | ROADMAP #1, `ПОСЛАНИЕ` #2 | `transport` | 90% |
-| G5 | Чистка `unwrap`/`expect` в `src/` (цель: 0 вне тестов) | `ПОСЛАНИЕ` #4 | весь `src/` | 2 остались |
+| G5 | Чистка `unwrap`/`expect` в `src/` (цель: 0 вне тестов) | `ПОСЛАНИЕ` #4 | весь `src/` | 100% — 0 нетестовых panic-site'ов |
 | G6 | PQDR: key rotation ✅, reorder window ✅, SUPERCOP KAT ✅ (cross-implementation: Rust ↔ supercop-20201130, `tests/pqdr_supercop.rs`) | `ПОСЛАНИЕ` #6 | `pq`, `pqdr` | 100% |
 | G7 | Внешний аудит (3 зоны) | ROADMAP #6, `ПОСЛАНИЕ` #7 | проект | 0% |
 | G8 | Публикация v0.99.1 на crates.io + GitHub release | `README.md:49` | Packaging | 88% |
-| G9 | CI: ассерт, что дефолтная сборка не линкует probe-бины | `ПОСЛАНИЕ` (рекомендации) | CI | — |
-| G10 | FFI-фасад, пригодный для Android/Paranoid | `src/ffi.rs:2` | `ffi` | 55% |
-| G11 | Live NTF/XFTP против публичных релеев | ROADMAP #2 | `ntf`, `xftp` | частично |
-| G12 | Актуальная документация (1 источник правды) | N-15 | Docs | 75% |
+| G9 | CI: ассерт, что дефолтная сборка не линкует probe-бины | `ПОСЛАНИЕ` (рекомендации) | CI | 50% (факт верен, ассерта в CI нет) |
+| G10 | FFI-фасад, пригодный для Android/Paranoid | `src/ffi.rs:2` | `ffi` | 80% (cdylib+uniffi+Kotlin; smoke не в CI) |
+| G11 | Live NTF/XFTP против публичных релеев | ROADMAP #2 | `ntf`, `xftp` | 85% |
+| G12 | Актуальная документация (1 источник правды) | N-15 | Docs | 78% |
 
 **Определение 100%:** каждая строка таблицы §1b аудита = 100%, все гейты §5 закрыты,
 `cargo publish` выполнен и `cargo info smp-rs` показывает v0.99.1.
