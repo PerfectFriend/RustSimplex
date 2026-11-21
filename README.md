@@ -18,7 +18,8 @@
 | Команды | `src/protocol.rs` | `Protocol.hs` — NEW/IDS/SUB/SOK/SEND/MSG/ACK/KEY/SKEY/GET/OFF/DEL/PING + OK/ERR/PONG/END/DELD |
 | Транспорт | `src/transport.rs` | transmission = `short(auth) short(corrId) short(entityId) cmd`; блок 16384B = `pad( count <> concat(large(transmission)) )`; handshake routerHello/clientHello; TLS 1.3 + пиннинг по CA-fingerprint |
 | Роутер | `src/server.rs` | in-memory очередь + push, NTF-креденшелы, XFTP-пакеты, snapshot с AEAD-шифрованием |
-| Клиент | `src/client.rs`, `src/async_client.rs`, `src/reconnect.rs` | handshake, запрос/ответ по блокам, авто-reconnect с backoff, async-движок |
+| Клиент | `src/client.rs` | handshake, запрос/ответ по блокам |
+| Async / reconnect | `src/async_client.rs`, `src/reconnect.rs` | ⚠️ **не подключены к живому пути** — API существует, но не вызывается ниоткуда; см. `docs/RELEASE-READINESS.md` §1b |
 | **NTF** | `src/ntf.rs` | `Notifications/Transport.hs` — отдельный протокол: блок **512B**, свой handshake (`NtfServerHandshake`/`NtfClientHandshake`), свой тегсет команд (`TNEW/SNEW/PING`), batch-трансмиссии (`u8 count` + `Large`), `implySessId`. Публичный API: `NtfClient` (`connect` с обязательным пиннингом CA, `request`, `ping`) |
 | E2E | `src/pqdr.rs` | `Ratchet.hs` — SNTRUP761 KEM + double ratchet, KDF HKDF-SHA512 (`SimpleXRootRatchet`/`SimpleXChainRatchet`) |
 | Agent | `src/agent.rs`, `src/chat.rs` | agent-протокол v7..v20, PQDR E2E **включён по умолчанию** |
@@ -26,13 +27,15 @@
 ## Проверка
 
 ```bash
-cargo test --offline -- --test-threads=1                     # 90 тестов, все зелёные
+cargo test --offline                                        # 90 тестов, все зелёные (параллельно)
 SMP_STRICT=1 cargo test --offline --test strict_e2e --test ntf --test proxy   # 3/3
 cargo clippy --offline --all-targets                         # 0 warnings
 cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 ```
 
-Тесты обязаны запускаться с `--test-threads=1`: часть тестов мутирует process-wide env.
+Тесты можно запускать параллельно: гонка с process-global `SMP_STORE_KEY` устранена
+(явные `store::save_with_key` / `load_with_key`). Остаточная мутация env — в
+`tests/proxy.rs`, `tests/onion.rs`, `tests/strict_e2e.rs`; она изолируется в волне W1.
 
 ### Live-интероп (проверено против публичной инфраструктуры)
 
@@ -41,7 +44,7 @@ cargo clippy --offline --features v71-probes --all-targets   # 0 warnings
 | `smp11.simplex.im:5223` (SMP v17–v23) | полный цикл `PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG(decrypt), ACK→OK, DEL→OK` — все 7 версий |
 | `xftp1.simplex.im:443` (XFTP v4) | `PING→PONG, FNEW→SIDS, FPUT 64KB→OK, FGET→FILE (byte-exact decrypt), FDEL→OK`; CA fingerprint **обязателен** (неверный пин → exit 3 до первого байта XFTP) |
 | `ntf2.simplex.im:443` (NTF, ALPN `ntf/1`) | handshake принят, **`PING→PONG` через библиотечный `NtfClient`** (NTF v3, sessionId 32B, corrMatch=true); пин CA-fingerprint подтверждён отрицательным контролем (неверный пин → exit 3, ничего не отправляется) |
-| onion routing поверх SMP proxy | 2-hop round-trip + отрицательный тест (неверный hop-key) |
+| onion routing поверх SMP proxy | **локально** (не live): 2-hop round-trip через вложенные PROXY/PFWD + отрицательный тест (неверный hop-key). Публичные релеи отключили proxy серверной стороне |
 
 Скрипты: `scripts/live_public_smp.sh`, `scripts/live_interop.sh` (SMP + XFTP + NTF, все с пином),
 `scripts/check.sh`.
