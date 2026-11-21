@@ -19,6 +19,7 @@
 
 use crate::crypto::sha256;
 use crate::encoding::{w_short, w_u16, Reader};
+use ed25519_dalek::{Signer, SigningKey};
 use std::io::{Read, Write};
 
 pub const NTF_BLOCK_SIZE: usize = 512;
@@ -184,6 +185,163 @@ impl NtfCommand {
         }
         v
     }
+}
+
+// ---------------------------------------------------------------------------
+// NTF signed commands (TNEW / SNEW) — W2, Task 2.1 + 2.2
+//
+// Reference (vendored Haskell-etalon `simplexmq/`):
+//
+//   Notifications/Protocol.hs:168-172
+//     instance Encoding (NewNtfEntity e) where
+//       NewNtfTkn tkn verifyKey dhPubKey -> smpEncode ('T', tkn, verifyKey, dhPubKey)
+//       NewNtfSub tknId smpQueue notifierKey -> smpEncode ('S', tknId, smpQueue, notifierKey)
+//
+//   Notifications/Protocol.hs:248-249
+//     TNEW {} -> sigNoEntity ; SNEW {} -> sigNoEntity
+//     (i.e. entityId is empty for these two commands)
+//
+//   Protocol.hs:2343-2349
+//     tForAuth = smpEncode sessionId <> t'
+//     t'       = encodeTransmission_ v t
+//     encodeTransmission_ v (CorrId corrId, queueId, command) =
+//       smpEncode (corrId, queueId) <> encodeProtocol v command
+//
+//   Protocol.hs:1744-1757 (server side)
+//     authorized' = if implySessId then smpEncode sessionId <> authorized else authorized
+//     => on NTF v2+ the sessionId is NOT on the wire but IS part of the signed bytes.
+//
+//   Encoding.hs:102-104 — a Haskell `ByteString` encodes as a 1-byte length prefix
+//   ("shortString"): `smpEncode s = B.cons (lenEncode $ B.length s) s`.
+// ---------------------------------------------------------------------------
+
+/// The `authorized` bytes of an NTF command — the exact byte string that is signed.
+///
+/// Haskell `Protocol.hs:2347`: `tForAuth = smpEncode sessionId <> t'` where
+/// `t' = smpEncode (corrId, queueId) <> command`.
+///
+/// Every component is a Haskell `ByteString` and therefore carries a 1-byte length prefix.
+///
+/// `entity_id` is empty for `TNEW`/`SNEW` (Haskell `sigNoEntity`) and carries the
+/// subscription/token id for the other commands.
+pub fn ntf_authorized_bytes(
+    session_id: &[u8],
+    corr_id: &[u8],
+    entity_id: &[u8],
+    command: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut v = Vec::new();
+    w_short(&mut v, session_id).map_err(|e| e.to_string())?;
+    w_short(&mut v, corr_id).map_err(|e| e.to_string())?;
+    w_short(&mut v, entity_id).map_err(|e| e.to_string())?;
+    v.extend_from_slice(command);
+    Ok(v)
+}
+
+/// Sign an NTF command with Ed25519 over [`ntf_authorized_bytes`].
+///
+/// This is the NTF counterpart of `protocol::auth_sign`: the signature replaces the
+/// `authenticator` field of the transmission.
+pub fn sign_ntf_command(
+    session_id: &[u8],
+    corr_id: &[u8],
+    entity_id: &[u8],
+    command: &[u8],
+    sk: &ed25519_dalek::SigningKey,
+) -> [u8; 64] {
+    let msg = ntf_authorized_bytes(session_id, corr_id, entity_id, command)
+        .expect("ntf_authorized_bytes: lengths are bounded by the 1-byte shortString limit");
+    sk.sign(&msg).to_bytes()
+}
+
+/// Verify an NTF command signature against the `authorized` bytes.
+pub fn verify_ntf_command(
+    session_id: &[u8],
+    corr_id: &[u8],
+    entity_id: &[u8],
+    command: &[u8],
+    pub_raw: &[u8; 32],
+    signature: &[u8],
+) -> bool {
+    if signature.len() != 64 {
+        return false;
+    }
+    let Ok(msg) = ntf_authorized_bytes(session_id, corr_id, entity_id, command) else {
+        return false;
+    };
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(signature);
+    crate::crypto::ed25519_verify(pub_raw, &msg, &sig)
+}
+
+/// Wire encoding of `NewNtfEntity 'Token`.
+///
+/// Haskell: `smpEncode ('T', tkn, verifyKey, dhPubKey)` — a `Char` is one byte
+/// (`Encoding.hs:54-56`), and each `ByteString` gets a 1-byte length prefix.
+///
+/// * `token` — the device token (`DeviceToken`);
+/// * `verify_key` — the Ed25519 public auth key as SPKI DER;
+/// * `dh_pub_key` — the X25519 public key as SPKI DER.
+pub fn encode_new_ntf_token(
+    token: &[u8],
+    verify_key: &[u8],
+    dh_pub_key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut v = Vec::with_capacity(1 + token.len() + verify_key.len() + dh_pub_key.len() + 3);
+    v.push(b'T');
+    w_short(&mut v, token).map_err(|e| e.to_string())?;
+    w_short(&mut v, verify_key).map_err(|e| e.to_string())?;
+    w_short(&mut v, dh_pub_key).map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+/// Wire encoding of `NewNtfEntity 'Subscription`.
+///
+/// Haskell: `smpEncode ('S', tknId, smpQueue, notifierKey)` where
+/// `SMPQueueNtf` = `smpEncode (smpServer, notifierId)`
+/// (`Notifications/Protocol.hs:384-395`).
+///
+/// * `tkn_id` — the notification token id;
+/// * `smp_server` — the SMP server address of the subscription;
+/// * `notifier_id` — the notifier (queue) id of the subscription;
+/// * `notifier_key` — the Ed25519 public auth key of the notifier, as SPKI DER.
+pub fn encode_new_ntf_sub(
+    tkn_id: &[u8],
+    smp_server: &[u8],
+    notifier_id: &[u8],
+    notifier_key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut v = Vec::with_capacity(1 + tkn_id.len() + smp_server.len() + notifier_id.len() + notifier_key.len() + 4);
+    v.push(b'S');
+    w_short(&mut v, tkn_id).map_err(|e| e.to_string())?;
+    // SMPQueueNtf = smpEncode (smpServer, notifierId)
+    w_short(&mut v, smp_server).map_err(|e| e.to_string())?;
+    w_short(&mut v, notifier_id).map_err(|e| e.to_string())?;
+    w_short(&mut v, notifier_key).map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+/// Build the full `TNEW` command bytes: `TNEW ` + encoded `NewNtfEntity 'Token`.
+///
+/// Haskell: `e (TNEW_, ' ', newTkn)` (`Notifications/Protocol.hs:198`).
+pub fn build_tnew(token: &[u8], verify_key: &[u8], dh_pub_key: &[u8]) -> Result<Vec<u8>, String> {
+    let mut v = b"TNEW ".to_vec();
+    v.extend_from_slice(&encode_new_ntf_token(token, verify_key, dh_pub_key)?);
+    Ok(v)
+}
+
+/// Build the full `SNEW` command bytes: `SNEW ` + encoded `NewNtfEntity 'Subscription`.
+///
+/// Haskell: `e (SNEW_, ' ', newSub)` (`Notifications/Protocol.hs:210`).
+pub fn build_snew(
+    tkn_id: &[u8],
+    smp_server: &[u8],
+    notifier_id: &[u8],
+    notifier_key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut v = b"SNEW ".to_vec();
+    v.extend_from_slice(&encode_new_ntf_sub(tkn_id, smp_server, notifier_id, notifier_key)?);
+    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
