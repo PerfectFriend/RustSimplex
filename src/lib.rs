@@ -17,6 +17,12 @@ pub mod identity;
 pub mod agent;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+
+// The uniffi scaffolding: it defines the crate's `UniFfiTag` (the type that
+// parameterises the FFI converter traits) and the exported `extern "C"` entry
+// points the generated Kotlin bindings call. It must live at the crate root.
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!("smp_rs");
 pub mod chat;
 pub mod crypto;
 pub mod encoding;

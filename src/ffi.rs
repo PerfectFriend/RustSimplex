@@ -1,5 +1,7 @@
 //! FFI-friendly facade (feature `ffi`): no std::env, opaque handles, String errors.
 //! Ready for uniffi/cdylib binding to Android (Paranoid).
+pub mod uniffi;
+
 use crate::agent::Agent;
 use crate::client::Client;
 use std::collections::HashMap;

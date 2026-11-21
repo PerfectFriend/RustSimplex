@@ -16,6 +16,16 @@ exclude = ["simplexmq/", "spec/", "docs/", "scripts/", ".github/"]
 [lib]
 name = "smp_rs"
 path = "src/lib.rs"
+# cdylib: the Android/Kotlin side links libsmp_rs.so (W5-Task 5.1);
+# rlib stays for the Rust tests and binaries.
+crate-type = ["cdylib", "rlib"]
+
+# The uniffi-bindgen CLI, vendored as a package binary: the Kotlin bindings are
+# generated offline from the built libsmp_rs.so, with no separate tool install.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["ffi"]
 
 [[bin]]
 name = "smp-server"
@@ -47,9 +57,14 @@ required-features = ["v71-probes"]
 [features]
 default = []
 v71-probes = ["dep:openssl", "dep:tokio-openssl"]
-ffi = []
+# FFI facade: uniffi scaffolding + the vendored uniffi-bindgen CLI (W5).
+ffi = ["dep:uniffi"]
 
 [dependencies]
+uniffi = { version = "0.28", features = ["cli"], optional = true }
+# The "build" feature (UDL scaffolding) is intentionally NOT enabled: the facade
+# uses proc-macro exports (#[uniffi::export]), so no build.rs and no askama
+# template engine are needed — which also keeps the build offline-friendly.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 xsalsa20poly1305 = "0.9"
