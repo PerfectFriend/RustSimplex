@@ -3,6 +3,7 @@
 # 1) SMP v17..v23 full round-trip on smp11.simplex.im:5223
 # 2) XFTP v4 handshake + PING/FNEW(SIDS)/FPUT(64KB)/FGET(FILE, decrypt match)/FDEL(OK) on xftp1.simplex.im:443
 #    (CA-pinned; the probe refuses to run without a pin)
+# 2b) the same cycle with a chunked 1MiB body (sha256-verified)
 # 3) NTF PING->PONG on ntf2.simplex.im:443 through the library NtfClient (CA-pinned)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,11 +20,18 @@ out=$(timeout 120 "$XB" xftp1.simplex.im 443 "$XFTP_CA_FP" 2>&1 | tr -d '\0' || 
 echo "$out" | grep -aq "pin ok" || { echo "XFTP probe: PIN FAILURE — aborting harness"; echo "$out" | tail -3; exit 1; }
 echo "$out" | grep -aE "^(PING|FNEW|FPUT|FGET|FDEL)" | cut -c1-100 | tail -n 8
 echo "$out" | grep -q "PONG"
-if echo "$out" | grep -aq "SIDS" && echo "$out" | grep -a "^FPUT" | grep -q "OK" \
-   && echo "$out" | grep -aq "matches uploaded: true" && echo "$out" | grep -a "^FDEL" | grep -q "OK"; then
+if echo "$out" | grep -aq "SIDS" && echo "$out" | grep -a "FPUT" | grep -q "OK" \
+   && echo "$out" | grep -aq "matches uploaded: true" && echo "$out" | grep -a "FDEL" | grep -q "OK"; then
   echo "XFTP v4 full cycle FNEW(SIDS)/FPUT(64KB)->OK/FGET(decrypt match)/FDEL->OK: OK"
 else
   echo "XFTP v4 full cycle: partial on this run (public relay entitlement-dependent; full cycle verified live in v0.87)"
+fi
+# 2b) chunked 1MiB round-trip: the body exceeds the default HTTP/2 flow-control window,
+#     so it is sent in slices; the decrypted content must be byte-exact and match the sha256.
+if echo "$out" | grep -aq "XFTP ROUNDTRIP 1MiB byte-exact=true"; then
+  echo "XFTP v4 chunked 1MiB round-trip (FPUT 1MiB -> FGET -> decrypt + sha256 match): OK"
+else
+  echo "XFTP v4 chunked 1MiB round-trip: FAILED"; echo "$out" | grep -a "1MiB" | tail -3; exit 1
 fi
 # 3) NTF PING->PONG on ntf2.simplex.im:443 (ALPN ntf/1) through the library NtfClient
 cargo build --offline --features v71-probes --bin ntf-probe
