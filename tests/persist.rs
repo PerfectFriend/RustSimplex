@@ -180,8 +180,11 @@ fn spawn_store_child(
         go.display()
     );
     std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", "store_lock_child", "--ignored", "--nocapture"])
+        .args(["--exact", "store_lock_child", "--ignored"])
         .env("SMP_STORE_CHILD", spec)
+        // the child's own harness output must not pollute the parent's
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn child")
 }
