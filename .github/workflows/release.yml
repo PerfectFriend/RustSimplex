@@ -28,6 +28,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,6 +65,20 @@ jobs:
 
       - name: Package verification
         run: cargo package --allow-dirty
+
+      - name: Generate the SBOM (CycloneDX 1.5)
+        run: python3 scripts/sbom.py --output target/package/sbom.cdx.json
+
+      - name: Attach the SBOM to the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: target/package/sbom.cdx.json
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: target/package/*.crate
 
       - name: Generate changelog
         id: changelog
