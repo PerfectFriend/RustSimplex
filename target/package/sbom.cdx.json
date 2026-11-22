@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:286e38f1-1ebf-4abb-aeaf-94ac43c7d0b1",
+  "serialNumber": "urn:uuid:10120c23-1e1f-42a4-b749-32b8d4e44d0f",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-22T00:18:43Z",
+    "timestamp": "2026-11-22T17:57:19Z",
     "tools": [
       {
         "vendor": "smp-rs",

@@ -5,7 +5,7 @@
 ```bash
 cd simplex-rs
 export CARGO_HOME=$HOME/build/rust/cargo   # если toolchain в ~/build
-cargo test --test-threads=1                # 33 теста, все зелёные (2026-11-12)
+cargo test --test-threads=1                # 148 тестов, все зелёные (2026-11-22)
 cargo clippy --all-targets 2>/dev/null | tail # замечания не fatal
 ```
 
@@ -21,6 +21,12 @@ cargo clippy --all-targets 2>/dev/null | tail # замечания не fatal
 | `src/pq.rs` | `Crypto/SNTRUP761.hs` | kemHybridSecret = SHA3-256(dh‖kem) (KAT в tests/pqdr.rs против hashlib); kemParams '0'/'1P'/'1A' largeString |
 | `src/xftp.rs`, `src/bin/xftp_h2.rs` | `FileTransfer/*`, `Transport/HTTP2` | блок = u16 len + payload + 0x23-pad до 16384; FILE tail-tag ct‖mac; tEncodeBatch1 |
 | `src/agent.rs`, `src/chat.rs` | `protocol/agent-protocol.md` | decryptedAgentMessage I/D/M…; connInfo JSON + e2eRatchetParams |
+| `src/pqdr.rs` | `Crypto/SNTRUP761.hs`, ratchet | rotation/reorder-window; SUPERCOP KAT в `tests/pqdr_supercop.rs` (эталон — `simplexmq/cbits/sntrup761.c`) |
+| `src/ntf.rs` | `Simplex.Messaging.NtfServer` | подписанные `TNEW`/`SNEW` (Ed25519), CA-пин обязателен; локальный NTF-сервер e2e |
+| `src/store.rs` | `Simplex.Messaging.Server` | версионированный формат (v1→v2), миграции с rollback, advisory-lock, single-instance |
+| `src/reconnect.rs` | — | backoff-цикл, `ReconnectingClient` подключён к `Agent` через `SmpTransport` |
+| `src/async_client.rs` | — | настоящий async-клиент (`tokio` + `tokio-rustls`), TLS 1.3, strict v23 |
+| `src/ffi.rs`, `src/ffi/uniffi.rs` | — | uniffi-фасад; Kotlin-smoke — `scripts/ffi_smoke.sh` |
 
 ## Ключевые известные-answer тесты
 
@@ -31,7 +37,15 @@ cargo clippy --all-targets 2>/dev/null | tail # замечания не fatal
 - `tests/interop.rs` — e2e Rust↔Rust: NEW→IDS→SUB→SEND→MSG→decrypt→ACK→DEL,
   plus `ERR AUTH` при неверном ключе.
 
-## Live interop (было верифицировано против настоящих бинарников v6.5.0.17)
+## Полный аудит-отчёт и готовность к релизу
+
+- `docs/AUDIT-REPORT.md` — актуальный отчёт (ревизия 9, 2026-11-22): готовность по
+  компонентам, гейты G1–G12, ограничения, команды-доказательства.
+- `docs/AUDIT-REPORT-2026-11-12.md` — предыдущий отчёт (история; его числа устарели).
+- `docs/RELEASE-READINESS.md` §0 — сводная готовность к релизу.
+
+## Live interop (верифицировано против настоящих бинарников v6.5.0.17 и против публичной
+инфраструктуры; лог прогона 2026-11-22 — `docs/live/live-interop-2026-11-22.log`)
 
 - SMP: `smp-server :5223 --tls` → PING→PONG, NEW→IDS, SUB→SOK, SEND→MSG
   (decrypt OK), ACK, DEL; NKEY→NID, NSUB, SEND(notify)→NMSG.

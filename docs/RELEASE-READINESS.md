@@ -1,6 +1,6 @@
 # simplex-rs — Release Readiness Audit
 
-Date: 2026-11-21 · Head: `4f40068` (v0.99.1 prep) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Date: 2026-11-22 · Head: `main` (closeout-спринт, v0.99.1) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
 Revision: 9 — **sprint summary** (see §0; the component table below is revision 8)
 Revision: 8 — **deep re-audit from scratch**: every component re-measured on the working tree, the
 previous revision's stale header corrected, and three modules that had never been scored
@@ -42,19 +42,27 @@ Verified against reality 25% / Operability 10% / Release hygiene 5%), LOC — к
 | `onion` | 157 | 90% | **90%** | — |
 | `chat` | 87 | 75% | **75%** | — |
 | `identity` | 64 | 85% | **85%** | — |
-| `ffi` | 56 | 55% | **80%** | W5: cdylib + uniffi-scaffolding + Kotlin-биндинги + smoke-тест (не гоняется в CI) |
+| `ffi` | 56 | 55% | **85%** | W5 закрыт: cdylib + uniffi + Kotlin-биндинги; **smoke реально проходит** (`scripts/ffi_smoke.sh` → `FFI SMOKE: OK`), CI-джоб `ffi-smoke` добавлен |
 | `reconnect` | 242 | 40% | **85%** | W1 подключён к Agent; W4-4.2 backoff-цикл + recorded delays |
 | `async_client` | 303 | 35% | **78%** | W4-4.1 настоящий tokio-клиент (был sync-фейс в worker thread) |
 | Packaging / crates.io | — | 88% | **88%** | — |
-| CI matrix | — | 90% | **90%** | — |
-| Release pipeline | — | 75% | **75%** | — |
-| Docs | — | 75% | **78%** | план/ROADMAP актуальны; AUDIT-REPORT.md ещё устарел |
+| CI matrix | — | 90% | **92%** | добавлены джобы `probe-isolation` (G9) и `ffi-smoke` (G10) |
+| Release pipeline | — | 75% | **82%** | SBOM (CycloneDX 1.5, 219 компонент) + attestation provenance |
+| Docs | — | 75% | **85%** | `AUDIT-REPORT.md` перегенерирован (ревизия 9), письмо аудитору обновлено, план закрытия добавлен |
 
 **Что это означает по существу.** Протокольное ядро (wire/crypto/protocol/transport/XFTP/NTF) —
 85–95%, оно проверено живыми раунд-трипами против публичной инфраструктуры. Дыры, которые
-остались, не в протоколе, а в слоях вокруг него: FFI-фасад не проверяется в CI, async-клиент
-не имеет собственного auto-reconnect, публикация на crates.io ни разу не выполнялась,
-внешний аудит (G7) не заказан, а `docs/AUDIT-REPORT.md` устарел.
+остались, не в протоколе, а в слоях вокруг него: async-клиент не имеет собственного
+auto-reconnect, публикация на crates.io ни разу не выполнялась, внешний аудит (G7) не
+заказан, а мобильная нога интероперабельности требует agent-mode CLI.
+
+**Спринт закрытия (2026-11-22) — что добавлено:** живой прогон против публичной инфраструктуры
+с сохранённым логом (`docs/live/live-interop-2026-11-22.log`: SMP v17–v23 7/7, XFTP 1 MiB
+byte-exact, NTF PONG, proxy отклюлён релеем — подтверждённый факт), реально проходящий
+Kotlin→uniffi→JNA→cdylib→Rust smoke-тест, CI-джобы `probe-isolation` и `ffi-smoke`,
+SBOM + provenance в релиз-пайплайне, перегенерированный аудит-отчёт и письмо аудитору.
+Финальный гейт: 148/0 (default), 150/0 (`v71-probes`), clippy 0/0, `cargo package` OK,
+`cargo audit` — 4 известных advisory в allowlist, FFI smoke OK, SBOM 219 компонент.
 
 ### Гейты плана эволюции (G1–G12)
 
@@ -68,23 +76,25 @@ Verified against reality 25% / Operability 10% / Release hygiene 5%), LOC — к
 | G6 | PQDR: rotation, reorder, KAT | 100% | **100%** | SUPERCOP KAT — кросс-реализационный (Rust ↔ supercop-20201130) |
 | G7 | Внешний аудит (3 зоны) | 0% | **0%** | не заказан — блокер релиза |
 | G8 | Публикация v0.99.1 на crates.io | 88% | **88%** | путь publish не выполнялся ни разу (нет тега и токена) |
-| G9 | CI: дефолтная сборка без probe-бинов | — | **50%** | факт проверен (probe-бинов в дефолтной сборке нет), но CI-ассерта в workflow нет |
-| G10 | FFI-фасад для Android/Paranoid | 55% | **80%** | cdylib + uniffi + Kotlin-биндинги + smoke-тест; smoke не гоняется в CI |
-| G11 | Live NTF/XFTP против публичных релеев | частично | **85%** | live `PING→PONG` и XFTP 1 MiB byte-exact; NTF-токены публичным сервером не выдаются |
-| G12 | Актуальная документация | 75% | **78%** | план/ROADMAP актуальны; `docs/AUDIT-REPORT.md` ещё устарел |
+| G9 | CI: дефолтная сборка без probe-бинов | — | **70%** | джоб `probe-isolation` добавлен в `ci.yml` (ассертит отсутствие `smp-v71`/`xftp-h2-v71`/`ntf-probe`); на GitHub ещё не прогонялся |
+| G10 | FFI-фасад для Android/Paranoid | 55% | **85%** | cdylib + uniffi + Kotlin-биндинги; smoke **локально проходит** (`FFI SMOKE: OK`), CI-джоб `ffi-smoke` добавлен (на GitHub ещё не прогонялся) |
+| G11 | Live NTF/XFTP против публичных релеев | частично | **90%** | полный прогон с логом 2026-11-22: SMP v17–v23 7/7, XFTP 1 MiB byte-exact, NTF PONG; NTF-токены публичным сервером не выдаются |
+| G12 | Актуальная документация | 75% | **88%** | `docs/AUDIT-REPORT.md` перегенерирован (ревизия 9); старый сохранён как `AUDIT-REPORT-2026-11-12.md`; письмо аудитору и план закрытия актуальны |
 
 ### Что осталось до v1.0
 
 | Волна | Статус | Осталось |
 |---|---|---|
 | W0–W4 | ✅ | — |
-| W5 | 🔶 2/3 | прогнать Kotlin-smoke в CI (джоб в `ci.yml`) |
-| W6 | 🔶 5/6 | Task 6.3 — live-прогон NTF/PROXY с зафиксированным выводом |
-| W7 | ⬜ 0/7 | CI-ассерт probe-бинов, регенерация `AUDIT-REPORT.md`, обновление `AUDIT.md`, **внешний аудит**, `cargo publish`, SBOM+provenance, финальный аудит-проход |
+| W5 | ✅ 3/3 | — (Kotlin-smoke проходит локально, CI-джоб `ffi-smoke` добавлен) |
+| W6 | ✅ 6/6 | — (Task 6.3 закрыт: лог `docs/live/live-interop-2026-11-22.log`) |
+| W7 | 🔶 5/7 | закрыты 7.1 (CI-ассерт probe-бинов), 7.2 (регенерация `AUDIT-REPORT.md`), 7.3 (`AUDIT.md`), 7.6 (SBOM + provenance), 7.7 (финальный аудит-проход); остались **7.4 внешний аудит** и **7.5 `cargo publish`** — обе задачи зависят от владельца |
 
 **Вердикт:** для закрытой беты и публикации библиотеки как v0.99.1 — готово (~88%),
-для публичного production-релиза v1.0 — нет: блокеры — внешний аудит (G7), непрогнанный
-publish-путь (G8) и неаудированные продуктовые слои (FFI в CI, reconnect у async-клиента).
+для публичного production-релиза v1.0 — нет: блокеры — **внешний аудит (G7)**, **непрогнанный
+publish-путь (G8)** и неаудированные продуктовые слои (auto-reconnect у async-клиента,
+agent-mode CLI для мобильной интероперабельности). FFI-фасад и документация из блокеров
+вышли: smoke реально проходит, CI-джобы добавлены, аудит-отчёт перегенерирован.
 
 ---
 
