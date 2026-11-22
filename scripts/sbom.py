@@ -45,7 +45,10 @@ def main():
     args = ap.parse_args()
 
     cargo_toml = (ROOT / "Cargo.toml").read_text()
-    root_version = re.search(r'^version = "(.*)"', cargo_toml, re.M).group(1)
+    version_match = re.search(r'^version = "(.*)"', cargo_toml, re.M)
+    if version_match is None:
+        raise SystemExit("no version in Cargo.toml")
+    root_version = version_match.group(1)
     packages = parse_lock((ROOT / "Cargo.lock").read_text())
 
     components = []
