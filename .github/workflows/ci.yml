@@ -100,3 +100,44 @@ jobs:
           cargo package --allow-dirty --no-verify --list > package-list.txt
           ! grep -q '^simplexmq/' package-list.txt
           ! grep -q '^spec/' package-list.txt
+
+  probe-isolation:
+    name: default build excludes probe binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build the default feature set
+        run: cargo build
+      - name: assert no probe binaries in the default build
+        run: |
+          for b in smp-v71 xftp-h2-v71 ntf-probe; do
+            if [ -f "target/debug/$b" ]; then
+              echo "probe binary $b leaked into the default build"
+              exit 1
+            fi
+          done
+          echo "OK: no probe binaries in the default build"
+
+  ffi-smoke:
+    name: ffi smoke (Kotlin calls the Rust facade)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev curl unzip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Kotlin
+        run: |
+          curl -sSL https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip -o /tmp/kotlin.zip
+          sudo unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlin-compiler-2.0.21/bin" >> $GITHUB_PATH
+      - name: Build the cdylib and run the Kotlin smoke test
+        run: bash scripts/ffi_smoke.sh
+

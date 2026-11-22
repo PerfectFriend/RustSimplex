@@ -526,7 +526,14 @@ SUPERCOP-векторов».
 **Step 1:** Падающие тесты: ротация по расписанию; превышение reorder window → ошибка.
 **Step 2:** FAIL. **Step 3:** Реализация. **Step 4:** PASS. **Step 5:** Commit.
 
-### Task 6.3: Live NTF/PROXY — документированный результат
+### Task 6.3: Live NTF/PROXY — документированный результат — ✅ DONE
+
+**Итог (2026-11-22):** прогнан `scripts/live_interop.sh` против публичной инфраструктуры,
+лог сохранён в `docs/live/live-interop-2026-11-22.log` (exit 0):
+SMP v17..v23 — OK (7/7), XFTP v4 полный цикл FNEW/FPUT 64KB/FGET(byte-match)/FDEL — OK,
+chunked 1 MiB (sha256-сверка) — OK, NTF v3 `PING→PONG` через библиотечный `NtfClient`
+(CA-пин) — OK, **PROXY → `ERR CMD SYNTAX`** — «public relay disables proxy server-side — expected».
+Факт зафиксирован как проверенный (README:47, ROADMAP caveats), а не как «не проверено».
 
 **Objective:** Публичные релеи отключили proxy на серверной стороне, поэтому live-проверка
 proxy невозможна. Зафиксировать это как проверенный факт, а не как «не сделано».

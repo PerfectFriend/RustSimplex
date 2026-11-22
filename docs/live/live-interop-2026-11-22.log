@@ -1,0 +1,144 @@
+   Compiling libc v0.2.191
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling find-msvc-tools v0.1.15
+   Compiling shlex v2.0.1
+   Compiling cfg-if v1.0.5
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling pkg-config v0.3.34
+   Compiling subtle v2.6.1
+   Compiling fs_extra v1.3.0
+   Compiling pin-project-lite v0.2.17
+   Compiling dunce v1.0.5
+   Compiling vcpkg v0.2.15
+   Compiling cpufeatures v0.2.17
+   Compiling zerocopy v0.8.63
+   Compiling futures-sink v0.3.34
+   Compiling futures-core v0.3.34
+   Compiling aws-lc-rs v1.19.0
+   Compiling bytes v1.12.1
+   Compiling semver v1.0.28
+   Compiling untrusted v0.9.0
+   Compiling once_cell v1.21.4
+   Compiling rand_core v0.10.1
+   Compiling serde_core v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.4.3
+   Compiling slab v0.4.12
+   Compiling futures-channel v0.3.34
+   Compiling rustc_version v0.4.1
+   Compiling openssl v0.10.82
+   Compiling deranged v0.5.9
+   Compiling zmij v1.0.23
+   Compiling thiserror v2.0.21
+   Compiling rustls v0.23.46
+   Compiling futures-task v0.3.34
+   Compiling time-core v0.1.9
+   Compiling powerfmt v0.2.1
+   Compiling foreign-types-shared v0.1.1
+   Compiling futures-io v0.3.34
+   Compiling curve25519-dalek v4.1.3
+   Compiling num-conv v0.2.2
+   Compiling itoa v1.0.19
+   Compiling cpufeatures v0.3.1
+   Compiling foreign-types v0.3.2
+   Compiling tracing-core v0.1.36
+   Compiling log v0.4.35
+   Compiling chacha20 v0.10.2
+   Compiling opaque-debug v0.3.1
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.3
+   Compiling bitflags v2.13.2
+   Compiling base64 v0.23.1
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.154
+   Compiling signature v2.2.0
+   Compiling tokio-openssl v0.6.5
+   Compiling ed25519 v2.2.3
+   Compiling pem v4.0.0
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling http v1.5.0
+   Compiling tracing v0.1.44
+   Compiling fnv v1.0.7
+   Compiling keccak v0.1.6
+   Compiling atomic-waker v1.1.2
+   Compiling syn v2.0.119
+   Compiling syn v3.0.10
+   Compiling hex v0.4.3
+   Compiling indexmap v2.14.2
+   Compiling time v0.3.55
+   Compiling jobserver v0.1.35
+   Compiling getrandom v0.2.17
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling fs2 v0.4.3
+   Compiling rand v0.10.3
+   Compiling rand_core v0.6.4
+   Compiling cc v1.11.1
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling poly1305 v0.8.0
+   Compiling hmac v0.12.1
+   Compiling sha3 v0.10.9
+   Compiling hkdf v0.12.4
+   Compiling yasna v0.6.0
+   Compiling cmake v0.1.58
+   Compiling openssl-sys v0.9.118
+   Compiling sha2-asm v0.6.4
+   Compiling ring v0.17.14
+   Compiling aws-lc-sys v0.47.0
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.10.0
+   Compiling tokio v1.54.1
+   Compiling futures-util v0.3.34
+   Compiling rand v0.8.8
+   Compiling sha2 v0.10.9
+   Compiling zeroize_derive v1.5.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling openssl-macros v0.1.1
+   Compiling zeroize v1.9.1
+   Compiling rustls-pki-types v1.15.1
+   Compiling cipher v0.4.4
+   Compiling sntrup761 v0.4.0
+   Compiling salsa20 v0.10.2
+   Compiling xsalsa20poly1305 v0.9.1
+   Compiling rcgen v0.14.10
+   Compiling ed25519-dalek v2.2.0
+   Compiling x25519-dalek v2.0.1
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling tokio-util v0.7.20
+   Compiling h2 v0.4.20
+   Compiling rustls-webpki v0.103.16
+   Compiling tokio-rustls v0.26.6
+   Compiling smp-rs v0.99.1 (/home/thomas/Projects/simplex-rs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.11s
+v17 -> OK
+v18 -> OK
+v19 -> OK
+v20 -> OK
+v21 -> OK
+v22 -> OK
+v23 -> OK
+LIVE PUBLIC SMP MATRIX (v17..v23): OK
+PING -> \x01P0\x0f1|v\x05\xfffd\xfffdj:d\xfffd'H\xfffd\x04@\x01V\x06\xfffd\xfffd\x02S\xfffd\xfffdDWVh\xfffd5\xfffd\xfffd\x6370\xfffdC\xfffd\x1c}\xfffd\x0eL{\x1e\xfffd\x18\x0c\xfffd\xfffd\xfffd\xfffdm'\xfffd\x1ad\xfffd6\x11\xfffd\xfffd\\x860b\xfffd\xfffd\xfffdR\xfffdPONG
+XFTP v4 full cycle FNEW(SIDS)/FPUT(64KB)->OK/FGET(decrypt match)/FDEL->OK: OK
+XFTP v4 chunked 1MiB round-trip (FPUT 1MiB -> FGET -> decrypt + sha256 match): OK
+   Compiling smp-rs v0.99.1 (/home/thomas/Projects/simplex-rs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.89s
+NTF v3 PING->PONG via library NtfClient (CA pinned): OK
+proxy attempt: PRXY probe -> [Err("CMD SYNTAX")]
+LIVE PROXY: public relay disables proxy server-side - expected
+LIVE INTEROP HARNESS: SMP v17..v23 OK + XFTP v4 transport PONG OK (CA pinned) + NTF PONG OK (CA pinned)
+EXIT=0
