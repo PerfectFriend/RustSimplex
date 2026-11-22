@@ -15,6 +15,7 @@ pub mod client;
 pub mod async_client;
 pub mod identity;
 pub mod agent;
+pub mod agent_link;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 

@@ -532,3 +532,39 @@ anywhere in `src/`.
 `xftp_h2_v71.rs`), and each one is immediately followed by a mandatory CA-fingerprint check that
 fails closed (exit 3 on mismatch, before any protocol traffic). Library code in `src/transport.rs`
 never disables verification.
+
+
+## Sprint W6b — official agent link format (2026-11-22)
+
+New module `src/agent_link.rs` implements the **official** SimpleX link shapes
+(reference: simplexmq 7.0.1.0, `Agent/Protocol.hs:1132-1213` and `:1399-1434`):
+
+| Element | Official shape | Status |
+|---|---|---|
+| Queue URI | `smp://<keyHashB64>@host[:port]/<senderIdB64>#/?v=<range>&dh=<x509B64>[&q=c]` | ✅ implemented, tested |
+| Connection link | `simplex:/invitation#/?v=<agvRange>&smp=<urlencoded queueUri>&e2e=..&data=..` | ✅ implemented, tested |
+| base64url (nopad + padded accepted) | — | ✅ |
+| URL escaping of `smp=` / `e2e=` | — | ✅ |
+
+`Agent::create_contact` now emits the official invitation link; `Agent::join_contact`
+accepts both the official link and the previous internal one (back-compat).
+
+Verified: `cargo test` → 24 lib + 105 integration tests, 0 failed;
+`cargo clippy --all-targets` → 0 warnings; e2e duplex test now round-trips through
+the official link format (link → parse → join → HELLO → A_MSG → A_RCVD).
+
+### What is still NOT mobile-interop
+
+The link is now in the shape the official mobile client parses, but the
+**agent message layer is still our own subset**:
+
+| Layer | Official client | This repo | Interop |
+|---|---|---|---|
+| Link / queue URI | `simplex:/invitation#/?...` | ✅ same shape | ✅ |
+| `e2e=` params | X448 X3DH ratchet params | PQDR (X25519 + SNTRUP761) params, binary | ❌ incompatible |
+| Agent envelope | `agentVersion + "C"/"M"/"I"/"R"` | `"I"/"D"/"M"`, JSON connInfo | ❌ incompatible |
+
+So: a phone can **parse and scan** our link, but it will refuse to complete the
+handshake (e2e params + envelope). Closing that gap = implementing the official
+agent envelope and the X448 double ratchet — a separate sprint (G13).
+Until then the honest status stays: **library-level interop yes, phone-level no**.

@@ -263,22 +263,39 @@ impl<T: SmpTransport> Agent<T> {
             .map_err(|e| e.to_string())?;
             o
         };
-        let conn_info = serde_json::to_vec(&ConnInfo { profile: profile.into(), pq_support: true, e2e: Some(e2e) }).map_err(|e| e.to_string())?;
+        let conn_info = serde_json::to_vec(&ConnInfo { profile: profile.into(), pq_support: true, e2e: Some(e2e.clone()) }).map_err(|e| e.to_string())?;
         // subscribe immediately so the joiner's confirmation MSG is not missed
         let sub = client.request(Command::Sub, rcv_id.clone(), Some(&rcv_auth)).map_err(|e| e.to_string())?;
         if !matches!(sub[0], BrokerMsg::Sok(_)) {
             return Err(format!("SUB failed: {:?}", sub[0]));
         }
-        // link carries the initiator's connInfo ("I" message) as URI-escaped param
-        let link = format!(
-            "smp://{}@{}:{}#{}?snd={}&ci={}",
-            crate::xftp::hex(key_hash),
-            host,
+        // Official link shape (simplexmq 7.0.1.0, Agent/Protocol.hs:1132-1146):
+        //   simplex:/invitation#/?v=<agentVRange>&smp=<urlencoded queueUri>&e2e=..&data=..
+        // The queue URI carries the SENDER queue id (where the peer sends) and the
+        // recipient DH public key, exactly as the reference client expects.
+        // e2e= holds OUR PQDR params (binary, base64url) - see the compatibility note
+        // in agent_link.rs / docs: a stock client parses the link but will not
+        // understand these params, which is why full mobile interop still needs the
+        // official agent envelope + X448 ratchet. data= carries the profile.
+        let queue = crate::agent_link::QueueUri {
+            key_hash: key_hash.to_vec(),
+            host: host.to_string(),
             port,
-            crate::xftp::hex(&rcv_id),
-            crate::xftp::hex(&snd_id),
-            crate::xftp::hex(&conn_info)
-        );
+            sender_id: snd_id.clone(),
+            dh_pub: spki_x25519(&rcv_dh.public.to_bytes()),
+            v_min: SMP_VERSION,
+            v_max: SMP_VERSION,
+            queue_mode: Some('c'),
+        };
+        let link = crate::agent_link::AgentLink {
+            mode: "invitation".into(),
+            v_min: 1,
+            v_max: 1,
+            queues: vec![queue],
+            e2e: Some(crate::crypto::base64url_nopad(&e2e)),
+            client_data: Some(profile.to_string()),
+        }
+        .encode();
         Ok((
             Agent {
                 client,
@@ -306,27 +323,43 @@ impl<T: SmpTransport> Agent<T> {
 
     /// Joiner: parse link, create reply queue, send "D" confirmation to the initiator.
     pub fn join_contact(mut client: T, link: &str) -> Result<Agent<T>, String> {
-        // smp://keyHash@host:port#rcv_id?snd=..&ci=..
-        let rest = link.strip_prefix("smp://").ok_or("bad link scheme")?;
-        let (kh_host, frag) = rest.split_once('#').ok_or("bad link frag")?;
-        let (kh, hostport) = kh_host.split_once('@').ok_or("bad link authority")?;
-        let (host, port) = hostport.split_once(':').ok_or("bad hostport")?;
-        let (rcv_hex, params) = frag.split_once('?').ok_or("bad link params")?;
-        let _rcv_id = crate::xftp::unhex(rcv_hex).ok_or("bad rcv hex")?;
-        let mut init_snd = Vec::new();
-        let mut init_ci = Vec::new();
-        for kv in params.split('&') {
-            if let Some(v) = kv.strip_prefix("snd=") {
-                init_snd = crate::xftp::unhex(v).ok_or("bad snd hex")?;
-            } else if let Some(v) = kv.strip_prefix("ci=") {
-                init_ci = crate::xftp::unhex(v).ok_or("bad ci hex")?;
-            }
-        }
-        if init_snd.is_empty() {
-            return Err("link has no snd param".into());
-        }
-        let key_hash = crate::xftp::unhex(kh).ok_or("bad keyhash hex")?;
-        let port: u16 = port.parse().map_err(|_| "bad port")?;
+        // Two accepted shapes, reduced to the same five inputs:
+        //   * official: simplex:/invitation#/?v=..&smp=<urlencoded queueUri>&e2e=..&data=..
+        //   * legacy:   smp://keyHash@host:port#rcv_id?snd=..&ci=..
+        let (host, port, key_hash, init_snd, init_ci): (String, u16, Vec<u8>, Vec<u8>, Vec<u8>) =
+            if link.starts_with("simplex:/") || link.starts_with("https://") {
+                let al = crate::agent_link::AgentLink::parse(link)?;
+                let q = al.queues.first().ok_or("link has no queue")?;
+                let e2e_raw = match &al.e2e {
+                    Some(e) => Some(crate::agent_link::b64url_decode(e)?),
+                    None => None,
+                };
+                let ci = ConnInfo {
+                    profile: al.client_data.clone().unwrap_or_default(),
+                    pq_support: e2e_raw.is_some(),
+                    e2e: e2e_raw,
+                };
+                (q.host.clone(), q.port, q.key_hash.clone(), q.sender_id.clone(), serde_json::to_vec(&ci).map_err(|e| e.to_string())?)
+            } else {
+                let rest = link.strip_prefix("smp://").ok_or("bad link scheme")?;
+                let (kh_host, frag) = rest.split_once('#').ok_or("bad link frag")?;
+                let (kh, hostport) = kh_host.split_once('@').ok_or("bad link authority")?;
+                let (host, port_s) = hostport.split_once(':').ok_or("bad hostport")?;
+                let (_rcv_hex, params) = frag.split_once('?').ok_or("bad link params")?;
+                let mut init_snd = Vec::new();
+                let mut init_ci = Vec::new();
+                for kv in params.split('&') {
+                    if let Some(v) = kv.strip_prefix("snd=") {
+                        init_snd = crate::xftp::unhex(v).ok_or("bad snd hex")?;
+                    } else if let Some(v) = kv.strip_prefix("ci=") {
+                        init_ci = crate::xftp::unhex(v).ok_or("bad ci hex")?;
+                    }
+                }
+                if init_snd.is_empty() {
+                    return Err("link has no snd param".into());
+                }
+                (host.to_string(), port_s.parse().map_err(|_| "bad port")?, crate::xftp::unhex(kh).ok_or("bad keyhash hex")?, init_snd, init_ci)
+            };
 
         let rcv_auth = ed25519_keypair();
         let rcv_dh = x25519_keypair();

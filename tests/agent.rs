@@ -15,7 +15,15 @@ fn agent_duplex_handshake_and_msg() {
 
     let ci = Client::connect_plain(addr, &kh).unwrap();
     let (mut a, link) = Agent::create_contact(ci, host, port, &kh, "alice").expect("create_contact");
-    assert!(link.starts_with("smp://"));
+    // official link shape (simplexmq 7.0.1.0): simplex:/invitation#/?v=..&smp=<escaped queueUri>
+    assert!(link.starts_with("simplex:/invitation#/?v="), "got {link}");
+    assert!(link.contains("&smp=smp%3A%2F%2F"), "smp= must be url-escaped: {link}");
+    let parsed = smp_rs::agent_link::AgentLink::parse(&link).expect("official link parses");
+    assert_eq!(parsed.mode, "invitation");
+    assert_eq!(parsed.queues.len(), 1);
+    assert_eq!(parsed.queues[0].host, host);
+    assert_eq!(parsed.queues[0].port, port);
+    assert_eq!(parsed.queues[0].key_hash, kh);
 
     let cj = Client::connect_plain(addr, &kh).unwrap();
     let mut b = Agent::join_contact(cj, &link).expect("join_contact");
