@@ -1,6 +1,7 @@
 # simplex-rs — Release Readiness Audit
 
 Date: 2026-11-22 · Head: `main` (closeout-спринт, v0.99.1) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 11 — **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`), GitHub Release + тег `v0.99.1`, `CARGO_REGISTRY_TOKEN` заведён в GitHub Secrets для CI-релиза
 Revision: 10 — **спринт 2026-11-23**: frame-level шифрование payload официального
 agent-envelope + модуль X448 (RFC 7748) с обменом ключами в agent-flow + реальная попытка
 `cargo publish` (токен принят, заблокировано верификацией email на crates.io) (see §0)
@@ -55,7 +56,7 @@ agent-mode CLI и auto-reconnect у async-клиента — они внутри
 | `ffi` | 56 | 55% | **85%** | W5 закрыт: cdylib + uniffi + Kotlin-биндинги; **smoke реально проходит** (`scripts/ffi_smoke.sh` → `FFI SMOKE: OK`), CI-джоб `ffi-smoke` добавлен |
 | `reconnect` | 242 | 40% | **85%** | W1 подключён к Agent; W4-4.2 backoff-цикл + recorded delays |
 | `async_client` | 303 | 35% | **78%** | W4-4.1 настоящий tokio-клиент (был sync-фейс в worker thread) |
-| Packaging / crates.io | — | 88% | **92%** | `cargo publish --dry-run` — OK (77 файлов); реальный publish: токен принят, crates.io требует верифицированный email |
+| Packaging / crates.io | — | 88% | **100%** | **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`, 227280 B); тег `v0.99.1` + GitHub Release; `CARGO_REGISTRY_TOKEN` в GitHub Secrets для CI |
 | CI matrix | — | 90% | **92%** | добавлены джобы `probe-isolation` (G9) и `ffi-smoke` (G10) |
 | Release pipeline | — | 75% | **82%** | SBOM (CycloneDX 1.5, 219 компонент) + attestation provenance |
 | Docs | — | 75% | **87%** | `AUDIT-REPORT.md` перегенерирован (ревизия 9), письмо аудитору обновлено, план закрытия добавлен, readiness — ревизия 10 |
@@ -85,10 +86,11 @@ SBOM + provenance в релиз-пайплайне, перегенерирова
 | G5 | Чистка `unwrap`/`expect` в `src/` | 2 остались | **100%** | нетестовых panic-site'ов — **0** (`scripts/check_no_unwrap.sh`) |
 | G6 | PQDR: rotation, reorder, KAT | 100% | **100%** | SUPERCOP KAT — кросс-реализационный (Rust ↔ supercop-20201130) |
 | G7 | Внешний аудит (3 зоны) | 0% | **0%** | не заказан — блокер релиза |
-| G8 | Публикация v0.99.1 на crates.io | 88% | **92%** | `cargo publish --dry-run` — OK; реальный publish запущен с настоящим токеном, crates.io ответил 400 «verified email required» — блокер на стороне аккаунта, не в коде |
+| G8 | Публикация v0.99.1 на crates.io | 88% | **100%** | **сделано**: email верифицирован → `cargo publish` прошёл; crates.io подтвердил v0.99.1 (checksum `4ea568a9…`), GitHub Release создан, секрет токена — в GitHub Secrets |
 | G9 | CI: дефолтная сборка без probe-бинов | — | **70%** | джоб `probe-isolation` добавлен в `ci.yml` (ассертит отсутствие `smp-v71`/`xftp-h2-v71`/`ntf-probe`); на GitHub ещё не прогонялся |
 | G10 | FFI-фасад для Android/Paranoid | 55% | **85%** | cdylib + uniffi + Kotlin-биндинги; smoke **локально проходит** (`FFI SMOKE: OK`), CI-джоб `ffi-smoke` добавлен (на GitHub ещё не прогонялся) |
 | G11 | Live NTF/XFTP против публичных релеев | частично | **90%** | полный прогон с логом 2026-11-22: SMP v17–v23 7/7, XFTP 1 MiB byte-exact, NTF PONG; NTF-токены публичным сервером не выдаются |
+| G14 | Релиз-менеджмент v0.99.1 | 0% | **90%** | crates.io + тег + GitHub Release + release notes; осталось: подпись аудитора (G7) и CI-публикация по `release.yml` ещё не прогонялся |
 | G13 | Официальный agent-envelope + X448-совместимость | 0% | **65%** | envelope-кодек и все кадры — в конверте; payload теперь шифруется PQDR на уровне всего кадра; X448 (RFC 7748) реализован и сверен с OpenSSL, ключи обмениваются в agent-flow, общий секрет совпадает с обеих сторон. **Осталось:** X3DH-речет (state machine) вместо PQDR — до этого сток-клиент не поймёт наш ciphertext |
 | G12 | Актуальная документация | 75% | **88%** | `docs/AUDIT-REPORT.md` перегенерирован (ревизия 9); старый сохранён как `AUDIT-REPORT-2026-11-12.md`; письмо аудитору и план закрытия актуальны |
 

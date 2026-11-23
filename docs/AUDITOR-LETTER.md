@@ -20,9 +20,11 @@
 2. **X448 (RFC 7748)** (`src/x448.rs`): keypair/DH/SPKI, golden-вектор сверен с
    OpenSSL (`python cryptography`) байт-в-байт; ключи обмениваются в agent-flow,
    обе стороны выводят одинаковый общий секрет (проверено e2e-тестом дуплекса).
-3. **Publish-путь**: `cargo publish --dry-run` — OK; реальный publish запущен с
-   настоящим токеном, crates.io ответил 400 «verified email required» — блокер на
-   стороне аккаунта (верификация email), не в коде.
+3. **Publish-путь выполнен end-to-end**: после верификации email `cargo publish`
+   прошёл — **v0.99.1 опубликован на crates.io** (2026-11-23, checksum
+   `4ea568a937a22743d2bc98c5b7aa3f89c5fe29172a588b682531ba6178a96c09`), создан тег
+   `v0.99.1` и GitHub Release. Изменения метаданных по пути: категория `protocols`
+   не входит в список crates.io — заменена на пять валидных slug'ов.
 
 ## Что это
 
