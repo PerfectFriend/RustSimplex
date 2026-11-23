@@ -483,9 +483,10 @@ impl<T: SmpTransport> Agent<T> {
                     })();
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
-                    let body = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: hello });
+                    // pre-ratchet handshake frame: sent raw (no envelope) until the PQDR
+                    // session exists — recv side treats raw frames as plaintext by definition.
                     self.client
-                        .request(Command::Send { flags: false, body }, self.peer_snd_id.clone().ok_or("no peer")?, None)
+                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO is sent (before any A_MSG); fail-closed:
                     // with e2e on, a missing/malformed peer KEM key is an error, never plaintext.
@@ -512,9 +513,10 @@ impl<T: SmpTransport> Agent<T> {
                 if matches!(parse_agent(&unwrap_envelope(&pt))?, AgentMsg::Hello { .. }) {
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
-                    let body = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: hello });
+                    // pre-ratchet handshake frame: sent raw (no envelope) until the PQDR
+                    // session exists — recv side treats raw frames as plaintext by definition.
                     self.client
-                        .request(Command::Send { flags: false, body }, self.peer_snd_id.clone().ok_or("no peer")?, None)
+                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO reply is sent; fail-closed: with e2e on,
                     // unparsable e2e params in the link are an error, never a silent downgrade.
@@ -564,6 +566,15 @@ impl<T: SmpTransport> Agent<T> {
         Ok(())
     }
 
+    /// Encrypt a whole agent frame with the PQDR ratchet when a session exists.
+    /// (G13: the envelope payload is the ratchet ciphertext, not just the Msg body.)
+    fn encrypt_frame(&mut self, frame: Vec<u8>) -> Vec<u8> {
+        match &mut self.ratchet {
+            Some(r) => r.encrypt(&frame),
+            None => frame,
+        }
+    }
+
     pub fn send_msg(&mut self, body: &[u8]) -> Result<i64, String> {
         // fail-closed: E2E is on by default — never send plaintext just because the
         // ratchet is not negotiated yet (that was a silent downgrade).
@@ -580,15 +591,13 @@ impl<T: SmpTransport> Agent<T> {
                 return Ok(id);
             }
         }
-        let payload = match &mut self.ratchet {
-            Some(r) => r.encrypt(body),
-            None => body.to_vec(),
-        };
-        let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
-        let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
-        // G13: on the wire the agent frame is wrapped in the official agentMsgEnvelope
-        // (agentVersion Word16 + "M"), per spec/agent-protocol.md decryptedSMPClientMessage.
-        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
+        // G13: the inner agentMessage frame is built with the PLAINTEXT body, then the
+        // whole frame is PQDR-encrypted and placed as the envelope payload
+        // (agentMsgEnvelope = agentVersion + "M" + encAgentMessage).
+        let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: body.to_vec() }, id, &self.prev_hash);
+        let hash = sha256(&frame);
+        let enc = self.encrypt_frame(frame);
+        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
@@ -608,16 +617,12 @@ impl<T: SmpTransport> Agent<T> {
             return Ok(());
         }
         let peer = self.peer_snd_id.clone().ok_or("no peer")?;
-        for (id, plain) in self.outbox.drain(..) {
-            let payload = match &mut self.ratchet {
-                Some(r) => r.encrypt(&plain),
-                None => plain,
-            };
-            let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
-            let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
-        // G13: on the wire the agent frame is wrapped in the official agentMsgEnvelope
-        // (agentVersion Word16 + "M"), per spec/agent-protocol.md decryptedSMPClientMessage.
-        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
+        let pending: Vec<(i64, Vec<u8>)> = std::mem::take(&mut self.outbox);
+        for (id, plain) in pending {
+            let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: plain }, id, &self.prev_hash);
+            let hash = sha256(&frame);
+            let enc = self.encrypt_frame(frame);
+            let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
             self.client.request(Command::Send { flags: false, body: wire }, peer.clone(), None).map_err(|e| e.to_string())?;
             self.prev_hash = hash.to_vec();
         }
@@ -637,14 +642,23 @@ impl<T: SmpTransport> Agent<T> {
                     let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                     // G13: unwrap the official agentMsgEnvelope first; legacy raw
                     // frames ("I"/"D"/"M" without the version prefix) are still accepted.
-                    let inner = unwrap_envelope(&pt);
-                    let mut am = parse_agent(&inner)?;
-                    if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
-                        if let Some(r) = &mut self.ratchet {
-                            let plain = r.decrypt(body)?;
-                            am = AgentMsg::Msg { msg_id: *mid, prev_hash: ph.clone(), body: plain };
+                    // G13: "M"-envelope payloads are PQDR ciphertext once the ratchet
+                    // exists (fail-closed: decrypt error aborts); raw legacy frames and
+                    // the "C" confirmation stay plaintext by definition.
+                    let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
+                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
+                        Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
+                        _ => (false, pt.clone()),
+                    };
+                    let frame = if is_msg_env {
+                        match &mut self.ratchet {
+                            Some(r) => r.decrypt(&inner)?,
+                            None => inner,
                         }
-                    }
+                    } else {
+                        inner
+                    };
+                    let am = parse_agent(&frame)?;
                     // ACK the broker message so it is removed from the queue.
                     // send_only: request() here would swallow a concurrently pushed MSG.
                     self.client
@@ -671,7 +685,8 @@ impl<T: SmpTransport> Agent<T> {
             self.msg_counter,
             &self.prev_hash,
         );
-        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
+        let enc = self.encrypt_frame(frame);
+        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;

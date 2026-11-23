@@ -77,13 +77,21 @@ pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
                     .send_only(crate::protocol::Command::Ack(msg_id.clone()), a.rcv_id.clone(), Some(&a.rcv_auth))
                     .map_err(|e| e.to_string())?;
                 // G13: unwrap official agentMsgEnvelope; legacy raw frames still accepted
-                let inner = crate::agent::unwrap_envelope(&pt);
-                let Ok(mut am) = parse_agent_pub(&inner) else { continue };
-                if let AgentMsg::Msg { body, .. } = &mut am {
-                    if let Some(r) = &mut a.ratchet {
-                        let plain = r.decrypt(body)?;
-                        *body = plain;
+                let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
+                    Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
+                    Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
+                    _ => (false, pt.clone()),
+                };
+                let frame = if is_msg_env {
+                    match &mut a.ratchet {
+                        Some(r) => r.decrypt(&inner)?,
+                        None => inner,
                     }
+                } else {
+                    inner
+                };
+                let Ok(am) = parse_agent_pub(&frame) else { continue };
+                if let AgentMsg::Msg { body, .. } = &am {
                     let _ = a.flush_outbox();
                     let cm = parse_chat(body)?;
                     if cm.mtype == "x.msg.new" {
