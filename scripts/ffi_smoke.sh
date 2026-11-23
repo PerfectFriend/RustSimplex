@@ -44,14 +44,17 @@ BINDINGS="kotlin/uniffi/smp_rs/smp_rs.kt"
 echo "[3/5] locating JNA + the Kotlin stdlib"
 # `sed -n 1p` instead of `head -1`: head closes the pipe early, and with
 # `set -o pipefail` the SIGPIPE would kill the script.
-JNA_JAR="${JNA_JAR:-$(find "$HOME/build" "$HOME/.gradle" -name 'jna-5*.jar' 2>/dev/null | sed -n '1p')}"
+# `|| true`: on a clean CI runner $HOME/build and $HOME/.gradle do not exist, so `find`
+# exits non-zero; with `set -e -o pipefail` that aborted the script BEFORE the download
+# fallback below could run.
+JNA_JAR="${JNA_JAR:-$(find "$HOME/build" "$HOME/.gradle" -name 'jna-5*.jar' 2>/dev/null | sed -n '1p' || true)}"
 if [ -z "$JNA_JAR" ]; then
   echo "      JNA not found locally — downloading it"
   JNA_JAR="$OUT/jna.jar"
   curl -fsSL -o "$JNA_JAR" \
     https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar
 fi
-KSTD="${KOTLIN_STDLIB:-$(find "$HOME/build" -name 'kotlin-stdlib.jar' 2>/dev/null | sed -n '1p')}"
+KSTD="${KOTLIN_STDLIB:-$(find "$HOME/build" -name 'kotlin-stdlib.jar' 2>/dev/null | sed -n '1p' || true)}"
 if [ -z "$KSTD" ]; then
   echo "      Kotlin stdlib not found — downloading it"
   KSTD="$OUT/kotlin-stdlib.jar"

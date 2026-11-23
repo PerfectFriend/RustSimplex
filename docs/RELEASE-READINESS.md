@@ -1,6 +1,7 @@
 # simplex-rs — Release Readiness Audit
 
 Date: 2026-11-22 · Head: `main` (closeout-спринт, v0.99.1) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 13 — **v0.99.3 опубликован CI-пайплайном** (2026-11-23, checksum `c9b2695e…`): X448 переведён с уязвимого `cx448`/`crypto-bigint 0.5.5` на RustCrypto `x448`/`crypto-bigint 0.7.11` (RUSTSEC-2026-0387 закрыт); CI-пайплайн починен (было 7 красных job'ов из 11)
 Revision: 12 — **v0.99.2 опубликован** (2026-11-23, checksum `a2b60fbb…`): новый трёхязычный README (ru/en/es) в пакете и на странице крейта; функциональных изменений нет
 Revision: 11 — **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`), GitHub Release + тег `v0.99.1`, `CARGO_REGISTRY_TOKEN` заведён в GitHub Secrets для CI-релиза
 Revision: 10 — **спринт 2026-11-23**: frame-level шифрование payload официального
