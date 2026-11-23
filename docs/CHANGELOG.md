@@ -44,3 +44,11 @@ remaining gates.
 - release: v0.99.3 — X448 security fix (RUSTSEC-2026-0387) + CI pipeline repair (41d1025)
 - fix(security): replace cx448 with RustCrypto x448 — clears RUSTSEC-2026-0387 (96d8f96)
 - docs: readiness revision 12 — v0.99.2 published with trilingual README (a85dda5)
+
+## v0.99.3
+
+- fix(release): keep the working tree clean for cargo publish (0c2d729)
+- fix(tests): remove hardcoded /home/thomas scratch path from the test suite (bbba0ab)
+- release: v0.99.3 — X448 security fix (RUSTSEC-2026-0387) + CI pipeline repair (41d1025)
+- fix(security): replace cx448 with RustCrypto x448 — clears RUSTSEC-2026-0387 (96d8f96)
+- docs: readiness revision 12 — v0.99.2 published with trilingual README (a85dda5)
