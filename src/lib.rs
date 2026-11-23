@@ -17,6 +17,7 @@ pub mod identity;
 pub mod agent;
 pub mod agent_link;
 pub mod agent_envelope;
+pub mod x448;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 

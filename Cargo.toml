@@ -66,6 +66,8 @@ uniffi = { version = "0.28", features = ["cli"], optional = true }
 # uses proc-macro exports (#[uniffi::export]), so no build.rs and no askama
 # template engine are needed — which also keeps the build offline-friendly.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# X448 (Curve448, RFC 7748) for the official agent E2E ratchet keys — pure-Rust, vendored.
+cx448 = "0.1.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 xsalsa20poly1305 = "0.9"
 aead = "0.5"

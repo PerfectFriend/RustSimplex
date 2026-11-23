@@ -144,7 +144,7 @@ fn conn_info_json_carries_pq_e2e_params() {
         },
     )
     .unwrap();
-    let ci = smp_rs::agent::ConnInfo { profile: "alice".into(), pq_support: true, e2e: Some(e2e.clone()) };
+    let ci = smp_rs::agent::ConnInfo { profile: "alice".into(), pq_support: true, e2e: Some(e2e.clone()), x448_spki: None };
     let j = serde_json::to_vec(&ci).unwrap();
     let back: smp_rs::agent::ConnInfo = serde_json::from_slice(&j).unwrap();
     assert_eq!(back, ci);

@@ -30,6 +30,20 @@ fn agent_duplex_handshake_and_msg() {
 
     a.accept_contact().expect("accept (D -> HELLO)");
     b.await_hello().expect("await HELLO -> HELLO back");
+
+    // Official-compat X448: both sides derived the SAME shared secret from the
+    // exchanged public keys (initiator key via the invitation, joiner key via connInfo).
+    let sa = a.x448_shared_secret().expect("initiator X448 shared secret");
+    let sb = b.x448_shared_secret().expect("joiner X448 shared secret");
+    assert_eq!(sa, sb, "both sides must derive the same X448 secret");
+    assert_ne!(sa, [0u8; 56]);
+    // each side learned the OTHER side's public key
+    assert_eq!(a.peer_x448_spki.as_ref(), b.x448_public_spki().as_ref());
+    assert_eq!(b.peer_x448_spki.as_ref(), a.x448_public_spki().as_ref());
+    // and the secret really is the DH of the two public keys (not a copy of one side)
+    let b_pub = smp_rs::x448::parse_spki_x448(&b.x448_public_spki().expect("b spki")).expect("b pub");
+    let a_sk = a.x448_kp.as_ref().expect("a kp").secret;
+    assert_eq!(smp_rs::x448::dh(&a_sk, &b_pub).expect("dh"), sa);
     // initiator reads joiner's HELLO
     let (_mid, am) = a.recv_agent().expect("recv HELLO");
     assert!(matches!(am, AgentMsg::Hello { .. }), "got {am:?}");

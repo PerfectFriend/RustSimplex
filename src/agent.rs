@@ -63,6 +63,61 @@ pub struct ConnInfo {
     /// e2eRatchetParams wire bytes (spec/agent-protocol.md), when PQ is negotiated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2e: Option<Vec<u8>>,
+    /// Our X448 public key (SPKI DER) — the official agent ratchet uses X448,
+    /// so the key travels in the invitation and yields a shared secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x448_spki: Option<Vec<u8>>,
+}
+
+/// Our e2e params blob: magic + PQDR params + optional X448 SPKI.
+/// Legacy blobs (raw PQDR params, no magic) are still accepted by `unpack_e2e_blob`.
+pub fn pack_e2e_blob(pq_params: &[u8], x448_spki: Option<&[u8]>) -> Vec<u8> {
+    let mut o = Vec::with_capacity(pq_params.len() + 80);
+    o.extend_from_slice(b"SMPR1");
+    o.extend_from_slice(&(pq_params.len() as u16).to_be_bytes());
+    o.extend_from_slice(pq_params);
+    match x448_spki {
+        Some(k) => {
+            o.push(1);
+            o.extend_from_slice(&(k.len() as u16).to_be_bytes());
+            o.extend_from_slice(k);
+        }
+        None => o.push(0),
+    }
+    o
+}
+
+/// Inverse of `pack_e2e_blob`; returns (pq_params, x448_spki).
+pub fn unpack_e2e_blob(blob: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    if blob.len() < 5 || &blob[..5] != b"SMPR1" {
+        return Ok((blob.to_vec(), None));
+    }
+    let b = &blob[5..];
+    if b.len() < 2 {
+        return Err("e2e blob truncated".into());
+    }
+    let pq_len = u16::from_be_bytes([b[0], b[1]]) as usize;
+    if b.len() < 2 + pq_len + 1 {
+        return Err("e2e blob truncated".into());
+    }
+    let pq = b[2..2 + pq_len].to_vec();
+    let mut i = 2 + pq_len;
+    let has = b[i];
+    i += 1;
+    let x = if has == 1 {
+        if b.len() < i + 2 {
+            return Err("e2e blob truncated".into());
+        }
+        let l = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
+        i += 2;
+        if b.len() < i + l {
+            return Err("e2e blob truncated".into());
+        }
+        Some(b[i..i + l].to_vec())
+    } else {
+        None
+    };
+    Ok((pq, x))
 }
 
 pub fn encode_agent(m: &AgentMsg, msg_id: i64, prev_hash: &[u8]) -> Vec<u8> {
@@ -227,6 +282,12 @@ pub struct Agent<T: SmpTransport = Client> {
     pub outbox: Vec<(i64, Vec<u8>)>,
     /// E2E PQDR on by default; set false for legacy plaintext tests. No env reads in lib (FFI-safe).
     pub e2e: bool,
+    /// Our X448 identity (official-compat E2E ratchet key).
+    pub x448_kp: Option<crate::x448::X448Keypair>,
+    /// Peer's X448 public key (SPKI DER), once exchanged.
+    pub peer_x448_spki: Option<Vec<u8>>,
+    /// X448 shared secret (official ratchet seed), once both keys are known.
+    pub x448_shared: Option<[u8; 56]>,
 }
 
 impl<T: SmpTransport> Agent<T> {
@@ -274,7 +335,18 @@ impl<T: SmpTransport> Agent<T> {
             .map_err(|e| e.to_string())?;
             o
         };
-        let conn_info = serde_json::to_vec(&ConnInfo { profile: profile.into(), pq_support: true, e2e: Some(e2e.clone()) }).map_err(|e| e.to_string())?;
+        // Official-compat X448 identity: the key travels in the invitation (e2e blob)
+        // and yields the shared secret with the peer's X448 key.
+        let x448_kp = crate::x448::keypair();
+        let x448_spki = crate::x448::spki_x448(&x448_kp.public);
+        let e2e_blob = pack_e2e_blob(&e2e, Some(&x448_spki));
+        let conn_info = serde_json::to_vec(&ConnInfo {
+            profile: profile.into(),
+            pq_support: true,
+            e2e: Some(e2e_blob.clone()),
+            x448_spki: Some(x448_spki.clone()),
+        })
+        .map_err(|e| e.to_string())?;
         // subscribe immediately so the joiner's confirmation MSG is not missed
         let sub = client.request(Command::Sub, rcv_id.clone(), Some(&rcv_auth)).map_err(|e| e.to_string())?;
         if !matches!(sub[0], BrokerMsg::Sok(_)) {
@@ -303,7 +375,7 @@ impl<T: SmpTransport> Agent<T> {
             v_min: 1,
             v_max: 1,
             queues: vec![queue],
-            e2e: Some(crate::crypto::base64url_nopad(&e2e)),
+            e2e: Some(crate::crypto::base64url_nopad(&e2e_blob)),
             client_data: Some(profile.to_string()),
         }
         .encode();
@@ -327,6 +399,9 @@ impl<T: SmpTransport> Agent<T> {
                 initiator: true,
                 outbox: Vec::new(),
                 e2e: true,
+                x448_kp: Some(x448_kp),
+                peer_x448_spki: None,
+                x448_shared: None,
             },
             link,
         ))
@@ -337,6 +412,7 @@ impl<T: SmpTransport> Agent<T> {
         // Two accepted shapes, reduced to the same five inputs:
         //   * official: simplex:/invitation#/?v=..&smp=<urlencoded queueUri>&e2e=..&data=..
         //   * legacy:   smp://keyHash@host:port#rcv_id?snd=..&ci=..
+        let mut peer_x448_from_link: Option<Vec<u8>> = None;
         let (host, port, key_hash, init_snd, init_ci): (String, u16, Vec<u8>, Vec<u8>, Vec<u8>) =
             if link.starts_with("simplex:/") || link.starts_with("https://") {
                 let al = crate::agent_link::AgentLink::parse(link)?;
@@ -345,11 +421,17 @@ impl<T: SmpTransport> Agent<T> {
                     Some(e) => Some(crate::agent_link::b64url_decode(e)?),
                     None => None,
                 };
+                let peer_x448 = match &e2e_raw {
+                    Some(b) => unpack_e2e_blob(b)?.1,
+                    None => None,
+                };
                 let ci = ConnInfo {
                     profile: al.client_data.clone().unwrap_or_default(),
                     pq_support: e2e_raw.is_some(),
-                    e2e: e2e_raw,
+                    e2e: e2e_raw.clone(),
+                    x448_spki: peer_x448.clone(),
                 };
+                peer_x448_from_link = peer_x448;
                 (q.host.clone(), q.port, q.key_hash.clone(), q.sender_id.clone(), serde_json::to_vec(&ci).map_err(|e| e.to_string())?)
             } else {
                 let rest = link.strip_prefix("smp://").ok_or("bad link scheme")?;
@@ -418,7 +500,21 @@ impl<T: SmpTransport> Agent<T> {
             .map_err(|e| e.to_string())?;
             o
         };
-        let ci_reply = serde_json::to_vec(&ConnInfo { profile: "joiner".into(), pq_support: true, e2e: Some(e2e_reply.clone()) }).map_err(|e| e.to_string())?;
+        // Our X448 identity + the shared secret with the initiator (from the invitation).
+        let x448_kp = crate::x448::keypair();
+        let x448_spki = crate::x448::spki_x448(&x448_kp.public);
+        let x448_shared = peer_x448_from_link
+            .as_deref()
+            .and_then(crate::x448::parse_spki_x448)
+            .and_then(|peer_pub| crate::x448::dh(&x448_kp.secret, &peer_pub));
+        let e2e_reply_blob = pack_e2e_blob(&e2e_reply, Some(&x448_spki));
+        let ci_reply = serde_json::to_vec(&ConnInfo {
+            profile: "joiner".into(),
+            pq_support: true,
+            e2e: Some(e2e_reply_blob),
+            x448_spki: Some(x448_spki.clone()),
+        })
+        .map_err(|e| e.to_string())?;
         let frame = encode_agent(&AgentMsg::ConnInfoReply(vec![qi], ci_reply), 1, &[0u8; 32]);
         // G13: the confirmation goes out as agentConfirmation envelope:
         // agentVersion + "C" + "1" + sndE2EParams + encConnInfo
@@ -451,6 +547,9 @@ impl<T: SmpTransport> Agent<T> {
             kem: Some(kem),
             ratchet: None,
             init_ci,
+            x448_kp: Some(x448_kp),
+            peer_x448_spki: peer_x448_from_link,
+            x448_shared,
             initiator: false,
             outbox: Vec::new(),
             e2e: true,
@@ -472,15 +571,25 @@ impl<T: SmpTransport> Agent<T> {
                     // auto-negotiate E2E: SK = DH(our rcv_dh, joiner rcv_dh from queue info)
                     let peer_dh_raw = parse_spki(&q0.dh_pub).map_err(|e| e.to_string())?.1;
                     let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(peer_dh_raw));
+                    let peer_ci: Option<ConnInfo> = serde_json::from_slice(&ci).ok();
                     let peer_kem = (|| {
-                        let ci: ConnInfo = serde_json::from_slice(&ci).ok()?;
-                        let e2e = ci.e2e?;
-                        let mut r = Reader::new(&e2e);
+                        let e2e = peer_ci.as_ref()?.e2e.as_ref()?;
+                        let (pq_params, _) = unpack_e2e_blob(e2e).ok()?;
+                        let mut r = Reader::new(&pq_params);
                         match crate::pq::decode_e2e_ratchet_params(&mut r).ok()?.kem {
                             crate::pq::KemParams::Pk(pk) | crate::pq::KemParams::CtPk(_, pk) => Some(pk),
                             _ => None,
                         }
                     })();
+                    // Official-compat X448: the joiner's key arrives in its connInfo;
+                    // both sides now derive the same shared secret.
+                    if let Some(peer_spki) = peer_ci.as_ref().and_then(|c| c.x448_spki.clone()) {
+                        self.peer_x448_spki = Some(peer_spki.clone());
+                        self.x448_shared = match (self.x448_kp.as_ref(), crate::x448::parse_spki_x448(&peer_spki)) {
+                            (Some(kp), Some(peer_pub)) => crate::x448::dh(&kp.secret, &peer_pub),
+                            _ => None,
+                        };
+                    }
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
                     // pre-ratchet handshake frame: sent raw (no envelope) until the PQDR
@@ -501,6 +610,16 @@ impl<T: SmpTransport> Agent<T> {
             }
         }
         Err("no confirmation MSG".into())
+    }
+
+    /// Official-compat X448 shared secret (once both X448 keys are known).
+    pub fn x448_shared_secret(&self) -> Option<[u8; 56]> {
+        self.x448_shared
+    }
+
+    /// Our X448 public key in SPKI DER (travels in the invitation).
+    pub fn x448_public_spki(&self) -> Option<Vec<u8>> {
+        self.x448_kp.as_ref().map(|kp| crate::x448::spki_x448(&kp.public))
     }
 
     /// Joiner: wait for HELLO on own queue, reply HELLO. (queue already subscribed in join_contact)
@@ -526,7 +645,18 @@ impl<T: SmpTransport> Agent<T> {
                         }
                         let ci: ConnInfo = serde_json::from_slice(&self.init_ci).map_err(|e| format!("init_ci: {e}"))?;
                         let e2e = ci.e2e.ok_or("E2E on: no e2e params in init_ci")?;
-                        let params = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&e2e))
+                        let (pq_params, peer_x448) = unpack_e2e_blob(&e2e)?;
+                        if self.peer_x448_spki.is_none() {
+                            self.peer_x448_spki = peer_x448;
+                        }
+                        if self.x448_shared.is_none() {
+                            self.x448_shared = match (self.x448_kp.as_ref(), self.peer_x448_spki.as_deref()) {
+                                (Some(kp), Some(spki)) => crate::x448::parse_spki_x448(spki)
+                                    .and_then(|peer_pub| crate::x448::dh(&kp.secret, &peer_pub)),
+                                _ => None,
+                            };
+                        }
+                        let params = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&pq_params))
                             .map_err(|e| format!("e2e params: {e}"))?;
                         let (_, dh_raw) = parse_spki(&params.snd_dh_spki).map_err(|e| e.to_string())?;
                         let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
