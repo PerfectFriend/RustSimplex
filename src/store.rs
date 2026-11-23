@@ -27,16 +27,70 @@ pub fn store_key() -> Option<[u8; 32]> {
     env_key().ok().flatten()
 }
 
+fn parse_hex_key(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s.trim()).map_err(|e| format!("bad store-key hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "the store key must be exactly 32 bytes".to_string())
+}
+
 /// SEC-10: if the env var is set but invalid, that is a config error — never silently plaintext.
-fn env_key() -> Result<Option<[u8; 32]>, String> {
+///
+/// P1-5: the key file (`SMP_STORE_KEY_FILE`) takes precedence over the env var
+/// (`SMP_STORE_KEY`), because the env var is readable through `/proc/<pid>/environ`.
+pub(crate) fn env_key() -> Result<Option<[u8; 32]>, String> {
+    if let Ok(p) = std::env::var("SMP_STORE_KEY_FILE") {
+        let s = std::fs::read_to_string(p.trim())
+            .map_err(|e| format!("cannot read SMP_STORE_KEY_FILE={p}: {e}"))?;
+        return parse_hex_key(&s).map(Some);
+    }
     match std::env::var("SMP_STORE_KEY") {
-        Ok(hex_key) => {
-            let bytes = hex::decode(hex_key.trim()).map_err(|e| format!("bad SMP_STORE_KEY hex: {e}"))?;
-            let arr: [u8; 32] = bytes.try_into().map_err(|_| "SMP_STORE_KEY must be 32 bytes".to_string())?;
-            Ok(Some(arr))
-        }
+        Ok(hex_key) => parse_hex_key(&hex_key).map(Some),
         Err(_) => Ok(None),
     }
+}
+
+/// The store encryption key, wiped on drop.
+///
+/// P1-5: keep the key in a dedicated type so it cannot be copied around as a plain
+/// array and left in freed memory.
+pub struct StoreKey([u8; 32]);
+
+impl StoreKey {
+    pub fn from_hex(s: &str) -> Result<StoreKey, String> {
+        parse_hex_key(s).map(StoreKey)
+    }
+    pub fn from_bytes(b: [u8; 32]) -> StoreKey {
+        StoreKey(b)
+    }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Clone for StoreKey {
+    fn clone(&self) -> Self {
+        StoreKey(self.0)
+    }
+}
+
+impl Drop for StoreKey {
+    fn drop(&mut self) {
+        for b in self.0.iter_mut() {
+            *b = 0;
+        }
+    }
+}
+
+impl std::fmt::Debug for StoreKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoreKey(..)")
+    }
+}
+
+/// The store key from the environment: `SMP_STORE_KEY_FILE` first, then `SMP_STORE_KEY`.
+pub fn store_key_from_env() -> Result<Option<StoreKey>, String> {
+    env_key().map(|k| k.map(StoreKey::from_bytes))
 }
 
 /// Encrypt with an explicitly supplied key (no process-global env lookup).
@@ -131,6 +185,20 @@ pub fn snapshot_bytes(st: &ServerState) -> Vec<u8> {
     for q in &qs {
         out.push(if q.rcv_auth_x { 1 } else { 0 });
     }
+    // SRVID trailer (v3 snapshot): the router identity and the server ephemeral key,
+    // so a restart keeps the same smp:// keyHash and the same onion-hop address (P0-4).
+    out.extend_from_slice(b"SRVID");
+    match &st.identity {
+        Some(id) => {
+            out.push(1);
+            put_bytes(&mut out, &id.offline_der);
+            put_bytes(&mut out, &id.online_der);
+            put_bytes(&mut out, &id.online_key_pkcs8);
+        }
+        None => out.push(0),
+    }
+    out.extend_from_slice(&st.eph_secret);
+    out.extend_from_slice(&st.eph_pub);
     out
 }
 
@@ -250,6 +318,19 @@ pub fn parse_snapshot(buf: &[u8]) -> Option<ServerState> {
                 }
             }
         }
+    }
+    // optional SRVID trailer (absent in older snapshots): router identity + ephemeral key
+    if r.pos + 5 <= buf.len() && &buf[r.pos..r.pos + 5] == b"SRVID" {
+        r.pos += 5;
+        let flags = r.take(1)?[0];
+        if flags & 1 == 1 {
+            let offline_der = r.bytes()?;
+            let online_der = r.bytes()?;
+            let online_key_pkcs8 = r.bytes()?;
+            st.identity = Some(crate::identity::StoredIdentity { offline_der, online_der, online_key_pkcs8 });
+        }
+        st.eph_secret = r.take(32)?.try_into().ok()?;
+        st.eph_pub = r.take(32)?.try_into().ok()?;
     }
     Some(st)
 }
@@ -445,18 +526,37 @@ pub fn load(path: &Path) -> Option<ServerState> {
 /// empty state and then overwrite the real — but unreadable — store on the first
 /// mutation. Callers that persist state must use this function instead.
 pub fn load_checked(path: &Path) -> Result<Option<ServerState>, String> {
+    let key = env_key().map_err(|e| e.to_string())?;
+    load_checked_with_key(path, key)
+}
+
+/// Fail-closed load with an explicit key (does not read the environment).
+///
+/// Same contract as [`load_checked`]: `Ok(None)` = no file, `Err` = the file exists
+/// but cannot be decrypted/parsed — the caller must refuse to start.
+pub fn load_checked_with_key(path: &Path, key: Option<[u8; 32]>) -> Result<Option<ServerState>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let key = env_key().map_err(|e| e.to_string())?;
     match load_with_key(path, key) {
         Some(st) => Ok(Some(st)),
         None => Err(format!(
-            "store at {} exists but cannot be loaded (wrong SMP_STORE_KEY, corrupt file, \
+            "store at {} exists but cannot be loaded (wrong key, corrupt file, \
              unsupported version or parse error) — refusing to start and overwrite it",
             path.display()
         )),
     }
+}
+
+/// Serialize + seal a state for persistence. Call while holding the state lock.
+pub fn seal_state(st: &ServerState, key: Option<[u8; 32]>) -> Result<Vec<u8>, String> {
+    seal_with_key(envelope(&snapshot_bytes(st)), key)
+}
+
+/// Write already-sealed store bytes atomically. Call WITHOUT holding the state lock:
+/// the fsync here must not block every other connection (audited as P0-3).
+pub fn write_store_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, bytes)
 }
 
 /// Load with an explicit key (does not read `SMP_STORE_KEY`).

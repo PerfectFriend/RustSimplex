@@ -43,6 +43,10 @@ pub struct ServerState {
     pub proxies: crate::proxy::ProxyMap,   // proxy_session_id -> dest conn
     pub xftp: crate::xftp::XftpStore,      // packet_id -> XftpPacket
     pub persist: Option<std::path::PathBuf>,
+    /// store encryption key, kept next to the path it belongs to (P1-5: wiped on drop)
+    pub persist_key: Option<crate::store::StoreKey>,
+    /// persisted router identity (P0-4: the smp:// keyHash must survive a restart)
+    pub identity: Option<crate::identity::StoredIdentity>,
     /// stable per-engine server ephemeral key (authPubKey in every server hello),
     /// so onion hops can be addressed by this pub across connections
     pub eph_secret: [u8; 32],
@@ -66,16 +70,22 @@ pub struct ConnCtx {
 impl ServerState {
     pub fn new() -> Self {
         let kp = x25519_keypair();
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes() }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, persist_key: None, identity: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes() }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
             // A failed persist must be visible: swallowing it means the server keeps
             // serving from memory while the on-disk state silently diverges.
-            if let Err(e) = crate::store::save(p, self) {
+            let key = self.persist_key.as_ref().map(|k| *k.as_bytes());
+            if let Err(e) = crate::store::save_with_key(p, self, key) {
                 eprintln!("smp-server: FAILED to persist store to {}: {e}", p.display());
             }
         }
+    }
+    /// Serialize + seal the state for persistence. Call while holding the state lock.
+    pub fn sealed_store(&self) -> Result<Vec<u8>, String> {
+        let key = self.persist_key.as_ref().map(|k| *k.as_bytes());
+        crate::store::seal_state(self, key)
     }
 }
 
@@ -93,9 +103,71 @@ pub fn new_state() -> Arc<Mutex<ServerState>> {
 /// be read (audited as P0-2: starting with an empty state would overwrite the real
 /// store on the first mutation).
 pub fn new_state_persist(path: std::path::PathBuf) -> Result<Arc<Mutex<ServerState>>, String> {
-    let mut st = crate::store::load_checked(&path)?.unwrap_or_default();
+    let key = crate::store::env_key().map_err(|e| e.to_string())?;
+    new_state_persist_with_key(path, key)
+}
+
+/// Load a persistent server state with an explicit store key (no env lookup).
+pub fn new_state_persist_with_key(path: std::path::PathBuf, key: Option<[u8; 32]>) -> Result<Arc<Mutex<ServerState>>, String> {
+    let mut st = crate::store::load_checked_with_key(&path, key)?.unwrap_or_default();
     st.persist = Some(path);
+    st.persist_key = key.map(crate::store::StoreKey::from_bytes);
     Ok(Arc::new(Mutex::new(st)))
+}
+
+/// Options for an engine that persists its state.
+pub struct StoreOpts {
+    /// Store encryption key. `None` together with `allow_plain_store == false` is refused (P1-5).
+    pub key: Option<crate::store::StoreKey>,
+    /// Explicit opt-in to an UNENCRYPTED store (a plaintext store leaks `rcv_dh_secret`).
+    pub allow_plain_store: bool,
+}
+
+impl StoreOpts {
+    /// Key from the environment (`SMP_STORE_KEY_FILE`, then `SMP_STORE_KEY`); plaintext refused.
+    pub fn from_env() -> Result<StoreOpts, String> {
+        Ok(StoreOpts { key: crate::store::store_key_from_env()?, allow_plain_store: false })
+    }
+    /// Explicit opt-in to a plaintext store (tests / local debugging only).
+    pub fn plain() -> StoreOpts {
+        StoreOpts { key: None, allow_plain_store: true }
+    }
+    fn key_bytes(&self) -> Option<[u8; 32]> {
+        self.key.as_ref().map(|k| *k.as_bytes())
+    }
+}
+
+/// P1-5: a configured store must be encrypted unless the caller explicitly opted in.
+fn ensure_store_encryption(path: &std::path::Path, opts: &StoreOpts) -> Result<(), String> {
+    if opts.key.is_some() || opts.allow_plain_store {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to persist the store at {} without an encryption key (a plaintext store carries rcv_dh_secret); \
+         set SMP_STORE_KEY / SMP_STORE_KEY_FILE, pass --store-key-file, or opt in with --insecure-plain-store",
+        path.display()
+    ))
+}
+
+/// `smp-server init`: create/open a store with a router identity and return the stable
+/// `smp://` address (P0-4 — the keyHash must survive restarts).
+pub fn init_router_store(bind: &str, host: &str, store: &std::path::Path, opts: StoreOpts) -> Result<String, String> {
+    ensure_store_encryption(store, &opts)?;
+    let st = new_state_persist_with_key(store.to_path_buf(), opts.key_bytes())?;
+    let id = {
+        let mut g = st.lock().unwrap();
+        match &g.identity {
+            Some(sid) => sid.to_router()?,
+            None => {
+                let id = RouterIdentity::generate(host)?;
+                g.identity = Some(crate::identity::StoredIdentity::from_router(&id));
+                g.persist_now();
+                id
+            }
+        }
+    };
+    let port = bind.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(5223);
+    Ok(id.address(host, port))
 }
 
 fn resp(corr_id: Vec<u8>, entity_id: Vec<u8>, m: BrokerMsg) -> Result<Transmission, EncodeError> {
@@ -186,7 +258,17 @@ fn dispatch(
     );
     let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
     if dirty {
-        lock_state(st).persist_now();
+        // P0-3: serialize under the state lock, write the file OUTSIDE it — the fsync
+        // must not hold the global mutex and block every other connection.
+        let plan = {
+            let g = lock_state(st);
+            (g.persist.clone(), g.sealed_store().ok())
+        };
+        if let (Some(p), Some(bytes)) = plan {
+            if let Err(e) = crate::store::write_store_bytes(&p, &bytes) {
+                eprintln!("smp-server: FAILED to persist store to {}: {e}", p.display());
+            }
+        }
     }
     out
 }
@@ -916,11 +998,20 @@ impl Engine {
     /// Bind a plain engine with a persistent store, taking the strict-mode and
     /// local-proxy defaults from the environment **once**, at bind time.
     pub fn bind_plain_store(addr: &str, store: Option<std::path::PathBuf>) -> std::io::Result<Engine> {
+        let opts = StoreOpts::from_env().map_err(std::io::Error::other)?;
+        Self::bind_plain_store_opts(addr, store, opts)
+    }
+
+    /// Bind a plain engine with a persistent store and explicit store options.
+    ///
+    /// P1-5: a store without an encryption key is refused unless opted in.
+    pub fn bind_plain_store_opts(addr: &str, store: Option<std::path::PathBuf>, opts: StoreOpts) -> std::io::Result<Engine> {
         let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
         let allow_local_proxy = std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some();
         let mut engine = Self::bind_plain_with_proxy_and_strict(addr, allow_local_proxy, strict)?;
         if let Some(p) = store {
-            engine.state = new_state_persist(p).map_err(std::io::Error::other)?;
+            ensure_store_encryption(&p, &opts).map_err(std::io::Error::other)?;
+            engine.state = new_state_persist_with_key(p, opts.key_bytes()).map_err(std::io::Error::other)?;
         }
         Ok(engine)
     }
@@ -932,15 +1023,42 @@ impl Engine {
     }
 
     pub fn bind_tls_store(addr: &str, host: &str, store: Option<std::path::PathBuf>) -> Result<Engine, String> {
+        let opts = StoreOpts::from_env()?;
+        Self::bind_tls_store_opts(addr, host, store, opts)
+    }
+
+    /// Bind with TLS and explicit store options.
+    ///
+    /// P0-4: when a store is configured, the router identity is taken from the store
+    /// (or generated once and persisted immediately), so the `smp://` keyHash — and
+    /// with it every pinned client address — survives a restart.
+    pub fn bind_tls_store_opts(addr: &str, host: &str, store: Option<std::path::PathBuf>, opts: StoreOpts) -> Result<Engine, String> {
         let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
-        let id = RouterIdentity::generate(host)?;
+        let key = opts.key_bytes();
+        let (state, id) = match &store {
+            Some(p) => {
+                ensure_store_encryption(p, &opts)?;
+                let st = new_state_persist_with_key(p.clone(), key)?;
+                let id = {
+                    let mut g = st.lock().unwrap();
+                    match &g.identity {
+                        Some(sid) => sid.to_router()?,
+                        None => {
+                            let id = RouterIdentity::generate(host)?;
+                            g.identity = Some(crate::identity::StoredIdentity::from_router(&id));
+                            g.persist_now();
+                            id
+                        }
+                    }
+                };
+                (st, id)
+            }
+            None => (new_state(), RouterIdentity::generate(host)?),
+        };
         let cfg = tls_server_config(&id).map_err(|e| e.to_string())?;
         Ok(Engine {
             listener,
-            state: match store {
-                Some(p) => new_state_persist(p)?,
-                None => new_state(),
-            },
+            state,
             mode: Mode::Tls(Arc::new((*cfg).clone())),
             identity: Some(id),
             host: host.to_string(),

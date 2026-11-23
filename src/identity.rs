@@ -80,3 +80,41 @@ impl RouterIdentity {
 pub fn cert_fingerprint(cert_der: &[u8]) -> [u8; 32] {
     sha256(cert_der)
 }
+
+/// Router identity material as persisted inside the (encrypted) server store.
+///
+/// Audited as P0-4: the identity used to be regenerated on every start, so the
+/// `smp://` keyHash changed and every pinned client address went dead.
+///
+/// The `key_hash` is deliberately NOT stored: [`StoredIdentity::to_router`] always
+/// recomputes it as SHA-256 of the full offline CA certificate DER, so a tampered
+/// store cannot claim an address that does not match the keys it carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredIdentity {
+    pub offline_der: Vec<u8>,
+    pub online_der: Vec<u8>,
+    pub online_key_pkcs8: Vec<u8>,
+}
+
+impl StoredIdentity {
+    pub fn from_router(id: &RouterIdentity) -> Self {
+        Self {
+            offline_der: id.offline_der.clone(),
+            online_der: id.online_der.clone(),
+            online_key_pkcs8: id.online_key_pkcs8.clone(),
+        }
+    }
+
+    /// Rebuild the identity, recomputing the keyHash from the offline certificate DER.
+    pub fn to_router(&self) -> Result<RouterIdentity, String> {
+        if self.offline_der.is_empty() || self.online_der.is_empty() || self.online_key_pkcs8.is_empty() {
+            return Err("the stored router identity is incomplete".to_string());
+        }
+        Ok(RouterIdentity {
+            key_hash: sha256(&self.offline_der),
+            offline_der: self.offline_der.clone(),
+            online_der: self.online_der.clone(),
+            online_key_pkcs8: self.online_key_pkcs8.clone(),
+        })
+    }
+}

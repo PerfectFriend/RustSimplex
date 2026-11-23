@@ -23,7 +23,7 @@ fn queues_survive_restart() {
     let store_path = scratch_file("test-smp-store.bin");
     let addr;
     let (rcv_id, snd_id, secret) = {
-        let e = Engine::bind_plain_store("127.0.0.1:0", Some(store_path.clone())).unwrap();
+        let e = Engine::bind_plain_store_opts("127.0.0.1:0", Some(store_path.clone()), smp_rs::server::StoreOpts::plain()).unwrap();
         let (a, _st, sd, _h) = spawn_engine(e);
         addr = a;
         let kh = [0xCDu8; 32];
@@ -68,7 +68,7 @@ fn queues_survive_restart() {
     assert_eq!(st.by_rcv[&rcv_id].messages.len(), 1, "one pending message persisted");
 
     // restart engine on the same store file: SUB must deliver the pending message
-    let e = Engine::bind_plain_store("127.0.0.1:0", Some(store_path.clone())).unwrap();
+    let e = Engine::bind_plain_store_opts("127.0.0.1:0", Some(store_path.clone()), smp_rs::server::StoreOpts::plain()).unwrap();
     let (addr2, _st, _sd, _h) = spawn_engine(e);
     let _kh = [0xCDu8; 32];
     // we need the rcv auth key to sign SUB — regenerate is impossible, so use state directly:
