@@ -33,11 +33,11 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - name: Build
-        run: cargo build --all-targets ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }}
+        run: cargo build --locked --all-targets ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }}
       - name: Tests
-        run: cargo test -- --test-threads=1 ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }}
+        run: cargo test --locked ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }} -- --test-threads=1
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }}
+        run: cargo clippy --locked --all-targets ${{ matrix.features == 'default' && '' || format('--features {0}', matrix.features) }} -- -D warnings
 
   no-default-features:
     name: check (no-default-features)
@@ -59,13 +59,20 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - name: Strict tests
-        run: cargo test -- --test-threads=1 --test strict_e2e --test ntf --test proxy
+        # cargo accepts only one --test per invocation
+        run: |
+          cargo test --locked --test strict_e2e -- --test-threads=1
+          cargo test --locked --test ntf -- --test-threads=1
+          cargo test --locked --test proxy -- --test-threads=1
         env:
           SMP_STRICT: "1"
 
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
@@ -83,7 +90,7 @@ jobs:
       # The in-repo harness is a deterministic seeded mutation fuzzer (no nightly/cargo-fuzz needed,
       # so it runs on every PR). It asserts that no parser panics on hostile input.
       - name: Mutation fuzz harness
-        run: cargo test --offline --release --test fuzz_parse -- --nocapture
+        run: cargo test --locked --release --test fuzz_parse -- --nocapture
 
   package:
     name: package (crates.io metadata)

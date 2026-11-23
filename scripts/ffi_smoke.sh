@@ -30,7 +30,8 @@ mkdir -p "$OUT"
 
 echo "[1/5] building the cdylib"
 cargo build $CARGO_OFFLINE --features ffi
-SO="$(find "$CARGO_TARGET_DIR/debug" -maxdepth 1 -name 'libsmp_rs.so' | head -1)"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+SO="$(find "$TARGET_DIR/debug" -maxdepth 1 -name 'libsmp_rs.so' | head -1)"
 [ -n "$SO" ] || { echo "FAIL: libsmp_rs.so was not built"; exit 1; }
 echo "      $SO"
 

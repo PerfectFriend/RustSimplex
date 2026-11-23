@@ -1,8 +1,14 @@
 //! X448 (Curve448) Diffie-Hellman — RFC 7748.
 //!
 //! The official SimpleX agent E2E ratchet uses X448 keys (`C.X448` in simplexmq),
-//! so interop with the stock mobile client needs this. Implemented over the vendored
-//! pure-Rust `cx448` crate (offline-friendly).
+//! so interop with the stock mobile client needs this. Implemented over the RustCrypto
+//! `x448` crate (RFC 7748, `static_secrets` feature).
+//!
+//! NOTE: we previously used `cx448` 0.1.1, which pulls `crypto-bigint` 0.5.5 — affected by
+//! RUSTSEC-2026-0387 (secret-dependent branches in constant-time arithmetic, fixed in
+//! crypto-bigint >= 0.7.6). `cx448` has no release with the fix, so the dependency was
+//! swapped for RustCrypto `x448`, which has no crypto-bigint in its tree and clamps
+//! scalars per RFC 7748 in `StaticSecret::from`.
 //!
 //! Wire formats:
 //!   - raw public key: 56 bytes
@@ -26,8 +32,7 @@ pub const X448_BASE: [u8; 56] = {
 
 /// RFC 7748 §5 scalar clamping for X448: clear the two low bits of the first
 /// octet and set the high bit of the last octet.
-/// Provided for wire-level tooling; the typed cx448 API used here
-/// (`Secret::from_bytes` / `Secret::new`) applies the same clamping internally.
+/// Applied by `x448::StaticSecret::from` internally; kept public for wire-level tooling.
 pub fn clamp_scalar(k: &[u8; 56]) -> [u8; 56] {
     let mut k = *k;
     k[0] &= 252;
@@ -43,9 +48,8 @@ pub struct X448Keypair {
 
 /// Generate a fresh X448 keypair (OsRng).
 ///
-/// NOTE: `cx448::x448::Secret::new` does NOT clamp the scalar (only
-/// `Secret::from_bytes` does), so we clamp here — otherwise the published public
-/// key (derived from the raw scalar) would not match the peer's DH result.
+/// The scalar is clamped here *and* by `x448::StaticSecret::from`, so the stored
+/// secret is exactly the scalar the peer will use in its DH computation.
 pub fn keypair() -> X448Keypair {
     let mut bytes = [0u8; 56];
     OsRng.fill_bytes(&mut bytes);
@@ -55,19 +59,18 @@ pub fn keypair() -> X448Keypair {
 }
 
 /// public = X448(clamp(secret), base).
-/// Uses the typed cx448 API: `Secret::from_bytes` clamps per RFC 7748 and
-/// `PublicKey::from(&secret)` performs the base-point multiplication.
-/// (The crate's free `x448(scalar, point)` fn is the raw variant — do not use it here.)
+/// `StaticSecret::from` clamps per RFC 7748; `PublicKey::from(&secret)` performs
+/// the base-point multiplication.
 pub fn public_from_secret(secret: &[u8; 56]) -> Option<[u8; 56]> {
-    let s = cx448::x448::Secret::from_bytes(secret)?;
-    Some(*cx448::x448::PublicKey::from(&s).as_bytes())
+    let s = x448::StaticSecret::from(*secret);
+    Some(*x448::PublicKey::from(&s).as_bytes())
 }
 
-/// X448(clamp(secret), peer_public); None if the peer key is low-order.
+/// X448(clamp(secret), peer_public); None if the peer key is malformed or low-order.
 pub fn dh(secret: &[u8; 56], peer_public: &[u8; 56]) -> Option<[u8; 56]> {
-    let s = cx448::x448::Secret::from_bytes(secret)?;
-    let peer = cx448::x448::PublicKey::from_bytes(peer_public)?;
-    let shared = s.to_diffie_hellman(&peer)?;
+    let peer = x448::PublicKey::from_bytes(peer_public)?;
+    let s = x448::StaticSecret::from(*secret);
+    let shared = s.diffie_hellman(&peer);
     Some(*shared.as_bytes())
 }
 
@@ -95,7 +98,7 @@ mod tests {
     use super::*;
 
     // Golden vector generated with Python `cryptography` (OpenSSL X448) —
-    // cross-implementation check that our cx448 math matches the reference.
+    // cross-implementation check that our X448 math matches the reference.
     const GOLDEN_PRIV: &str = "ec010ad67e57f464605e5273daba41f433f2eb42850dbce2c73c2ca3a23d63e84ac135ef4adeede4cd20322a463903130b817f61d8d233d1";
     const GOLDEN_SPKI: &str = "3042300506032b656f033900bd2e3619e7fa725b896020c4662778bf3104af3c514abfdb889777db2212ab071436fd93e43184d063ad853ca4a30a2c7ffa61f75bc34871";
     const GOLDEN_PEER_PUB: &str = "5c7a27edc2b5203c625530ccefba701d6a8353ec73b2b50020255a351c0afac697738ed80edf4e24cc704b633c66ee80198e1a68189a7d62";

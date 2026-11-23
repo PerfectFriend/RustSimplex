@@ -56,15 +56,15 @@ jobs:
           echo "Cargo.toml version $VERSION matches tag $TAG"
 
       - name: Tests
-        run: cargo test --offline -- --test-threads=1
+        run: cargo test --locked -- --test-threads=1
 
       - name: Clippy (default + v71-probes)
         run: |
-          cargo clippy --offline --all-targets -- -D warnings
-          cargo clippy --offline --features v71-probes --all-targets -- -D warnings
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --features v71-probes --all-targets -- -D warnings
 
       - name: Package verification
-        run: cargo package --allow-dirty
+        run: cargo package --locked
 
       - name: Generate the SBOM (CycloneDX 1.5)
         run: python3 scripts/sbom.py --output target/package/sbom.cdx.json

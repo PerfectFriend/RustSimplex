@@ -1,0 +1,18 @@
+# cargo-audit policy for smp-rs.
+#
+# All four entries are "unmaintained" advisories without a fixed upgrade:
+#   RUSTSEC-2026-0374 basic-toml   (transitive: toml_edit -> basic-toml)
+#   RUSTSEC-2025-0141 bincode       (transitive: serde-based store snapshots)
+#   RUSTSEC-2024-0436 paste         (transitive: macro helper crate)
+#   RUSTSEC-2023-0037 xsalsa20poly1305 (transitive: NaCl crypto_box, SimpleX wire format)
+#
+# None of them are memory-safety or crypto-correctness issues; the SimpleX wire format
+# mandates NaCl crypto_box, so xsalsa20poly1305 cannot simply be dropped.
+# Any *new* advisory (including vulnerabilities) still fails the audit job.
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0037",
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2025-0141",
+    "RUSTSEC-2026-0374",
+]
