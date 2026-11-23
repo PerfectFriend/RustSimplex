@@ -128,6 +128,17 @@ pub fn encode_agent(m: &AgentMsg, msg_id: i64, prev_hash: &[u8]) -> Vec<u8> {
     o
 }
 
+/// Unwrap the official agent envelope (agentVersion + type) if present and return
+/// the inner agent frame. Legacy raw frames ("I"/"D"/"M" without version prefix)
+/// are returned unchanged — back-compat with pre-G13 peers.
+pub fn unwrap_envelope(pt: &[u8]) -> Vec<u8> {
+    match crate::agent_envelope::decode(pt) {
+        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => enc_agent_msg,
+        Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => enc_conn_info,
+        _ => pt.to_vec(),
+    }
+}
+
 pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
     if buf.is_empty() {
         return Err("empty agent message".into());
@@ -407,8 +418,15 @@ impl<T: SmpTransport> Agent<T> {
             .map_err(|e| e.to_string())?;
             o
         };
-        let ci_reply = serde_json::to_vec(&ConnInfo { profile: "joiner".into(), pq_support: true, e2e: Some(e2e_reply) }).map_err(|e| e.to_string())?;
-        let body = encode_agent(&AgentMsg::ConnInfoReply(vec![qi], ci_reply), 1, &[0u8; 32]);
+        let ci_reply = serde_json::to_vec(&ConnInfo { profile: "joiner".into(), pq_support: true, e2e: Some(e2e_reply.clone()) }).map_err(|e| e.to_string())?;
+        let frame = encode_agent(&AgentMsg::ConnInfoReply(vec![qi], ci_reply), 1, &[0u8; 32]);
+        // G13: the confirmation goes out as agentConfirmation envelope:
+        // agentVersion + "C" + "1" + sndE2EParams + encConnInfo
+        let body = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Confirmation {
+            pq: true,
+            e2e_params: e2e_reply.clone(),
+            enc_conn_info: frame,
+        });
         client
             .request(Command::Send { flags: false, body }, init_snd.clone(), None)
             .map_err(|e| e.to_string())?;
@@ -447,7 +465,7 @@ impl<T: SmpTransport> Agent<T> {
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                if let AgentMsg::ConnInfoReply(qs, ci) = parse_agent(&pt)? {
+                if let AgentMsg::ConnInfoReply(qs, ci) = parse_agent(&unwrap_envelope(&pt))? {
                     let Some(q0) = qs.first() else { return Err("empty smpQueues in D".into()) };
                     let peer = q0.sender_id.clone();
                     self.peer_snd_id = Some(peer);
@@ -465,8 +483,9 @@ impl<T: SmpTransport> Agent<T> {
                     })();
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
+                    let body = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: hello });
                     self.client
-                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
+                        .request(Command::Send { flags: false, body }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO is sent (before any A_MSG); fail-closed:
                     // with e2e on, a missing/malformed peer KEM key is an error, never plaintext.
@@ -490,11 +509,12 @@ impl<T: SmpTransport> Agent<T> {
         for m in &msgs {
             if let BrokerMsg::Msg { msg_id, body } = m {
                 let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                if matches!(parse_agent(&pt)?, AgentMsg::Hello { .. }) {
+                if matches!(parse_agent(&unwrap_envelope(&pt))?, AgentMsg::Hello { .. }) {
                     self.msg_counter += 1;
                     let hello = encode_agent(&AgentMsg::Hello { msg_id: 0, prev_hash: vec![] }, self.msg_counter, &self.prev_hash);
+                    let body = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: hello });
                     self.client
-                        .request(Command::Send { flags: false, body: hello }, self.peer_snd_id.clone().ok_or("no peer")?, None)
+                        .request(Command::Send { flags: false, body }, self.peer_snd_id.clone().ok_or("no peer")?, None)
                         .map_err(|e| e.to_string())?;
                     // init E2E only AFTER HELLO reply is sent; fail-closed: with e2e on,
                     // unparsable e2e params in the link are an error, never a silent downgrade.
@@ -617,10 +637,7 @@ impl<T: SmpTransport> Agent<T> {
                     let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
                     // G13: unwrap the official agentMsgEnvelope first; legacy raw
                     // frames ("I"/"D"/"M" without the version prefix) are still accepted.
-                    let inner = match crate::agent_envelope::decode(&pt) {
-                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => enc_agent_msg,
-                        _ => pt.clone(),
-                    };
+                    let inner = unwrap_envelope(&pt);
                     let mut am = parse_agent(&inner)?;
                     if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
                         if let Some(r) = &mut self.ratchet {
@@ -649,11 +666,12 @@ impl<T: SmpTransport> Agent<T> {
     /// Send A_RCVD for a received agent msg id.
     pub fn send_rcvd(&mut self, agent_msg_id: i64, msg_hash: &[u8]) -> Result<(), String> {
         self.msg_counter += 1;
-        let wire = encode_agent(
+        let frame = encode_agent(
             &AgentMsg::Rcvd { msg_id: 0, prev_hash: vec![], receipts: vec![Receipt { agent_msg_id, msg_hash: msg_hash.to_vec(), rcpt_info: b"ok".to_vec() }] },
             self.msg_counter,
             &self.prev_hash,
         );
+        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;

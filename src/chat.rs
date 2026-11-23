@@ -77,10 +77,7 @@ pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
                     .send_only(crate::protocol::Command::Ack(msg_id.clone()), a.rcv_id.clone(), Some(&a.rcv_auth))
                     .map_err(|e| e.to_string())?;
                 // G13: unwrap official agentMsgEnvelope; legacy raw frames still accepted
-                let inner = match crate::agent_envelope::decode(&pt) {
-                    Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => enc_agent_msg,
-                    _ => pt.clone(),
-                };
+                let inner = crate::agent::unwrap_envelope(&pt);
                 let Ok(mut am) = parse_agent_pub(&inner) else { continue };
                 if let AgentMsg::Msg { body, .. } = &mut am {
                     if let Some(r) = &mut a.ratchet {
