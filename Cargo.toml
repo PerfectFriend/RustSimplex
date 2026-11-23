@@ -1,6 +1,6 @@
 [package]
 name = "smp-rs"
-version = "0.99.2"
+version = "0.99.3"
 edition = "2021"
 license = "MIT"
 description = "Rust implementation of the SimpleX Messaging Protocol stack (SMP relay, XFTP files, NTF notifications, agent protocol, PQDR E2E ratchet) — server engine + client"
