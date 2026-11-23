@@ -3,3 +3,6 @@
 
 # superpowers SDD workspace (ledger + briefs, scratch)
 .superpowers/
+
+# build output (the SBOM is generated into the CI temp dir, never into the repo)
+/target/
