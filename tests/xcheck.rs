@@ -4,7 +4,15 @@ use smp_rs::crypto::*;
 fn pynacl_crosscheck() {
     // v0.23: fixture lives in the hermes scratch dir which is pruned after 24h idle — skip
     // cleanly when absent instead of failing the suite.
-    let Ok(j) = std::fs::read_to_string("/home/thomas/.hermes/cache/scratch/xcheck.json") else {
+    // Cross-check fixture path: TMPDIR-aware, overridable with SMP_XCHECK_JSON.
+    let fixture = std::env::var("SMP_XCHECK_JSON").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("smp-rs-tests")
+            .join("xcheck.json")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let Ok(j) = std::fs::read_to_string(&fixture) else {
         eprintln!("[skip] xcheck.json fixture pruned from scratch dir");
         return;
     };

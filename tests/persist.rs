@@ -9,7 +9,10 @@ use smp_rs::server::{decrypt_for_recipient, spawn_engine, Engine};
 use smp_rs::store;
 
 fn scratch_file(name: &str) -> PathBuf {
-    let dir = std::path::Path::new("/home/thomas/.hermes/cache/scratch");
+    // Portable scratch dir: `std::env::temp_dir()` honours TMPDIR and exists on CI
+    // runners and developer machines alike. No machine-specific absolute paths here.
+    let dir = std::env::temp_dir().join("smp-rs-tests");
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
     let p = dir.join(name);
     let _ = std::fs::remove_file(&p);
     p
