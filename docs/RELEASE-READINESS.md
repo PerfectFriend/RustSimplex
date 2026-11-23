@@ -1,6 +1,7 @@
 # simplex-rs — Release Readiness Audit
 
 Date: 2026-11-22 · Head: `main` (closeout-спринт, v0.99.1) · Branch: `master` → `origin/main` (PerfectFriend/RustSimplex)
+Revision: 12 — **v0.99.2 опубликован** (2026-11-23, checksum `a2b60fbb…`): новый трёхязычный README (ru/en/es) в пакете и на странице крейта; функциональных изменений нет
 Revision: 11 — **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`), GitHub Release + тег `v0.99.1`, `CARGO_REGISTRY_TOKEN` заведён в GitHub Secrets для CI-релиза
 Revision: 10 — **спринт 2026-11-23**: frame-level шифрование payload официального
 agent-envelope + модуль X448 (RFC 7748) с обменом ключами в agent-flow + реальная попытка
@@ -56,7 +57,7 @@ agent-mode CLI и auto-reconnect у async-клиента — они внутри
 | `ffi` | 56 | 55% | **85%** | W5 закрыт: cdylib + uniffi + Kotlin-биндинги; **smoke реально проходит** (`scripts/ffi_smoke.sh` → `FFI SMOKE: OK`), CI-джоб `ffi-smoke` добавлен |
 | `reconnect` | 242 | 40% | **85%** | W1 подключён к Agent; W4-4.2 backoff-цикл + recorded delays |
 | `async_client` | 303 | 35% | **78%** | W4-4.1 настоящий tokio-клиент (был sync-фейс в worker thread) |
-| Packaging / crates.io | — | 88% | **100%** | **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`, 227280 B); тег `v0.99.1` + GitHub Release; `CARGO_REGISTRY_TOKEN` в GitHub Secrets для CI |
+| Packaging / crates.io | — | 88% | **100%** | v0.99.2: crates.io + docs.rs + GitHub Release + трёхязычный README в пакете (sha256 пакета совпадает с checksum реестра) | **v0.99.1 опубликован на crates.io** (2026-11-23, checksum `4ea568a9…`, 227280 B); тег `v0.99.1` + GitHub Release; `CARGO_REGISTRY_TOKEN` в GitHub Secrets для CI |
 | CI matrix | — | 90% | **92%** | добавлены джобы `probe-isolation` (G9) и `ffi-smoke` (G10) |
 | Release pipeline | — | 75% | **82%** | SBOM (CycloneDX 1.5, 219 компонент) + attestation provenance |
 | Docs | — | 75% | **87%** | `AUDIT-REPORT.md` перегенерирован (ревизия 9), письмо аудитору обновлено, план закрытия добавлен, readiness — ревизия 10 |
