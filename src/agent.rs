@@ -565,7 +565,10 @@ impl<T: SmpTransport> Agent<T> {
             None => body.to_vec(),
         };
         let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
-        let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+        let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+        // G13: on the wire the agent frame is wrapped in the official agentMsgEnvelope
+        // (agentVersion Word16 + "M"), per spec/agent-protocol.md decryptedSMPClientMessage.
+        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
@@ -591,7 +594,10 @@ impl<T: SmpTransport> Agent<T> {
                 None => plain,
             };
             let hash = sha256(&encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload.clone() }, id, &self.prev_hash));
-            let wire = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+            let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: payload }, id, &self.prev_hash);
+        // G13: on the wire the agent frame is wrapped in the official agentMsgEnvelope
+        // (agentVersion Word16 + "M"), per spec/agent-protocol.md decryptedSMPClientMessage.
+        let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: frame });
             self.client.request(Command::Send { flags: false, body: wire }, peer.clone(), None).map_err(|e| e.to_string())?;
             self.prev_hash = hash.to_vec();
         }
@@ -609,7 +615,13 @@ impl<T: SmpTransport> Agent<T> {
             for m in &msgs {
                 if let BrokerMsg::Msg { msg_id, body } = m {
                     let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                    let mut am = parse_agent(&pt)?;
+                    // G13: unwrap the official agentMsgEnvelope first; legacy raw
+                    // frames ("I"/"D"/"M" without the version prefix) are still accepted.
+                    let inner = match crate::agent_envelope::decode(&pt) {
+                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => enc_agent_msg,
+                        _ => pt.clone(),
+                    };
+                    let mut am = parse_agent(&inner)?;
                     if let AgentMsg::Msg { msg_id: mid, prev_hash: ph, body } = &am {
                         if let Some(r) = &mut self.ratchet {
                             let plain = r.decrypt(body)?;
