@@ -9,7 +9,8 @@ repository = "https://github.com/PerfectFriend/RustSimplex"
 homepage = "https://github.com/PerfectFriend/RustSimplex"
 documentation = "https://docs.rs/smp-rs"
 keywords = ["simplex", "smp", "messaging", "protocol", "e2ee"]
-categories = ["network-programming", "cryptography", "protocols"]
+# crates.io only accepts slugs from its own category list (max 5); "protocols" is not one of them.
+categories = ["network-programming", "cryptography", "encoding", "authentication", "command-line-utilities"]
 rust-version = "1.87"
 exclude = ["simplexmq/", "spec/", "docs/", "scripts/", ".github/"]
 
