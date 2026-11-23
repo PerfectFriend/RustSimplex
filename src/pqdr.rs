@@ -639,7 +639,7 @@ pub fn kem_encaps_pub(pk: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
         return Err(format!("kem pk len {} != {KEM_PK_LEN}", pk.len()));
     }
     let ek = sntrup761::EncapsulationKey::try_from(pk).map_err(|e| format!("kem pk: {e}"))?;
-    Ok(kem_encaps(&ek).map_err(|e| e.to_string())?)
+    kem_encaps(&ek).map_err(|e| e.to_string())
 }
 
 impl Drop for PqdrRatchet {

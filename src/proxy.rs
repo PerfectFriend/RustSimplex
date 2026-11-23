@@ -229,5 +229,5 @@ pub fn handle_rfwd(
     payload.extend_from_slice(&client_enc_resp);
     let outer_n = reverse_nonce(&n);
     let _ = dest_sid;
-    Ok(secretbox_encrypt(sess, &outer_n, &payload)?)
+    secretbox_encrypt(sess, &outer_n, &payload)
 }

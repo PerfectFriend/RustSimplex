@@ -93,10 +93,7 @@ pub fn new_state() -> Arc<Mutex<ServerState>> {
 /// be read (audited as P0-2: starting with an empty state would overwrite the real
 /// store on the first mutation).
 pub fn new_state_persist(path: std::path::PathBuf) -> Result<Arc<Mutex<ServerState>>, String> {
-    let mut st = match crate::store::load_checked(&path)? {
-        Some(st) => st,
-        None => ServerState::new(),
-    };
+    let mut st = crate::store::load_checked(&path)?.unwrap_or_default();
     st.persist = Some(path);
     Ok(Arc::new(Mutex::new(st)))
 }
@@ -145,7 +142,7 @@ macro_rules! err_np {
 
 pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN)?;
-    Ok(secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded).map_err(EncodeError)?)
+    secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded).map_err(EncodeError)
 }
 pub fn decrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], enc: &[u8]) -> Option<Vec<u8>> {
     let pt = secretbox_decrypt(rcv_dh_secret, &cb_nonce(msg_id), enc)?;
