@@ -108,7 +108,7 @@ pub fn onion_request_with(
         // smaller pad budget to keep the outer block within BLOCK_SIZE
         let budget = PROXIED_T_LEN.saturating_sub(256 * (i + 1));
         let padded = pad(&content, budget).map_err(|e| e.to_string())?;
-        let enc = secretbox_encrypt(&key, &cb_nonce(&corr), &padded);
+        let enc = secretbox_encrypt(&key, &cb_nonce(&corr), &padded)?;
         let pfwd_wire = encode_transmission(&Transmission {
             authenticator: Vec::new(),
             corr_id: corr.clone(),

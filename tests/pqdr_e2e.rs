@@ -23,11 +23,11 @@ fn pqdr_e2e_twenty_messages_both_directions() {
     for i in 0..20 {
         let msg = format!("hello {i}").into_bytes();
         if i % 2 == 0 {
-            let wire = alice.encrypt(&msg);
+            let wire = alice.encrypt(&msg).unwrap();
             let pt = bob.decrypt(&wire).expect("bob decrypt");
             assert_eq!(pt, msg, "round {i}");
         } else {
-            let wire = bob.encrypt(&msg);
+            let wire = bob.encrypt(&msg).unwrap();
             let pt = alice.decrypt(&wire).expect("alice decrypt");
             assert_eq!(pt, msg, "round {i}");
         }
@@ -44,7 +44,7 @@ fn pqdr_snapshot_restore_continues_chain() {
     let mut bob = PqdrRatchet::init_receiver(&sk, ad, dh_b, kem_b, Vec::new());
     for i in 0..5 {
         let m = format!("pre{i}").into_bytes();
-        let w = if i % 2 == 0 { alice.encrypt(&m) } else { bob.encrypt(&m) };
+        let w = if i % 2 == 0 { alice.encrypt(&m).unwrap() } else { bob.encrypt(&m).unwrap() };
         let _ = if i % 2 == 0 { bob.decrypt(&w).unwrap() } else { alice.decrypt(&w).unwrap() };
     }
     let mut alice2 = PqdrRatchet::restore(&alice.snapshot()).unwrap();
@@ -52,10 +52,10 @@ fn pqdr_snapshot_restore_continues_chain() {
     for i in 5..10 {
         let m = format!("post{i}").into_bytes();
         if i % 2 == 0 {
-            let w = alice2.encrypt(&m);
+            let w = alice2.encrypt(&m).unwrap();
             assert_eq!(bob2.decrypt(&w).unwrap(), m);
         } else {
-            let w = bob2.encrypt(&m);
+            let w = bob2.encrypt(&m).unwrap();
             assert_eq!(alice2.decrypt(&w).unwrap(), m);
         }
     }

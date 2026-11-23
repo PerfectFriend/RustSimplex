@@ -45,15 +45,29 @@ pub fn kem_keypair() -> KemKeypair {
 }
 
 /// Encapsulate against `ek`: returns (ciphertext bytes, shared secret).
-pub fn kem_encaps(ek: &EncapsulationKey) -> (Vec<u8>, [u8; 32]) {
+///
+/// FAIL-CLOSED (audited 2026-11-23): a wrong-sized shared secret is an error, not a
+/// zero key. The old `unwrap_or([0u8; 32])` would have produced a valid-looking
+/// handshake with an all-zero shared secret.
+pub fn kem_encaps(ek: &EncapsulationKey) -> Result<(Vec<u8>, [u8; 32]), EncodeError> {
     let (ct, ss) = ek.encapsulate_deterministic(rng_seed());
-    (ct.as_ref().to_vec(), ss.as_ref().try_into().unwrap_or([0u8; 32]))
+    let ss: [u8; 32] = ss
+        .as_ref()
+        .try_into()
+        .map_err(|_| EncodeError("kem shared secret: wrong length".into()))?;
+    Ok((ct.as_ref().to_vec(), ss))
 }
 
 /// Decapsulate: returns the shared secret (always succeeds; wrong ct => wrong key).
+///
+/// FAIL-CLOSED (audited 2026-11-23): see `kem_encaps`.
 pub fn kem_decaps(dk: &DecapsulationKey, ct: &[u8]) -> Result<[u8; 32], EncodeError> {
     let ct = Ciphertext::try_from(ct).map_err(|e| EncodeError(format!("kem ct: {e}")))?;
-    let ss: [u8; 32] = dk.decapsulate(&ct).as_ref().try_into().unwrap_or([0u8; 32]);
+    let ss: [u8; 32] = dk
+        .decapsulate(&ct)
+        .as_ref()
+        .try_into()
+        .map_err(|_| EncodeError("kem shared secret: wrong length".into()))?;
     Ok(ss)
 }
 
@@ -66,7 +80,11 @@ pub fn kem_hybrid_secret(dh: &[u8; 32], kem_ss: &[u8; 32]) -> [u8; 32] {
 }
 
 /// NaCl secretbox with the hybrid key used directly (kcbEncrypt/kcbDecrypt, NaCl mac||ct order).
-pub fn kcb_encrypt(hybrid: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
+pub fn kcb_encrypt(
+    hybrid: &[u8; 32],
+    nonce24: &[u8; 24],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
     raw_secretbox_encrypt(hybrid, nonce24, plaintext)
 }
 pub fn kcb_decrypt(hybrid: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {

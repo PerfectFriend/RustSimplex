@@ -57,10 +57,10 @@ fn dh_pub_of(wire: &[u8]) -> Vec<u8> {
 /// the only place where a proactive rotation is consistent.
 fn exchange(alice: &mut PqdrRatchet, bob: &mut PqdrRatchet, tag: &str) {
     let m = format!("{tag}-a").into_bytes();
-    let w = alice.encrypt(&m);
+    let w = alice.encrypt(&m).unwrap();
     assert_eq!(bob.decrypt(&w).expect("bob decrypt"), m, "{tag}");
     let m = format!("{tag}-b").into_bytes();
-    let w = bob.encrypt(&m);
+    let w = bob.encrypt(&m).unwrap();
     assert_eq!(alice.decrypt(&w).expect("alice decrypt"), m, "{tag}");
 }
 
@@ -82,12 +82,12 @@ fn manual_schedule_never_rotates_on_its_own() {
     };
     let (mut a, mut b) = pair_with(&[1u8; 32], b"manual", cfg);
     exchange(&mut a, &mut b, "warmup");
-    let first = dh_pub_of(&a.encrypt(b"m0"));
+    let first = dh_pub_of(&a.encrypt(b"m0").unwrap());
     for i in 0..20 {
-        let w = a.encrypt(format!("m{i}").as_bytes());
+        let w = a.encrypt(format!("m{i}").as_bytes()).unwrap();
         assert_eq!(b.decrypt(&w).expect("decrypt"), format!("m{i}").as_bytes());
     }
-    let last = dh_pub_of(&a.encrypt(b"last"));
+    let last = dh_pub_of(&a.encrypt(b"last").unwrap());
     assert_eq!(first, last, "a manual schedule must not rotate the DH key");
     assert_eq!(a.rotation_schedule(), RotationSchedule::Manual);
 }
@@ -105,7 +105,7 @@ fn the_schedule_rotates_the_dh_key_after_n_messages() {
     let mut pubs = Vec::new();
     for i in 0..2 {
         let m = format!("pre{i}").into_bytes();
-        let w = a.encrypt(&m);
+        let w = a.encrypt(&m).unwrap();
         pubs.push(dh_pub_of(&w));
         assert_eq!(b.decrypt(&w).expect("decrypt"), m, "pre{i}");
     }
@@ -113,11 +113,11 @@ fn the_schedule_rotates_the_dh_key_after_n_messages() {
 
     // bob answers -> alice mirrors his step -> the schedule fires there
     let m = b"reply".to_vec();
-    let w = b.encrypt(&m);
+    let w = b.encrypt(&m).unwrap();
     assert_eq!(a.decrypt(&w).expect("alice"), m);
 
     let m = b"after".to_vec();
-    let w = a.encrypt(&m);
+    let w = a.encrypt(&m).unwrap();
     assert_ne!(dh_pub_of(&w), pubs[0], "the schedule must rotate the DH key");
     assert_eq!(b.decrypt(&w).expect("decrypt after rotation"), m);
 }
@@ -132,7 +132,7 @@ fn a_reorder_window_gap_inside_is_accepted_and_beyond_is_refused() {
     let (mut a, mut b) = pair_with(&[3u8; 32], b"window", cfg);
     assert_eq!(b.max_skip(), window);
 
-    let wires: Vec<Vec<u8>> = (0..8).map(|i| a.encrypt(format!("m{i}").as_bytes())).collect();
+    let wires: Vec<Vec<u8>> = (0..8).map(|i| a.encrypt(format!("m{i}").as_bytes()).unwrap()).collect();
 
     // a gap of exactly `window` messages is inside the window
     assert_eq!(b.decrypt(&wires[0]).expect("first"), b"m0");
@@ -144,7 +144,7 @@ fn a_reorder_window_gap_inside_is_accepted_and_beyond_is_refused() {
     // a gap beyond the window is refused with a clear error (fresh receiver:
     // the previous one already consumed part of the chain)
     let (mut a2, mut b2) = pair_with(&[3u8; 32], b"window2", cfg);
-    let wires2: Vec<Vec<u8>> = (0..8).map(|i| a2.encrypt(format!("m{i}").as_bytes())).collect();
+    let wires2: Vec<Vec<u8>> = (0..8).map(|i| a2.encrypt(format!("m{i}").as_bytes()).unwrap()).collect();
     assert_eq!(b2.decrypt(&wires2[0]).expect("first"), b"m0");
     let err = b2
         .decrypt(&wires2[7])
@@ -167,15 +167,15 @@ fn a_message_encrypted_before_a_rotation_still_decrypts_after_it() {
 
     // "keep" is delivered (it makes bob ratchet, so alice gets a fresh peer
     // root); "late" stays in flight
-    let keep = a.encrypt(b"keep");
+    let keep = a.encrypt(b"keep").unwrap();
     assert_eq!(b.decrypt(&keep).expect("keep"), b"keep");
-    let late = a.encrypt(b"late");
+    let late = a.encrypt(b"late").unwrap();
 
     // bob answers -> alice mirrors -> the schedule rotates
-    let w = b.encrypt(b"trigger");
+    let w = b.encrypt(b"trigger").unwrap();
     assert_eq!(a.decrypt(&w).expect("alice"), b"trigger");
 
-    let fresh = a.encrypt(b"fresh");
+    let fresh = a.encrypt(b"fresh").unwrap();
     assert_ne!(
         dh_pub_of(&late),
         dh_pub_of(&fresh),
@@ -205,14 +205,14 @@ fn a_rotation_on_a_stale_peer_root_is_refused() {
     exchange(&mut a, &mut b, "warmup");
     // alice sends a message carrying a new DH key -> bob ratchets -> alice's
     // copy of bob's root is stale from now on
-    let w = a.encrypt(b"trigger");
+    let w = a.encrypt(b"trigger").unwrap();
     assert_eq!(b.decrypt(&w).expect("bob"), b"trigger");
     let err = a.rotate().expect_err("a stale peer root must be refused");
     assert!(err.contains("fresh peer root"), "unexpected error: {err}");
     // the refusal is harmless: the conversation continues
-    let w = b.encrypt(b"reply");
+    let w = b.encrypt(b"reply").unwrap();
     assert_eq!(a.decrypt(&w).expect("alice"), b"reply");
-    let w = a.encrypt(b"next");
+    let w = a.encrypt(b"next").unwrap();
     assert_eq!(b.decrypt(&w).expect("bob"), b"next");
 }
 
@@ -224,7 +224,7 @@ fn the_global_skipped_key_cap_still_prunes() {
     };
     let (mut a, mut b) = pair_with(&[5u8; 32], b"prune", cfg);
     let total = MAX_SKIPPED_TOTAL + 100;
-    let wires: Vec<Vec<u8>> = (0..total).map(|i| a.encrypt(format!("m{i}").as_bytes())).collect();
+    let wires: Vec<Vec<u8>> = (0..total).map(|i| a.encrypt(format!("m{i}").as_bytes()).unwrap()).collect();
     assert_eq!(b.decrypt(&wires[0]).expect("first"), b"m0");
     assert_eq!(
         b.decrypt(&wires[total - 1]).expect("last"),

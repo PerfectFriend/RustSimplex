@@ -52,7 +52,7 @@ pub fn seal_with_key(plain: Vec<u8>, key: Option<[u8; 32]>) -> Result<Vec<u8>, S
             let mut out = Vec::with_capacity(4 + 24 + plain.len() + 16);
             out.extend_from_slice(ENC_MAGIC);
             out.extend_from_slice(&nonce);
-            out.extend_from_slice(&secretbox_encrypt(&k, &nonce, &plain));
+            out.extend_from_slice(&secretbox_encrypt(&k, &nonce, &plain)?);
             Ok(out)
         }
         None => Ok(plain),
@@ -432,6 +432,31 @@ pub fn save_with_key(path: &Path, st: &ServerState, key: Option<[u8; 32]>) -> st
 
 pub fn load(path: &Path) -> Option<ServerState> {
     load_with_key(path, env_key().ok().flatten())
+}
+
+/// Fail-closed load (audited as P0-2).
+///
+/// * `Ok(None)` — no store file at `path` (a fresh store).
+/// * `Ok(Some(st))` — the store was read and parsed.
+/// * `Err(..)` — the file EXISTS but cannot be decrypted or parsed (wrong key,
+///   corrupt payload, unsupported version).
+///
+/// `load()` collapses the last case into `None`, which let the server start with an
+/// empty state and then overwrite the real — but unreadable — store on the first
+/// mutation. Callers that persist state must use this function instead.
+pub fn load_checked(path: &Path) -> Result<Option<ServerState>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let key = env_key().map_err(|e| e.to_string())?;
+    match load_with_key(path, key) {
+        Some(st) => Ok(Some(st)),
+        None => Err(format!(
+            "store at {} exists but cannot be loaded (wrong SMP_STORE_KEY, corrupt file, \
+             unsupported version or parse error) — refusing to start and overwrite it",
+            path.display()
+        )),
+    }
 }
 
 /// Load with an explicit key (does not read `SMP_STORE_KEY`).

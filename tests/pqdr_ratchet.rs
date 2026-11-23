@@ -33,10 +33,10 @@ fn alternating_conversation() {
     let (mut a, mut b) = pair(&sk, b"conn-ad");
     for i in 0..10u32 {
         let m = format!("alice->bob #{i}").into_bytes();
-        let w = a.encrypt(&m);
+        let w = a.encrypt(&m).unwrap();
         assert_eq!(b.decrypt(&w).unwrap(), m, "alice msg {i}");
         let m = format!("bob->alice #{i}").into_bytes();
-        let w = b.encrypt(&m);
+        let w = b.encrypt(&m).unwrap();
         assert_eq!(a.decrypt(&w).unwrap(), m, "bob msg {i}");
     }
 }
@@ -45,9 +45,9 @@ fn alternating_conversation() {
 fn out_of_order_within_chain() {
     let sk = [0x07u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
-    let w0 = a.encrypt(b"first");
-    let w1 = a.encrypt(b"second");
-    let w2 = a.encrypt(b"third");
+    let w0 = a.encrypt(b"first").unwrap();
+    let w1 = a.encrypt(b"second").unwrap();
+    let w2 = a.encrypt(b"third").unwrap();
     // deliver 2, 0, 1
     assert_eq!(b.decrypt(&w2).unwrap(), b"third");
     assert_eq!(b.decrypt(&w0).unwrap(), b"first");
@@ -58,7 +58,7 @@ fn out_of_order_within_chain() {
 fn tampered_body_rejected() {
     let sk = [0x11u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
-    let mut w = a.encrypt(b"hello");
+    let mut w = a.encrypt(b"hello").unwrap();
     let n = w.len();
     w[n - 1] ^= 0x01;
     assert!(b.decrypt(&w).is_err());
@@ -68,7 +68,7 @@ fn tampered_body_rejected() {
 fn tampered_header_rejected() {
     let sk = [0x12u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
-    let mut w = a.encrypt(b"hello");
+    let mut w = a.encrypt(b"hello").unwrap();
     // header layout: u16 len | u16 ver | u8 spkiLen | 12B DER prefix | 32B raw DH key
     w[2 + 2 + 12 + 5] ^= 0x01; // flip a byte inside the DH public key
     assert!(b.decrypt(&w).is_err());
@@ -79,7 +79,7 @@ fn wrong_shared_secret_rejected() {
     let sk = [0x13u8; 32];
     let (mut a, _) = pair(&sk, b"ad");
     let (_, mut b) = pair(&[0x99u8; 32], b"ad"); // different SK
-    let w = a.encrypt(b"secret");
+    let w = a.encrypt(b"secret").unwrap();
     assert!(b.decrypt(&w).is_err());
 }
 
@@ -87,7 +87,7 @@ fn wrong_shared_secret_rejected() {
 fn header_wire_roundtrip_and_kem_params() {
     let sk = [0x14u8; 32];
     let (mut a, _b) = pair(&sk, b"ad");
-    let w = a.encrypt(b"x");
+    let w = a.encrypt(b"x").unwrap();
     let m = decode_ratchet_msg(&w).unwrap();
     assert_eq!(m.header.max_version, PQDR_VERSION);
     assert_eq!(m.header.ns, 0);
@@ -108,9 +108,9 @@ fn ratchet_advances_keys() {
     let sk = [0x15u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
     let rk0 = a.rk;
-    let m0 = a.encrypt(b"m0");
+    let m0 = a.encrypt(b"m0").unwrap();
     assert_eq!(b.decrypt(&m0).unwrap(), b"m0"); // bob ratchets on alice's first msg
-    let w = b.encrypt(b"reply"); // bob's first msg triggers ratchet step on alice
+    let w = b.encrypt(b"reply").unwrap(); // bob's first msg triggers ratchet step on alice
     let _ = a.decrypt(&w).unwrap();
     assert_ne!(a.rk, rk0, "root key must advance on DH ratchet step");
 }
@@ -198,14 +198,14 @@ fn v0_24_out_of_order_across_dh_ratchet_steps() {
     // still decrypt (stored as skipped keys keyed by the old DH pub).
     let sk = [0x24u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
-    let w0 = a.encrypt(b"epoch0-msg0");
-    let w1 = a.encrypt(b"epoch0-msg1");
+    let w0 = a.encrypt(b"epoch0-msg0").unwrap();
+    let w1 = a.encrypt(b"epoch0-msg1").unwrap();
     // b receives epoch0 first (establishes the receiving chain), then a ratchet happens
     assert_eq!(b.decrypt(&w0).unwrap(), b"epoch0-msg0");
-    let wb = b.encrypt(b"b-hello");
+    let wb = b.encrypt(b"b-hello").unwrap();
     assert_eq!(a.decrypt(&wb).unwrap(), b"b-hello"); // a ratchets to a new DH epoch
-    let w2 = a.encrypt(b"epoch1-msg0");
-    let w3 = a.encrypt(b"epoch1-msg1");
+    let w2 = a.encrypt(b"epoch1-msg0").unwrap();
+    let w3 = a.encrypt(b"epoch1-msg1").unwrap();
     // deliver newest first, then the skipped old-epoch message, then current out of order
     assert_eq!(b.decrypt(&w3).unwrap(), b"epoch1-msg1");
     assert_eq!(b.decrypt(&w1).unwrap(), b"epoch0-msg1"); // skipped key from epoch0
@@ -216,8 +216,8 @@ fn v0_24_out_of_order_across_dh_ratchet_steps() {
 fn v0_24_skipped_key_removed_after_use() {
     let sk = [0x25u8; 32];
     let (mut a, mut b) = pair(&sk, b"ad");
-    let w0 = a.encrypt(b"m0");
-    let w1 = a.encrypt(b"m1");
+    let w0 = a.encrypt(b"m0").unwrap();
+    let w1 = a.encrypt(b"m1").unwrap();
     assert_eq!(b.decrypt(&w1).unwrap(), b"m1"); // stores key for m0
     assert_eq!(b.decrypt(&w0).unwrap(), b"m0"); // consumes skipped key
     // replaying w0 must now fail (key was removed)
@@ -227,30 +227,30 @@ fn v0_24_skipped_key_removed_after_use() {
 #[test]
 fn rotate_then_encrypt_decrypts() {
     let (mut a, mut b) = pair(&[7u8; 32], b"rot");
-    let w0 = a.encrypt(b"before");
+    let w0 = a.encrypt(b"before").unwrap();
     assert_eq!(b.decrypt(&w0).unwrap(), b"before");
     // bob answers so alice learns bob's ratcheted DH key
-    let wr = b.encrypt(b"hi");
+    let wr = b.encrypt(b"hi").unwrap();
     assert_eq!(a.decrypt(&wr).unwrap(), b"hi");
     // proactive rotation on sender: next message carries fresh DH+KEM
     a.rotate().unwrap();
-    let w1 = a.encrypt(b"after-rotate");
+    let w1 = a.encrypt(b"after-rotate").unwrap();
     let r = b.decrypt(&w1);
     assert!(r.is_ok(), "decrypt after rotate failed: {:?}", r.err());
     assert_eq!(r.unwrap(), b"after-rotate");
     // conversation continues both ways
-    let w2 = b.encrypt(b"reply");
+    let w2 = b.encrypt(b"reply").unwrap();
     assert_eq!(a.decrypt(&w2).unwrap(), b"reply");
-    let w3 = a.encrypt(b"again");
+    let w3 = a.encrypt(b"again").unwrap();
     assert_eq!(b.decrypt(&w3).unwrap(), b"again");
 }
 
 #[test]
 fn skip_limit_rejects_huge_gap() {
     let (mut a, mut b) = pair(&[9u8; 32], b"skip");
-    let w0 = a.encrypt(b"m0");
+    let w0 = a.encrypt(b"m0").unwrap();
     assert_eq!(b.decrypt(&w0).unwrap(), b"m0");
-    let msg = decode_ratchet_msg(&a.encrypt(b"y")).unwrap();
+    let msg = decode_ratchet_msg(&a.encrypt(b"y").unwrap()).unwrap();
     let mut bad = msg.clone();
     bad.header.ns = MAX_SKIP + 10;
     let wire = encode_ratchet_msg(&bad);

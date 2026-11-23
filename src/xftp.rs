@@ -101,18 +101,17 @@ pub fn encrypt_file(data: &[u8]) -> (Vec<u8>, [u8; 32], [u8; 32]) {
 }
 
 /// Split padded plaintext into encrypted chunks (nonce24 || secretbox(chunk)).
-pub fn encrypt_chunks(padded: &[u8], key: &[u8; 32]) -> Vec<Vec<u8>> {
-    padded
-        .chunks(XFTP_CHUNK_PLAIN)
-        .map(|c| {
-            let nb = random_bytes(24);
-            let mut n = [0u8; 24];
-            n.copy_from_slice(&nb);
-            let mut out = nb;
-            out.extend_from_slice(&raw_secretbox_encrypt(key, &n, c));
-            out
-        })
-        .collect()
+pub fn encrypt_chunks(padded: &[u8], key: &[u8; 32]) -> Result<Vec<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    for c in padded.chunks(XFTP_CHUNK_PLAIN) {
+        let nb = random_bytes(24);
+        let mut n = [0u8; 24];
+        n.copy_from_slice(&nb);
+        let mut chunk = nb;
+        chunk.extend_from_slice(&raw_secretbox_encrypt(key, &n, c)?);
+        out.push(chunk);
+    }
+    Ok(out)
 }
 
 /// Decrypt chunks and verify digest + size.
@@ -150,7 +149,7 @@ pub fn upload_file(
     sender: &Ed25519Keypair,
 ) -> Result<FileDesc, String> {
     let (padded, key, digest) = encrypt_file(data);
-    let chunks = encrypt_chunks(&padded, &key);
+    let chunks = encrypt_chunks(&padded, &key)?;
     let n = chunks.len() as u32;
     let sender_spki = spki_ed25519(&sender.verifying.to_bytes());
     let r = c
@@ -282,7 +281,7 @@ pub fn upload_file_stream(
             buf[got..].fill(0);
         }
         let chunk_plain: &[u8] = &buf[..];
-        let enc = { let nb = random_bytes(24); let mut nonce=[0u8;24]; nonce.copy_from_slice(&nb); let mut out = nb; out.extend_from_slice(&raw_secretbox_encrypt(&key, &nonce, chunk_plain)); out };
+        let enc = { let nb = random_bytes(24); let mut nonce=[0u8;24]; nonce.copy_from_slice(&nb); let mut out = nb; out.extend_from_slice(&raw_secretbox_encrypt(&key, &nonce, chunk_plain)?); out };
         let r = c.request(Command::Fput { packet_id: packet_id.clone(), offset: off, chunk: enc }, vec![], Some(sender)).map_err(|e| e.to_string())?;
         if !matches!(r[0], BrokerMsg::Ok) { return Err(format!("FPUT chunk {off} failed: {:?}", r[0])); }
         done += got as u64; off += 1; progress(done, total);

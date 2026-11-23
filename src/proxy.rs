@@ -109,7 +109,7 @@ pub fn relay_pfwd(conn: &Arc<Mutex<ProxyConn>>, pfwd_corr: &[u8], version: u16, 
     fwd.extend_from_slice(client_enc); // transmission tail, raw
     let mut n = [0u8; 24];
     n.copy_from_slice(&rfwd_corr);
-    let outer = secretbox_encrypt(&g.sess_secret, &n, &fwd);
+    let outer = secretbox_encrypt(&g.sess_secret, &n, &fwd)?;
     let mut cmd = b"RFWD ".to_vec();
     cmd.extend_from_slice(&outer);
     let t = Transmission { authenticator: vec![], corr_id: rfwd_corr.clone(), entity_id: vec![], command: cmd };
@@ -222,12 +222,12 @@ pub fn handle_rfwd(
     }
     let padded_resp = pad(&inner, budget).map_err(|e| e.to_string())?;
     let rn = reverse_nonce(&fc);
-    let client_enc_resp = secretbox_encrypt(&client_sess, &rn, &padded_resp);
+    let client_enc_resp = secretbox_encrypt(&client_sess, &rn, &padded_resp)?;
     // RRES payload = short(fwd_corr) <> client_enc_resp ; outer nonce = reverse(cbNonce(rfwd corr))
     let mut payload = Vec::new();
     w_short(&mut payload, &fwd_corr).map_err(|e| e.to_string())?;
     payload.extend_from_slice(&client_enc_resp);
     let outer_n = reverse_nonce(&n);
     let _ = dest_sid;
-    Ok(secretbox_encrypt(sess, &outer_n, &payload))
+    Ok(secretbox_encrypt(sess, &outer_n, &payload)?)
 }

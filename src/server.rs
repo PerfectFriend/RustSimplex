@@ -70,7 +70,11 @@ impl ServerState {
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
-            let _ = crate::store::save(p, self);
+            // A failed persist must be visible: swallowing it means the server keeps
+            // serving from memory while the on-disk state silently diverges.
+            if let Err(e) = crate::store::save(p, self) {
+                eprintln!("smp-server: FAILED to persist store to {}: {e}", p.display());
+            }
         }
     }
 }
@@ -85,10 +89,16 @@ pub fn new_state() -> Arc<Mutex<ServerState>> {
     Arc::new(Mutex::new(ServerState::new()))
 }
 
-pub fn new_state_persist(path: std::path::PathBuf) -> Arc<Mutex<ServerState>> {
-    let mut st = crate::store::load(&path).unwrap_or_default();
+/// Load a persistent server state, FAILING CLOSED if the store file exists but cannot
+/// be read (audited as P0-2: starting with an empty state would overwrite the real
+/// store on the first mutation).
+pub fn new_state_persist(path: std::path::PathBuf) -> Result<Arc<Mutex<ServerState>>, String> {
+    let mut st = match crate::store::load_checked(&path)? {
+        Some(st) => st,
+        None => ServerState::new(),
+    };
     st.persist = Some(path);
-    Arc::new(Mutex::new(st))
+    Ok(Arc::new(Mutex::new(st)))
 }
 
 fn resp(corr_id: Vec<u8>, entity_id: Vec<u8>, m: BrokerMsg) -> Result<Transmission, EncodeError> {
@@ -135,7 +145,7 @@ macro_rules! err_np {
 
 pub fn encrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], body: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let padded = crate::encoding::pad(body, MAX_RCV_MSG_LEN)?;
-    Ok(secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded))
+    Ok(secretbox_encrypt(rcv_dh_secret, &cb_nonce(msg_id), &padded).map_err(EncodeError)?)
 }
 pub fn decrypt_for_recipient(rcv_dh_secret: &[u8; 32], msg_id: &[u8], enc: &[u8]) -> Option<Vec<u8>> {
     let pt = secretbox_decrypt(rcv_dh_secret, &cb_nonce(msg_id), enc)?;
@@ -349,10 +359,17 @@ fn dispatch_cmd(
                     if let Ok(padded) = crate::encoding::pad(&meta, 128) {
                         let mut n24 = [0u8; 24];
                         n24.copy_from_slice(&nonce);
-                        let enc_meta = secretbox_encrypt(ntf_secret, &n24, &padded);
-                        let ntf_t = resp_np!(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta });
-                        if let Ok(wire) = encode_transmission(&ntf_t) {
-                            let _ = ntf_sub.send(wire);
+                        // FAIL-CLOSED: never push a notification whose payload could not
+                        // be encrypted — a zero-filled "ciphertext" would be accepted by
+                        // the client as a valid message.
+                        match secretbox_encrypt(ntf_secret, &n24, &padded) {
+                            Ok(enc_meta) => {
+                                let ntf_t = resp_np!(random_bytes(24), q.ntf_id.clone().unwrap_or_default(), BrokerMsg::Nmsg { nonce, enc_meta });
+                                if let Ok(wire) = encode_transmission(&ntf_t) {
+                                    let _ = ntf_sub.send(wire);
+                                }
+                            }
+                            Err(e) => eprintln!("smp-server: NMSG encrypt failed: {e}"),
                         }
                     }
                 }
@@ -906,7 +923,7 @@ impl Engine {
         let allow_local_proxy = std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some();
         let mut engine = Self::bind_plain_with_proxy_and_strict(addr, allow_local_proxy, strict)?;
         if let Some(p) = store {
-            engine.state = new_state_persist(p);
+            engine.state = new_state_persist(p).map_err(std::io::Error::other)?;
         }
         Ok(engine)
     }
@@ -924,7 +941,7 @@ impl Engine {
         Ok(Engine {
             listener,
             state: match store {
-                Some(p) => new_state_persist(p),
+                Some(p) => new_state_persist(p)?,
                 None => new_state(),
             },
             mode: Mode::Tls(Arc::new((*cfg).clone())),

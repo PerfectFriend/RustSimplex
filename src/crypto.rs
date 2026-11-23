@@ -157,12 +157,20 @@ fn hsalsa20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     r
 }
 /// NaCl format output: 16-byte MAC || ciphertext (the xsalsa20poly1305 0.9 crate uses NaCl order natively).
-pub fn secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
+///
+/// FAIL-CLOSED (audited 2026-11-23): an AEAD failure returns `Err` instead of a
+/// zero-filled "ciphertext". The old `unwrap_or_else(|_| vec![0u8; 16])` silently
+/// produced a valid-looking frame that could never be decrypted.
+pub fn secretbox_encrypt(
+    key: &[u8; 32],
+    nonce24: &[u8; 24],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
     let k = box_key(key);
     let cipher = XSalsa20Poly1305::new(&k.into());
     cipher
         .encrypt(Nonce::from_slice(nonce24), plaintext)
-        .unwrap_or_else(|_| vec![0u8; 16])
+        .map_err(|e| format!("secretbox encrypt failed: {e}"))
 }
 pub fn secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
     if nacl.len() < 16 {
@@ -183,9 +191,17 @@ pub fn cb_nonce(bytes: &[u8]) -> [u8; 24] {
 
 /// Raw NaCl secretbox (XSalsa20-Poly1305 with the key used directly, NO HSalsa20 beforenm).
 /// Used for XFTP file encryption, where the file key from the file description is the box key itself.
-pub fn raw_secretbox_encrypt(key: &[u8; 32], nonce24: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
+///
+/// FAIL-CLOSED (audited 2026-11-23): see `secretbox_encrypt`.
+pub fn raw_secretbox_encrypt(
+    key: &[u8; 32],
+    nonce24: &[u8; 24],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
     let cipher = XSalsa20Poly1305::new(key.into());
-    cipher.encrypt(Nonce::from_slice(nonce24), plaintext).unwrap_or_else(|_| vec![0u8; 16])
+    cipher
+        .encrypt(Nonce::from_slice(nonce24), plaintext)
+        .map_err(|e| format!("raw secretbox encrypt failed: {e}"))
 }
 pub fn raw_secretbox_decrypt(key: &[u8; 32], nonce24: &[u8; 24], nacl: &[u8]) -> Option<Vec<u8>> {
     if nacl.len() < 16 {

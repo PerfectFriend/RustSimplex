@@ -15,7 +15,7 @@ fn kem_encaps_decaps_roundtrip() {
     let kp = kem_keypair();
     assert_eq!(kp.ek.as_ref().len(), KEM_PK_LEN);
     assert_eq!(kp.dk.as_ref().len(), KEM_SK_LEN);
-    let (ct, ss1) = kem_encaps(&kp.ek);
+    let (ct, ss1) = kem_encaps(&kp.ek).unwrap();
     assert_eq!(ct.len(), KEM_CT_LEN);
     let ss2 = kem_decaps(&kp.dk, &ct).unwrap();
     assert_eq!(ss1, ss2, "decaps must recover the same shared secret");
@@ -24,7 +24,7 @@ fn kem_encaps_decaps_roundtrip() {
 #[test]
 fn kem_wrong_ct_gives_wrong_key() {
     let kp = kem_keypair();
-    let (mut ct, ss1) = kem_encaps(&kp.ek);
+    let (mut ct, ss1) = kem_encaps(&kp.ek).unwrap();
     ct[0] ^= 1;
     let ss2 = kem_decaps(&kp.dk, &ct).unwrap();
     assert_ne!(ss1, ss2, "tampered ciphertext must not yield the same key");
@@ -76,12 +76,12 @@ fn kem_params_wire_golden() {
 #[test]
 fn kcb_box_roundtrip_with_hybrid_key() {
     let kp = kem_keypair();
-    let (ct, kem_ss) = kem_encaps(&kp.ek);
+    let (ct, kem_ss) = kem_encaps(&kp.ek).unwrap();
     let dh = [0x77u8; 32];
     let hybrid = kem_hybrid_secret(&dh, &kem_ss);
     let nonce = [0x01u8; 24];
     let msg = b"pqdr protected payload";
-    let enc = kcb_encrypt(&hybrid, &nonce, msg);
+    let enc = kcb_encrypt(&hybrid, &nonce, msg).unwrap();
     assert_eq!(enc.len(), msg.len() + 16);
     let dec = kcb_decrypt(&hybrid, &nonce, &enc).unwrap();
     assert_eq!(dec, msg);

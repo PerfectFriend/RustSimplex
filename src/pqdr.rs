@@ -351,15 +351,19 @@ impl PqdrRatchet {
     }
 
     /// Encrypt one message; returns the wire bytes.
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> Vec<u8> {
+    ///
+    /// FAIL-CLOSED (audited 2026-11-23): an AEAD failure returns `Err` instead of a
+    /// zero-filled "ciphertext", and the sending chain is advanced only after a
+    /// successful encryption.
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let (cks, mk, iv1, _iv2) = chain_kdf(&self.cks);
-        self.cks = cks;
         let n = self.ns;
-        self.ns += 1;
         let mut nonce = [0u8; 24];
         nonce[..16].copy_from_slice(&iv1);
         nonce[16..].copy_from_slice(&(n as u64).to_be_bytes());
-        let body = secretbox_encrypt(&mk, &nonce, plaintext);
+        let body = secretbox_encrypt(&mk, &nonce, plaintext)?;
+        self.cks = cks;
+        self.ns += 1;
         let hdr = MsgHeader {
             max_version: PQDR_VERSION,
             dh_pub_spki: crate::crypto::spki_x25519(&dh_pub_raw(&self.dh_s)),
@@ -375,7 +379,7 @@ impl PqdrRatchet {
             self.pub_is_new = false;
             self.peer_root_fresh = false;
         }
-        out
+        Ok(out)
     }
 
     /// Rotate automatically when the schedule says so.
@@ -486,7 +490,24 @@ impl PqdrRatchet {
     }
 
     /// Decrypt one message; returns plaintext or error string.
+    /// Decrypt a ratchet message.
+    ///
+    /// TRANSACTIONAL: all state changes happen on a staged copy and are committed to
+    /// `self` only after the AEAD tag verifies. A forged or replayed frame therefore
+    /// cannot advance the receiving chain, rotate the DH/KEM keys or burn a skipped
+    /// message key — the staged copy is dropped (and zeroized) instead.
+    ///
+    /// (Audited as P0-1: the previous implementation mutated `self.ckr`/`self.nr` and
+    /// removed skipped keys before authentication, so a single injected frame could
+    /// permanently desynchronise the ratchet.)
     pub fn decrypt(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
+        let mut staged = self.clone();
+        let pt = staged.decrypt_inner(wire)?;
+        *self = staged;
+        Ok(pt)
+    }
+
+    fn decrypt_inner(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let msg = decode_ratchet_msg(wire).map_err(|e| e.to_string())?;
         let hdr = &msg.header;
         let (_, dh_raw) = crate::crypto::parse_spki(&hdr.dh_pub_spki).map_err(|e| e.to_string())?;
@@ -560,7 +581,13 @@ impl PqdrRatchet {
             self.maybe_rotate(sent_before);
         }
 
-        // 3) skip message keys in the current receiving chain up to ns
+        // 3) replay check: a frame from the current chain that was already accepted
+        // must be rejected instead of silently advancing the chain (audited as P0-1a).
+        if self.ckr.is_some() && hdr.ns < self.nr {
+            return Err(format!("replay: ns {} < nr {}", hdr.ns, self.nr));
+        }
+
+        // 4) skip message keys in the current receiving chain up to ns
         self.skip_message_keys(hdr.ns)?;
 
         let ckr = self.ckr.ok_or("no receiving chain")?;
@@ -575,7 +602,7 @@ impl PqdrRatchet {
 
     fn skip_message_keys(&mut self, until: u32) -> Result<(), String> {
         let nr = if self.ckr.is_some() { self.nr } else { 0 };
-        if nr + self.max_skip < until {
+        if nr.saturating_add(self.max_skip) < until {
             return Err("too many skipped messages".into());
         }
         if self.ckr.is_none() {
@@ -612,7 +639,7 @@ pub fn kem_encaps_pub(pk: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
         return Err(format!("kem pk len {} != {KEM_PK_LEN}", pk.len()));
     }
     let ek = sntrup761::EncapsulationKey::try_from(pk).map_err(|e| format!("kem pk: {e}"))?;
-    Ok(kem_encaps(&ek))
+    Ok(kem_encaps(&ek).map_err(|e| e.to_string())?)
 }
 
 impl Drop for PqdrRatchet {

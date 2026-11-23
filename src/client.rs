@@ -342,7 +342,7 @@ impl Client {
         let wire = encode_transmission(&t).map_err(map_e)?;
         let padded = pad(&wire, crate::proxy::PROXIED_T_LEN).map_err(map_e)?;
         let nonce = cb_nonce(&t.corr_id);
-        let enc = secretbox_encrypt(&client_sess, &nonce, &padded);
+        let enc = secretbox_encrypt(&client_sess, &nonce, &padded)?;
         // PFWD transmission: entity = proxy session id, unsigned
         let pfwd_cmd = Command::Pfwd { version: SMP_VERSION, command_key: spki_x25519(&eph.public.to_bytes()), enc };
         let pt = Transmission {

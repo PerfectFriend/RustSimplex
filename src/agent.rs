@@ -255,6 +255,17 @@ pub fn parse_agent(buf: &[u8]) -> Result<AgentMsg, String> {
     }
 }
 
+/// Check a broker response to a SEND: an `ERR` must surface as an error instead of
+/// a silently lost message (audited 2026-11-23, P0-6).
+fn check_send_ok(resp: &[BrokerMsg]) -> Result<(), String> {
+    for m in resp {
+        if let BrokerMsg::Err(e) = m {
+            return Err(format!("SEND rejected by the server: {e}"));
+        }
+    }
+    Ok(())
+}
+
 // ---------- duplex connection over SMP ----------
 
 pub struct Agent<T: SmpTransport = Client> {
@@ -288,6 +299,12 @@ pub struct Agent<T: SmpTransport = Client> {
     pub peer_x448_spki: Option<Vec<u8>>,
     /// X448 shared secret (official ratchet seed), once both keys are known.
     pub x448_shared: Option<[u8; 56]>,
+    /// Messages decoded from a broker block that were not returned to the caller yet.
+    ///
+    /// (Audited 2026-11-23, P0-6: a block may carry several MSG frames. The old code
+    /// ACKed all of them but returned only the first — the rest were removed from the
+    /// queue and silently dropped.)
+    pub pending_msgs: std::collections::VecDeque<(Vec<u8>, AgentMsg)>,
 }
 
 impl<T: SmpTransport> Agent<T> {
@@ -402,6 +419,7 @@ impl<T: SmpTransport> Agent<T> {
                 x448_kp: Some(x448_kp),
                 peer_x448_spki: None,
                 x448_shared: None,
+                pending_msgs: std::collections::VecDeque::new(),
             },
             link,
         ))
@@ -553,6 +571,7 @@ impl<T: SmpTransport> Agent<T> {
             initiator: false,
             outbox: Vec::new(),
             e2e: true,
+            pending_msgs: std::collections::VecDeque::new(),
         })
     }
 
@@ -698,10 +717,12 @@ impl<T: SmpTransport> Agent<T> {
 
     /// Encrypt a whole agent frame with the PQDR ratchet when a session exists.
     /// (G13: the envelope payload is the ratchet ciphertext, not just the Msg body.)
-    fn encrypt_frame(&mut self, frame: Vec<u8>) -> Vec<u8> {
+    fn encrypt_frame(&mut self, frame: Vec<u8>) -> Result<Vec<u8>, String> {
         match &mut self.ratchet {
+            // FAIL-CLOSED: an AEAD failure must abort the send, never emit a
+            // zero-filled "ciphertext" (audited 2026-11-23).
             Some(r) => r.encrypt(&frame),
-            None => frame,
+            None => Ok(frame),
         }
     }
 
@@ -726,11 +747,16 @@ impl<T: SmpTransport> Agent<T> {
         // (agentMsgEnvelope = agentVersion + "M" + encAgentMessage).
         let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: body.to_vec() }, id, &self.prev_hash);
         let hash = sha256(&frame);
-        let enc = self.encrypt_frame(frame);
+        let enc = self.encrypt_frame(frame)?;
         let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
-        self.client
+        let resp = self
+            .client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)
             .map_err(|e| e.to_string())?;
+        // FAIL-CLOSED (audited 2026-11-23, P0-6): the broker may answer SEND with
+        // ERR (AUTH / LARGE_MSG / QUOTA / ...). The old code ignored the response and
+        // returned Ok(id) — the caller believed the message was delivered.
+        check_send_ok(&resp)?;
         self.prev_hash = hash.to_vec();
         Ok(id)
     }
@@ -751,9 +777,10 @@ impl<T: SmpTransport> Agent<T> {
         for (id, plain) in pending {
             let frame = encode_agent(&AgentMsg::Msg { msg_id: id, prev_hash: self.prev_hash.clone(), body: plain }, id, &self.prev_hash);
             let hash = sha256(&frame);
-            let enc = self.encrypt_frame(frame);
+            let enc = self.encrypt_frame(frame)?;
             let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
-            self.client.request(Command::Send { flags: false, body: wire }, peer.clone(), None).map_err(|e| e.to_string())?;
+            let resp = self.client.request(Command::Send { flags: false, body: wire }, peer.clone(), None).map_err(|e| e.to_string())?;
+            check_send_ok(&resp)?;
             self.prev_hash = hash.to_vec();
         }
         Ok(())
@@ -763,6 +790,10 @@ impl<T: SmpTransport> Agent<T> {
     /// response blocks, e.g. ACK Ok replies left by send_only). ACKs EVERY delivered
     /// MSG (queue cleanup, no QUEUE_FULL / redelivery) and returns the first parsed one.
     pub fn recv_agent(&mut self) -> Result<(Vec<u8>, AgentMsg), String> {
+        // return a message that was already decoded from an earlier block first
+        if let Some(m) = self.pending_msgs.pop_front() {
+            return Ok(m);
+        }
         loop {
             let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
             let secret = self.dh_secret()?;
@@ -794,8 +825,12 @@ impl<T: SmpTransport> Agent<T> {
                     self.client
                         .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
                         .map_err(|e| e.to_string())?;
+                    // Keep EVERY decoded message: a block may carry several MSG
+                    // frames and the old code ACKed them all but returned only the
+                    // first — the rest were dropped (audited 2026-11-23, P0-6).
+                    self.pending_msgs.push_back((msg_id.clone(), am));
                     if first.is_none() {
-                        first = Some((msg_id.clone(), am));
+                        first = self.pending_msgs.pop_front();
                     }
                 }
             }
@@ -807,6 +842,49 @@ impl<T: SmpTransport> Agent<T> {
         }
     }
 
+    /// Receive ALL pending agent messages: the ones already decoded from earlier
+    /// blocks plus every MSG of the next block (audited 2026-11-23, P0-6).
+    pub fn recv_agent_all(&mut self) -> Result<Vec<(Vec<u8>, AgentMsg)>, String> {
+        let mut out: Vec<(Vec<u8>, AgentMsg)> = self.pending_msgs.drain(..).collect();
+        loop {
+            let msgs = self.client.recv_block().map_err(|e| e.to_string())?;
+            let secret = self.dh_secret()?;
+            let mut found = false;
+            for m in &msgs {
+                if let BrokerMsg::Msg { msg_id, body } = m {
+                    let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
+                    let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
+                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
+                        Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
+                        _ => (false, pt.clone()),
+                    };
+                    let frame = if is_msg_env {
+                        match &mut self.ratchet {
+                            Some(r) => r.decrypt(&inner)?,
+                            None => inner,
+                        }
+                    } else {
+                        inner
+                    };
+                    let am = parse_agent(&frame)?;
+                    self.client
+                        .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                        .map_err(|e| e.to_string())?;
+                    out.push((msg_id.clone(), am));
+                    found = true;
+                }
+            }
+            let _ = self.flush_outbox();
+            if found || out.is_empty() {
+                if out.is_empty() {
+                    // no MSG in this block: keep reading (stale OK responses)
+                    continue;
+                }
+                return Ok(out);
+            }
+        }
+    }
+
     /// Send A_RCVD for a received agent msg id.
     pub fn send_rcvd(&mut self, agent_msg_id: i64, msg_hash: &[u8]) -> Result<(), String> {
         self.msg_counter += 1;
@@ -815,7 +893,7 @@ impl<T: SmpTransport> Agent<T> {
             self.msg_counter,
             &self.prev_hash,
         );
-        let enc = self.encrypt_frame(frame);
+        let enc = self.encrypt_frame(frame)?;
         let wire = crate::agent_envelope::encode(&crate::agent_envelope::Envelope::Msg { enc_agent_msg: enc });
         self.client
             .request(Command::Send { flags: false, body: wire }, self.peer_snd_id.clone().ok_or("no peer")?, None)

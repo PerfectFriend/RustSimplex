@@ -109,7 +109,7 @@ fn onion_wrong_hop_key_cannot_decrypt() {
     let corr = random_bytes(24);
     let corr24: [u8; 24] = corr.try_into().unwrap();
     let padded = smp_rs::encoding::pad(b"secret", 512).unwrap();
-    let enc = secretbox_encrypt(&key_r2, &corr24, &padded);
+    let enc = secretbox_encrypt(&key_r2, &corr24, &padded).unwrap();
     assert!(secretbox_decrypt(&key_r1, &corr24, &enc).is_none(), "R1 key must not open R2 layer");
     assert!(secretbox_decrypt(&key_r2, &corr24, &enc).is_some());
 }
@@ -334,7 +334,7 @@ fn server_rejects_multiple_forwarded_transmissions() {
     let content = encode_block_raw(&wires).unwrap();
     let padded = pad(&content, PROXIED_T_LEN).unwrap();
     let nonce = cb_nonce(&corr);
-    let enc = secretbox_encrypt(&client_sess, &nonce, &padded);
+    let enc = secretbox_encrypt(&client_sess, &nonce, &padded).unwrap();
     let pfwd_cmd = Command::Pfwd {
         version: SMP_VERSION,
         command_key: spki_x25519(&eph.public.to_bytes()),

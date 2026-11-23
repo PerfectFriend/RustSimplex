@@ -445,7 +445,7 @@ pub fn auth_box(session_id: &[u8], t: &mut Transmission, dh_secret: &[u8; 32]) -
     let a = authorized_bytes(session_id, t)?;
     let h = sha512(&a);
     let nonce = cb_nonce(&t.corr_id);
-    t.authenticator = secretbox_encrypt(dh_secret, &nonce, &h);
+    t.authenticator = secretbox_encrypt(dh_secret, &nonce, &h).map_err(EncodeError)?;
     Ok(())
 }
 

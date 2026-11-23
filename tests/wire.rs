@@ -73,7 +73,7 @@ fn secretbox_is_nacl_layout_tag_first() {
     let key = [1u8; 32];
     let nonce = [2u8; 24];
     let pt = b"secret message";
-    let ct = secretbox_encrypt(&key, &nonce, pt);
+    let ct = secretbox_encrypt(&key, &nonce, pt).unwrap();
     // NaCl: 16-byte MAC || ciphertext ; total = 16 + len
     assert_eq!(ct.len(), 16 + pt.len());
     let back = secretbox_decrypt(&key, &nonce, &ct).unwrap();
