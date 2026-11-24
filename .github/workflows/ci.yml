@@ -149,3 +149,11 @@ jobs:
       - name: Build the cdylib and run the Kotlin smoke test
         run: bash scripts/ffi_smoke.sh
 
+  tree-hygiene:
+    name: tree hygiene (no secrets / stores / oversized files in tracked tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files
+        run: bash scripts/check-tree-hygiene.sh
+

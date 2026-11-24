@@ -1,0 +1,7 @@
+# Distribution hygiene for external audit (see skills: external-audit-handoff).
+# These paths stay in the repo and in history, but `git archive` (and therefore
+# the squash artifact handed to auditors) omits them.
+# Internal note to the coder — not part of any distribution.
+docs/ПОСЛАНИЕ-КОДЕРУ*.md export-ignore
+# Operational logs with live relay addresses — evidence stays in the repo, out of the artifact.
+docs/live/** export-ignore
