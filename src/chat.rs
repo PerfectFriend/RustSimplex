@@ -62,50 +62,21 @@ pub fn send_text(a: &mut Agent, text: &str) -> Result<String, String> {
 
 /// Receive next chat message (skips non-chat agent messages like HELLO/A_RCVD and non-MSG blocks).
 pub fn recv_text(a: &mut Agent) -> Result<(String, String), String> {
-    let secret = {
-        let srv_raw = crate::crypto::parse_spki(&a.srv_dh).map_err(|e| e.to_string())?.1;
-        crate::crypto::x25519_dh(&a.rcv_dh.secret, &crate::crypto::x25519_public(srv_raw))
-    };
+    // Built on Agent::recv_agent (audit #3, U-12/H6): the old copy-pasted loop ACKed
+    // the broker message BEFORE ratchet decryption (any decrypt error = message lost
+    // forever) and returned on the first MSG of a block (the rest were dropped).
+    // recv_agent ACKs only after successful decode and keeps every message.
     loop {
-        let msgs = a.client.recv_block().map_err(|e| e.to_string())?;
-        for m in &msgs {
-            if let crate::protocol::BrokerMsg::Msg { msg_id, body } = m {
-                let pt = crate::server::decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                // ACK the broker message so it is removed from the queue (no redelivery/QUEUE_FULL).
-                // send_only: request() here would swallow a concurrently pushed MSG block.
-                a.client
-                    .send_only(crate::protocol::Command::Ack(msg_id.clone()), a.rcv_id.clone(), Some(&a.rcv_auth))
-                    .map_err(|e| e.to_string())?;
-                // G13: unwrap official agentMsgEnvelope; legacy raw frames still accepted
-                let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
-                    Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
-                    Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
-                    _ => (false, pt.clone()),
-                };
-                let frame = if is_msg_env {
-                    match &mut a.ratchet {
-                        Some(r) => r.decrypt(&inner)?,
-                        None => inner,
-                    }
-                } else {
-                    inner
-                };
-                let Ok(am) = parse_agent_pub(&frame) else { continue };
-                if let AgentMsg::Msg { body, .. } = &am {
-                    let _ = a.flush_outbox();
-                    let cm = parse_chat(body)?;
-                    if cm.mtype == "x.msg.new" {
-                        let params: MsgParams = serde_json::from_value(cm.params).map_err(|e| e.to_string())?;
-                        return Ok((params.msg_id.unwrap_or_default(), params.content.text));
-                    }
-                }
+        let (_broker_msg_id, am) = a.recv_agent()?;
+        if let AgentMsg::Msg { body, .. } = &am {
+            let _ = a.flush_outbox();
+            let cm = parse_chat(body)?;
+            if cm.mtype == "x.msg.new" {
+                let params: MsgParams = serde_json::from_value(cm.params).map_err(|e| e.to_string())?;
+                return Ok((params.msg_id.unwrap_or_default(), params.content.text));
             }
         }
     }
-}
-
-fn parse_agent_pub(buf: &[u8]) -> Result<AgentMsg, String> {
-    crate::agent::parse_agent(buf)
 }
 
 /// Send profile info (x.info) — exchanged during/after handshake.

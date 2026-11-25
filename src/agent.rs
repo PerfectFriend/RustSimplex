@@ -786,6 +786,52 @@ impl<T: SmpTransport> Agent<T> {
         Ok(())
     }
 
+    /// Decode one transport-decrypted SMP payload into an agent message.
+    ///
+    /// Fail-closed (external audit #3, U-01/C1): once an E2E ratchet exists, ONLY
+    /// `Envelope::Msg` frames that decrypt AND parse are accepted. Raw legacy frames
+    /// and C/I/R envelopes arriving in an established session are forged (a real peer
+    /// would have encrypted them) → `Ok(None)`. Ratchet decrypt failures are
+    /// transactional since P0-1 (no state corruption), so dropping is safe.
+    /// Callers ACK and drop `None` frames, so an injected frame can neither be read
+    /// as plaintext nor wedge the queue (U-12/H6).
+    fn decode_incoming(&mut self, pt: &[u8]) -> Result<Option<AgentMsg>, String> {
+        let established = self.ratchet.is_some();
+        let mut authentic_msg = false;
+        let payload: Vec<u8> = match crate::agent_envelope::decode(pt) {
+            Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => match &mut self.ratchet {
+                Some(r) => match r.decrypt(&enc_agent_msg) {
+                    Ok(f) => {
+                        authentic_msg = true;
+                        f
+                    }
+                    Err(_) if established => return Ok(None), // forged/corrupt frame: drop
+                    Err(e) => return Err(e.to_string()),
+                },
+                None => enc_agent_msg,
+            },
+            Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => enc_conn_info,
+            _ => pt.to_vec(), // raw legacy frame (handshake HELLO etc. travel raw pre-session)
+        };
+        let am = match parse_agent(&payload) {
+            Ok(am) => am,
+            Err(e) if established => {
+                let _ = e;
+                return Ok(None); // authenticated channel, unparseable frame: drop, don't wedge
+            }
+            Err(e) => return Err(e),
+        };
+        // U-01/C1 fail-closed: in an established E2E session, message-carrying frames
+        // (Msg/Rcvd) are accepted ONLY from a successfully decrypted Envelope::Msg.
+        // A raw frame or C/I envelope carrying Msg/Rcvd is a downgrade/forgery attempt
+        // (anyone knowing snd_id can SEND) → drop. Handshake types (Hello/ConnInfo/
+        // ConnInfoReply) stay raw by design and are not state-changing in recv_agent.
+        if established && !authentic_msg && matches!(am, AgentMsg::Msg { .. } | AgentMsg::Rcvd { .. }) {
+            return Ok(None);
+        }
+        Ok(Some(am))
+    }
+
     /// Receive agent messages: reads blocks until one carries a MSG (skips stale
     /// response blocks, e.g. ACK Ok replies left by send_only). ACKs EVERY delivered
     /// MSG (queue cleanup, no QUEUE_FULL / redelivery) and returns the first parsed one.
@@ -800,26 +846,29 @@ impl<T: SmpTransport> Agent<T> {
             let mut first: Option<(Vec<u8>, AgentMsg)> = None;
             for m in &msgs {
                 if let BrokerMsg::Msg { msg_id, body } = m {
-                    let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                    // G13: unwrap the official agentMsgEnvelope first; legacy raw
-                    // frames ("I"/"D"/"M" without the version prefix) are still accepted.
-                    // G13: "M"-envelope payloads are PQDR ciphertext once the ratchet
-                    // exists (fail-closed: decrypt error aborts); raw legacy frames and
-                    // the "C" confirmation stay plaintext by definition.
-                    let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
-                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
-                        Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
-                        _ => (false, pt.clone()),
-                    };
-                    let frame = if is_msg_env {
-                        match &mut self.ratchet {
-                            Some(r) => r.decrypt(&inner)?,
-                            None => inner,
+                    // Transport-decrypt failure = permanently invalid payload: ACK + drop,
+                    // never wedge the queue on garbage (audit #3, U-12/H6).
+                    let pt = match decrypt_for_recipient(&secret, msg_id, body) {
+                        Some(pt) => pt,
+                        None => {
+                            self.client
+                                .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                                .map_err(|e| e.to_string())?;
+                            continue;
                         }
-                    } else {
-                        inner
                     };
-                    let am = parse_agent(&frame)?;
+                    // U-01/C1: fail-closed decode — in an established E2E session only
+                    // Envelope::Msg frames that decrypt+parse are accepted.
+                    let am = match self.decode_incoming(&pt)? {
+                        Some(am) => am,
+                        None => {
+                            // forged frame (raw/confirmation/undecryptable): ACK + drop
+                            self.client
+                                .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                                .map_err(|e| e.to_string())?;
+                            continue;
+                        }
+                    };
                     // ACK the broker message so it is removed from the queue.
                     // send_only: request() here would swallow a concurrently pushed MSG.
                     self.client
@@ -852,21 +901,24 @@ impl<T: SmpTransport> Agent<T> {
             let mut found = false;
             for m in &msgs {
                 if let BrokerMsg::Msg { msg_id, body } = m {
-                    let pt = decrypt_for_recipient(&secret, msg_id, body).ok_or("decrypt failed")?;
-                    let (is_msg_env, inner) = match crate::agent_envelope::decode(&pt) {
-                        Ok((_v, crate::agent_envelope::Envelope::Msg { enc_agent_msg })) => (true, enc_agent_msg),
-                        Ok((_v, crate::agent_envelope::Envelope::Confirmation { enc_conn_info, .. })) => (false, enc_conn_info),
-                        _ => (false, pt.clone()),
-                    };
-                    let frame = if is_msg_env {
-                        match &mut self.ratchet {
-                            Some(r) => r.decrypt(&inner)?,
-                            None => inner,
+                    let pt = match decrypt_for_recipient(&secret, msg_id, body) {
+                        Some(pt) => pt,
+                        None => {
+                            self.client
+                                .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                                .map_err(|e| e.to_string())?;
+                            continue;
                         }
-                    } else {
-                        inner
                     };
-                    let am = parse_agent(&frame)?;
+                    let am = match self.decode_incoming(&pt)? {
+                        Some(am) => am,
+                        None => {
+                            self.client
+                                .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
+                                .map_err(|e| e.to_string())?;
+                            continue;
+                        }
+                    };
                     self.client
                         .send_only(Command::Ack(msg_id.clone()), self.rcv_id.clone(), Some(&self.rcv_auth))
                         .map_err(|e| e.to_string())?;
