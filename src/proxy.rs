@@ -53,8 +53,9 @@ pub fn open_proxy_session(dest_host: &str, dest_port: u16, dest_key_hash: &[u8])
         .map_err(|e| e.to_string())?;
     write_block(&mut stream, &ch).map_err(|e| e.to_string())?;
     let sess_secret = x25519_dh(&eph.secret, &x25519_public(dest_pub_raw));
-    let mut dest_pub = [0u8; 32];
-    dest_pub.copy_from_slice(&dest_pub_raw);
+    let dest_pub: [u8; 32] = dest_pub_raw
+        .try_into()
+        .map_err(|_| "proxy dest: bad session pubkey length".to_string())?;
     Ok(ProxyConn { stream, sess_secret, dest_session_id: dest_sid, dest_session_pub: dest_pub, v_min, v_max })
 }
 
@@ -107,8 +108,7 @@ pub fn relay_pfwd(conn: &Arc<Mutex<ProxyConn>>, pfwd_corr: &[u8], version: u16, 
     w_u16(&mut fwd, version);
     w_short(&mut fwd, command_key).map_err(|e| e.to_string())?;
     fwd.extend_from_slice(client_enc); // transmission tail, raw
-    let mut n = [0u8; 24];
-    n.copy_from_slice(&rfwd_corr);
+    let n: [u8; 24] = rfwd_corr.as_slice().try_into().expect("rfwd_corr is random_bytes(24)");
     let outer = secretbox_encrypt(&g.sess_secret, &n, &fwd)?;
     let mut cmd = b"RFWD ".to_vec();
     cmd.extend_from_slice(&outer);
@@ -143,8 +143,11 @@ pub fn handle_rfwd(
     dest_sid: &[u8],
     dispatch: &dyn Fn(&Transmission) -> Vec<Transmission>,
 ) -> Result<Vec<u8>, String> {
-    let mut n = [0u8; 24];
-    n.copy_from_slice(corr_id);
+    // U-02 (audit #3): corr_id/fwd_corr come from the wire (shortString, 0..=255B) —
+    // never copy_from_slice into a fixed array (remote panic / DoS).
+    let n: [u8; 24] = corr_id
+        .try_into()
+        .map_err(|_| "RFWD: bad corr_id length".to_string())?;
     let fwd = secretbox_decrypt(sess, &n, enc).ok_or("RFWD proxy-layer decrypt failed")?;
     let mut r = Reader::new(&fwd);
     let fwd_corr = r.short().map_err(|e| e.to_string())?;
@@ -154,8 +157,10 @@ pub fn handle_rfwd(
     // client layer: DH(serverEph, clientEphPub from command_key), nonce cbNonce(fwd_corr)
     let (_alg, client_eph_raw) = parse_spki(&command_key).map_err(|e| e.to_string())?;
     let client_sess = x25519_dh(server_eph_priv, &x25519_public(client_eph_raw));
-    let mut fc = [0u8; 24];
-    fc.copy_from_slice(&fwd_corr);
+    let fc: [u8; 24] = fwd_corr
+        .as_slice()
+        .try_into()
+        .map_err(|_| "RFWD: bad fwd_corr length".to_string())?;
     let padded = secretbox_decrypt(&client_sess, &fc, &client_enc).ok_or("RFWD client-layer decrypt failed")?;
     let content = unpad(&padded).map_err(|e| e.to_string())?;
     // onion nesting: inner payload may be a block of several wires ([Proxy{next}, Pfwd{…}]).
