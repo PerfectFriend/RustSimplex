@@ -51,7 +51,15 @@ pub struct ServerState {
     /// so onion hops can be addressed by this pub across connections
     pub eph_secret: [u8; 32],
     pub eph_pub: [u8; 32],
+    /// U-05 (audit #3): monotonic revision of REAL mutations + last persisted revision.
+    /// Not serialized — both start at 0 after a load, so the first mutation persists.
+    pub revision: u64,
+    pub persisted_revision: u64,
 }
+
+/// Serializes store snapshots+writes across connection threads (U-05): without it,
+/// a stale snapshot can rename over a newer one (silent state rollback on disk).
+static PERSIST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Per-connection proxy context (session key from hello exchange).
 pub struct ConnCtx {
@@ -70,7 +78,7 @@ pub struct ConnCtx {
 impl ServerState {
     pub fn new() -> Self {
         let kp = x25519_keypair();
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, persist_key: None, identity: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes() }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, persist_key: None, identity: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes(), revision: 0, persisted_revision: 0 }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -254,23 +262,38 @@ fn dispatch(
         Ok(c) => c,
         Err(e) => return vec![err_np!(t.corr_id.clone(), t.entity_id.clone(), &format!("CMD {e}"))],
     };
-    let dirty = matches!(
+    let mutating = matches!(
         cmd,
         Command::New { .. } | Command::Send { .. } | Command::Ack(_) | Command::Key(_) | Command::Skey(_) | Command::Del
             | Command::Nkey { .. } | Command::Nsub | Command::Ndel
             | Command::Fnew { .. } | Command::Fput { .. } | Command::Fdel { .. }
     );
     let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
-    if dirty {
-        // P0-3: serialize under the state lock, write the file OUTSIDE it — the fsync
-        // must not hold the global mutex and block every other connection.
+    // U-05/H1: persist only on a REAL mutation — a command that came back with ERR
+    // changed nothing (e.g. SEND with a foreign snd_id gets ERR AUTH) and must not
+    // trigger a full O(N) snapshot + fsync (that was a cheap unauthenticated DoS).
+    let mutated = mutating
+        && !out.iter().any(|t| matches!(crate::protocol::parse_broker(&t.command), Ok(crate::protocol::BrokerMsg::Err(_))));
+    if mutated {
+        {
+            let mut g = lock_state(st);
+            g.revision = g.revision.wrapping_add(1);
+        }
+        // U-05/H2: serialize snapshot+write under PERSIST_MUTEX and re-check the
+        // revision, so a stale snapshot can never rename over a newer one.
+        let _pm = PERSIST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let plan = {
             let g = lock_state(st);
-            (g.persist.clone(), g.sealed_store().ok())
+            if g.revision > g.persisted_revision {
+                (g.persist.clone(), g.sealed_store().ok(), g.revision)
+            } else {
+                (None, None, 0)
+            }
         };
-        if let (Some(p), Some(bytes)) = plan {
-            if let Err(e) = crate::store::write_store_bytes(&p, &bytes) {
-                eprintln!("smp-server: FAILED to persist store to {}: {e}", p.display());
+        if let (Some(p), Some(bytes), rev) = plan {
+            match crate::store::write_store_bytes(&p, &bytes) {
+                Ok(()) => lock_state(st).persisted_revision = rev,
+                Err(e) => eprintln!("smp-server: FAILED to persist store to {}: {e}", p.display()),
             }
         }
     }
@@ -481,25 +504,58 @@ fn dispatch_cmd(
             q.messages.retain(|(m, _)| *m != msg_id);
             vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
         }
-        Command::Key(k) | Command::Skey(k) => {
+        Command::Key(k) => {
+            // Recipient auth-key rotation. entity = rcv_id; must pass the CURRENT
+            // recipient auth (qauth). Updates rcv_auth_raw / rcv_auth_x.
             let rcv_id = t.entity_id.clone();
             let mut s = lock_state(st);
             let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             };
-            let is_recipient = tag_of(&t.command) == "KEY";
-            let key_ok = if is_recipient {
-                qauth(session_id, t, q, ctx)
-            } else {
-                q.snd_auth.map(|r| verify_sign(session_id, t, &r)).unwrap_or(true)
-            };
-            if !key_ok {
+            if !qauth(session_id, t, q, ctx) {
                 return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
             }
-            if let Ok((_alg, raw)) = parse_spki(&k) {
-                q.snd_auth = Some(raw);
+            match parse_spki(&k) {
+                Ok((alg, raw)) => {
+                    q.rcv_auth_x = alg == AuthAlg::X25519;
+                    q.rcv_auth_raw = raw;
+                    vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
+                }
+                // U-04: a malformed key must be a hard CMD SYNTAX, never a silent Ok
+                Err(_) => vec![err_np!(t.corr_id.clone(), rcv_id, "CMD SYNTAX")],
             }
-            vec![resp_np!(t.corr_id.clone(), rcv_id, BrokerMsg::Ok)]
+        }
+        Command::Skey(k) => {
+            // U-04/H12: SKEY is addressed by the SENDER id (entity = snd_id) and the
+            // signature is MANDATORY. The old code looked the queue up by rcv_id —
+            // but rcv_id travels in invitation links, so anyone knowing it could bind
+            // their own snd_auth via `.unwrap_or(true)` and lock out the real sender.
+            let snd_id = t.entity_id.clone();
+            let mut s = lock_state(st);
+            let Some(rcv_id) = s.by_snd.get(&snd_id).cloned() else {
+                return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
+            };
+            let Some(q) = s.by_rcv.get_mut(&rcv_id) else {
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")];
+            };
+            let (alg, raw) = match parse_spki(&k) {
+                Ok(x) => x,
+                Err(_) => return vec![err_np!(t.corr_id.clone(), snd_id, "CMD SYNTAX")],
+            };
+            // snd_auth is a signing key — Ed25519 only
+            if alg != AuthAlg::Ed25519 {
+                return vec![err_np!(t.corr_id.clone(), snd_id, "CMD SYNTAX")];
+            }
+            // rotation: signed by the OLD key; first binding: signed by the NEW key
+            let key_ok = match &q.snd_auth {
+                Some(old) => verify_sign(session_id, t, old),
+                None => verify_sign(session_id, t, &raw),
+            };
+            if !key_ok {
+                return vec![err_np!(t.corr_id.clone(), snd_id, "AUTH")];
+            }
+            q.snd_auth = Some(raw);
+            vec![resp_np!(t.corr_id.clone(), snd_id, BrokerMsg::Ok)]
         }
         Command::Del => {
             let rcv_id = t.entity_id.clone();
@@ -639,7 +695,9 @@ fn dispatch_cmd(
             let st2 = st.clone();
             let sid = session_id.to_vec();
             let outbox2 = outbox.clone();
-            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: None, last_proxy: ctx.last_proxy.clone(), allow_local_proxy: ctx.allow_local_proxy };
+            // U-04/F-06: keep server_eph_priv — inner commands on X25519-auth queues
+            // (qauth/verify_box) got a guaranteed AUTH with None.
+            let ctx2 = ConnCtx { sess_secret: Some(sess), server_eph_priv: ctx.server_eph_priv.clone(), last_proxy: ctx.last_proxy.clone(), allow_local_proxy: ctx.allow_local_proxy };
             match crate::proxy::handle_rfwd(&enc, &t.corr_id, &sess, eph_priv, session_id, &move |inner| {
                 dispatch(inner, &st2, &sid, &outbox2, &ctx2)
             }) {
@@ -799,9 +857,15 @@ pub fn handle_conn(
     };
     // strict v23 transport encryption (encryptBlock) — enabled only when client sent authPubKey
     let (mut s_snd, mut s_rcv) = if strict {
+        // U-11/F-13: with strict=true the connection must fail CLOSED — a missing
+        // authPubKey or a key-derivation error is a hard error, never a silent
+        // downgrade to plaintext transport.
         match ctx.sess_secret {
-            Some(sec) => match strict_keys(&session_id, &sec, false) { Ok((a, b)) => (Some(a), Some(b)), Err(_) => (None, None) }
-            None => (None, None),
+            Some(sec) => match strict_keys(&session_id, &sec, false) {
+                Ok((a, b)) => (Some(a), Some(b)),
+                Err(e) => return Err(io_err(format!("strict mode: key derivation failed: {e}"))),
+            },
+            None => return Err(io_err("strict mode: client sent no authPubKey — refusing plaintext connection")),
         }
     } else { (None, None) };
     // --- phase 2: poll pump ---
@@ -1196,6 +1260,49 @@ pub fn run(addr: &str) -> std::io::Result<()> {
 }
 
 
+/// U-10/F-08: true when the IP must never be a proxy destination — all non-global
+/// ranges, written with explicit octets/segments (no std-helper version drift),
+/// including IPv4-mapped IPv6 (::ffff:127.0.0.1 would otherwise reach loopback).
+fn ip_is_forbidden(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || o[0] == 0 // 0.0.0.0/8 "this host"
+                || (o[0] == 100 && (o[1] & 0xC0) == 64) // 100.64.0.0/10 CGNAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24 IETF
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2) // 192.0.2.0/24 TEST-NET-1
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18.0.0/15 benchmark
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100) // 198.51.100.0/24 TEST-NET-2
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113) // 203.0.113.0/24 TEST-NET-3
+                || (o[0] >= 240) // 240.0.0.0/4 reserved
+        }
+        IpAddr::V6(v6) => {
+            // IPv4-mapped/compatible IPv6 must go through the IPv4 validator
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_forbidden(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+                || (s[0] & 0xFE00) == 0xFC00 // fc00::/7 ULA
+                || (s[0] == 0x2001 && s[1] == 0x0DB8) // 2001:db8::/32 documentation
+                || (s[0] == 0x2001 && s[1] == 0) // 2001::/32 Teredo
+                || s[0] == 0x2002 // 2002::/16 6to4
+                || (s[0] == 0x64 && s[1] == 0xFF9B) // 64:ff9b::/96 NAT64
+                || (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 && s[6] == 0 && s[7] == 0) // covered by unspecified
+        }
+    }
+}
+
 /// P1: proxy destination guard — only public routers on standard ports, no local/private targets (SSRF guard).
 fn guard_proxy_dest(host: &str, port: u16, allow_local_proxy: bool) -> Result<(), String> {
     // local destinations are allowed only when the engine was explicitly opted in
@@ -1208,11 +1315,8 @@ fn guard_proxy_dest(host: &str, port: u16, allow_local_proxy: bool) -> Result<()
     let lower = h.to_ascii_lowercase();
     if lower == "localhost" || lower.ends_with(".localhost") { return Err("PROXY local host".into()); }
     if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        let bad = match ip {
-            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_multicast() || v4.is_unspecified(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || v6.is_unicast_link_local() || (v6.segments()[0] & 0xfe00) == 0xfc00,
-        };
-        if bad { return Err("PROXY non-public IP".into()); }
+        // U-10: full non-global coverage incl. IPv4-mapped IPv6 (see ip_is_forbidden)
+        if ip_is_forbidden(ip) { return Err("PROXY non-public IP".into()); }
         return Ok(());
     }
     // hostname must look like a domain (no spaces/slashes); actual DNS happens in proxy layer
@@ -1233,6 +1337,17 @@ mod proxy_guard_tests {
         assert!(guard_proxy_dest("::1", 5223, false).is_err());
         assert!(guard_proxy_dest("localhost", 5223, false).is_err());
         assert!(guard_proxy_dest("smp11.simplex.im", 22, false).is_err());
+        // U-10 bypass vectors
+        assert!(guard_proxy_dest("::ffff:127.0.0.1", 5223, false).is_err(), "IPv4-mapped loopback must be blocked");
+        assert!(guard_proxy_dest("::ffff:169.254.169.254", 443, false).is_err(), "IPv4-mapped cloud metadata must be blocked");
+        assert!(guard_proxy_dest("100.64.0.1", 5223, false).is_err(), "CGNAT must be blocked");
+        assert!(guard_proxy_dest("0.0.0.0", 5223, false).is_err());
+        assert!(guard_proxy_dest("198.18.0.1", 5223, false).is_err());
+        assert!(guard_proxy_dest("240.0.0.1", 5223, false).is_err());
+        assert!(guard_proxy_dest("64:ff9b::127.0.0.1", 5223, false).is_err(), "NAT64 must be blocked");
+        assert!(guard_proxy_dest("2001:db8::1", 5223, false).is_err(), "doc range must be blocked");
+        assert!(guard_proxy_dest("192.0.2.1", 5223, false).is_err());
+        assert!(guard_proxy_dest("8.8.8.8", 5223, false).is_ok(), "public IP must pass");
         assert!(guard_proxy_dest("", 5223, false).is_err());
         assert!(guard_proxy_dest("smp11.simplex.im", 5223, false).is_ok());
     }
