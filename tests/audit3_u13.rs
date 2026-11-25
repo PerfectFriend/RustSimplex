@@ -7,7 +7,7 @@
 use smp_rs::client::Client;
 use smp_rs::crypto::{ed25519_keypair, spki_ed25519};
 use smp_rs::protocol::{BrokerMsg, Command};
-use smp_rs::server::{Engine, MAX_XFTP_CHUNK, MAX_XFTP_FILE_SIZE};
+use smp_rs::server::{Engine, MAX_XFTP_CHUNK, MAX_XFTP_CHUNKS, MAX_XFTP_FILE_SIZE};
 
 fn spawn_engine() -> std::net::SocketAddr {
     let e = Engine::bind_plain_with_strict("127.0.0.1:0", false).unwrap();
@@ -51,11 +51,11 @@ fn fput_validation() {
         other => panic!("expected FID, got {other:?}"),
     };
 
-    // offset beyond declared file size
+    // chunk index beyond the per-file cap
     let r = c
-        .request(Command::Fput { packet_id: pid.clone(), offset: 1000, chunk: vec![0u8; 10] }, vec![], Some(&kp))
+        .request(Command::Fput { packet_id: pid.clone(), offset: MAX_XFTP_CHUNKS as u32, chunk: vec![0u8; 10] }, vec![], Some(&kp))
         .unwrap();
-    assert!(matches!(&r[0], BrokerMsg::Err(e) if e.contains("QUOTA")), "bad offset must be QUOTA, got {r:?}");
+    assert!(matches!(&r[0], BrokerMsg::Err(e) if e.contains("QUOTA")), "bad chunk index must be QUOTA, got {r:?}");
 
     // chunk larger than one block cannot even be encoded by the client (pad overflow)
     // — the server-side MAX_XFTP_CHUNK cap is defense-in-depth behind that.

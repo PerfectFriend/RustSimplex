@@ -538,6 +538,21 @@ pub struct Socks5Config {
 /// Connect through SOCKS5 to `dest_host:dest_port` with remote DNS (domain sent to proxy).
 pub fn connect_socks5(proxy: &Socks5Config, dest_host: &str, dest_port: u16) -> std::io::Result<TcpStream> {
     use std::io::{Read, Write};
+    // U-20: RFC 1929 auth fields are u8-length — reject >255 up front instead of
+    // truncating mid-handshake; host length is checked before the request write.
+    if let Some(u) = &proxy.user {
+        if u.len() > 255 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "socks5 user too long"));
+        }
+    }
+    if let Some(p) = &proxy.pass {
+        if p.len() > 255 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "socks5 pass too long"));
+        }
+    }
+    if dest_host.len() > 255 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "host too long"));
+    }
     let mut s = TcpStream::connect((proxy.host.as_str(), proxy.port))?;
     s.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     s.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;

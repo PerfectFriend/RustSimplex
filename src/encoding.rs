@@ -73,11 +73,13 @@ impl<'a> Reader<'a> {
         Self { buf: b, pos: 0 }
     }
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], EncodeError> {
-        if self.pos + n > self.buf.len() {
+        // U-20b: checked arithmetic — a hostile length must be an Err, never a panic
+        let end = self.pos.checked_add(n).ok_or_else(|| EncodeError("overflow".into()))?;
+        if end > self.buf.len() {
             return Err(EncodeError("eof".into()));
         }
-        let s = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
+        let s = &self.buf[self.pos..end];
+        self.pos = end;
         Ok(s)
     }
     pub fn u8(&mut self) -> Result<u8, EncodeError> {

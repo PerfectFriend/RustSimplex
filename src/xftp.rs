@@ -298,37 +298,64 @@ pub fn download_file_stream(
 ) -> Result<(), String> {
     use sha2::Digest;
     use std::io::Write;
-    let mut out = std::fs::File::create(out_path).map_err(|e| e.to_string())?;
-    let mut hasher = sha2::Sha256::new();
-    let mut chunks = BTreeMap::new();
-    let mut offset = 0u32;
-    while (offset as usize) < desc.chunks as usize {
-        let r = c.request(Command::Fget { packet_id: desc.packet_id.clone(), offset }, vec![], None).map_err(|e| e.to_string())?;
-        let mut got = 0usize;
-        for m in &r {
-            match m {
-                BrokerMsg::Fdata { offset: o, chunk } => { chunks.insert(*o, chunk.clone()); got += 1; }
-                BrokerMsg::Err(e) => return Err(format!("FGET: {e}")),
-                _ => {}
+    // U-17 (audit #3): the final path must never hold an unauthenticated payload —
+    // stream into a 0o600 temp file, verify size + sha256, then atomically rename;
+    // the temp file is removed on any error.
+    if desc.orig_size > desc.size {
+        return Err(format!("orig_size {} > declared size {}", desc.orig_size, desc.size));
+    }
+    let tmp_path = out_path.with_extension("part");
+    let mut oo = std::fs::OpenOptions::new();
+    oo.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        oo.mode(0o600);
+    }
+    let mut out = oo.open(&tmp_path).map_err(|e| e.to_string())?;
+    let mut run = || -> Result<(), String> {
+        let mut hasher = sha2::Sha256::new();
+        let mut chunks = BTreeMap::new();
+        let mut offset = 0u32;
+        while (offset as usize) < desc.chunks as usize {
+            let r = c.request(Command::Fget { packet_id: desc.packet_id.clone(), offset }, vec![], None).map_err(|e| e.to_string())?;
+            let mut got = 0usize;
+            for m in &r {
+                match m {
+                    BrokerMsg::Fdata { offset: o, chunk } => { chunks.insert(*o, chunk.clone()); got += 1; }
+                    BrokerMsg::Err(e) => return Err(format!("FGET: {e}")),
+                    _ => {}
+                }
             }
+            if got == 0 { return Err("FGET returned no chunks".into()); }
+            offset += got as u32;
         }
-        if got == 0 { return Err("FGET returned no chunks".into()); }
-        offset += got as u32;
+        let mut padded_len = 0u64;
+        for i in 0..desc.chunks {
+            let ch = chunks.get(&i).ok_or_else(|| format!("missing chunk {i}"))?;
+            if ch.len() < 24 + 16 { return Err("chunk too short".into()); }
+            let n: [u8; 24] = ch[..24].try_into().map_err(|_| "nonce len".to_string())?;
+            let pt = raw_secretbox_decrypt(&desc.key, &n, &ch[24..]).ok_or("chunk decrypt failed")?;
+            hasher.update(&pt);
+            out.write_all(&pt).map_err(|e| e.to_string())?;
+            padded_len += pt.len() as u64;
+            progress(padded_len, desc.size);
+        }
+        if padded_len != desc.size { return Err(format!("size mismatch {padded_len} != {}", desc.size)); }
+        let digest = hasher.finalize();
+        if digest.as_slice() != desc.digest { return Err("DIGEST mismatch".into()); }
+        out.set_len(desc.orig_size).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    };
+    match run() {
+        Ok(()) => {
+            std::fs::rename(&tmp_path, out_path).map_err(|e| format!("rename: {e}"))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
     }
-    let mut padded_len = 0u64;
-    for i in 0..desc.chunks {
-        let c = chunks.get(&i).ok_or_else(|| format!("missing chunk {i}"))?;
-        if c.len() < 24 + 16 { return Err("chunk too short".into()); }
-        let mut n = [0u8; 24]; n.copy_from_slice(&c[..24]);
-        let pt = raw_secretbox_decrypt(&desc.key, &n, &c[24..]).ok_or("chunk decrypt failed")?;
-        hasher.update(&pt);
-        out.write_all(&pt).map_err(|e| e.to_string())?;
-        padded_len += pt.len() as u64;
-        progress(padded_len, desc.size);
-    }
-    if padded_len != desc.size { return Err(format!("size mismatch {padded_len} != {}", desc.size)); }
-    let digest = hasher.finalize();
-    if digest.as_slice() != desc.digest { return Err("DIGEST mismatch".into()); }
-    out.set_len(desc.orig_size).map_err(|e| e.to_string())?;
-    Ok(())
 }

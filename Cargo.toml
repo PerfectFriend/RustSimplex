@@ -58,6 +58,8 @@ required-features = ["v71-probes"]
 [features]
 default = []
 v71-probes = ["dep:openssl", "dep:tokio-openssl"]
+# Debug-only raw block dump (SMP_DUMP_RAW) — off in every shipped build.
+debug-dump = []
 # FFI facade: uniffi scaffolding + the vendored uniffi-bindgen CLI (W5).
 ffi = ["dep:uniffi"]
 

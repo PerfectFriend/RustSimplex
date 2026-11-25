@@ -625,11 +625,13 @@ fn dispatch_cmd(
             let Some(p) = g.xftp.get_mut(&packet_id) else {
                 return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
-            // U-19: Fput validation — chunk size, offset range, chunk count.
+            // U-19: Fput validation — chunk size, chunk-index range, chunk count.
+            // NOTE: `offset` is a CHUNK INDEX (u32), not a byte offset — upload_file
+            // sends i as u32 and Fget ranges over chunk indices.
             if chunk.len() > MAX_XFTP_CHUNK {
                 return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA chunk size")];
             }
-            if offset as u64 + chunk.len() as u64 > p.size {
+            if offset as usize >= MAX_XFTP_CHUNKS {
                 return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA offset")];
             }
             if p.chunks.len() >= MAX_XFTP_CHUNKS && !p.chunks.contains_key(&offset) {

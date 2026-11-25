@@ -291,14 +291,25 @@ impl Client {
         } else {
             read_block(&mut self.stream).map_err(map_e)?
         };
+        // U-20: raw block dump is a debug-only feature — compiled out unless the
+        // `debug-dump` cargo feature is enabled; the file holds session traffic,
+        // so it is created 0o600 on unix.
+        #[cfg(feature = "debug-dump")]
         if let Ok(path) = std::env::var("SMP_DUMP_RAW") {
             use std::io::Write;
             let p = if path.is_empty() || path == "1" {
-                std::env::temp_dir().join("raw_blocks.hex") // TMPDIR points at the hermes scratch dir
+                std::env::temp_dir().join("raw_blocks.hex")
             } else {
                 std::path::PathBuf::from(path)
             };
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let mut oo = std::fs::OpenOptions::new();
+            oo.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                oo.mode(0o600);
+            }
+            if let Ok(mut f) = oo.open(p) {
                 let _ = writeln!(f, "{}", rb.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
         }
