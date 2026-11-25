@@ -18,7 +18,7 @@
 
 use sha2::{Digest, Sha512};
 
-use crate::crypto::{secretbox_decrypt, secretbox_encrypt, x25519_dh, x25519_keypair, x25519_public, X25519Keypair, XPublic};
+use crate::crypto::{secretbox_decrypt, secretbox_encrypt, x25519_dh_checked, x25519_keypair, x25519_public, X25519Keypair, XPublic};
 use crate::encoding::{w_short, w_u16, w_u32, EncodeError, Reader};
 use crate::pq::{kem_decaps, kem_encaps, kem_keypair, KemKeypair, KemParams, KEM_CT_LEN, KEM_PK_LEN};
 
@@ -268,7 +268,7 @@ impl PqdrRatchet {
         let kem_s = kem_keypair();
         // KEM #1 at init: encapsulate against Bob's KEM key (peer-supplied — validate, never panic)
         let (ct, ss) = kem_encaps_pub(&kem_r)?;
-        let dh = x25519_dh(&dh_s.secret, &dh_r);
+        let dh = x25519_dh_checked(&dh_s.secret, &dh_r)?;
         let (rk, cks, nhks) = root_kdf(sk, &dh, Some(&ss));
         let kem_pk = kem_s.ek.as_ref().to_vec();
         Ok(PqdrRatchet {
@@ -470,7 +470,7 @@ impl PqdrRatchet {
         // RK, CKs, NHKs = rootKdf(RK, DH(newDHs, DHRr) || ss)
         let dh_new = x25519_keypair();
         let kem_new = kem_keypair();
-        let dh1 = x25519_dh(&dh_new.secret, &self.dh_r);
+        let dh1 = x25519_dh_checked(&dh_new.secret, &self.dh_r)?;
         let (ct, ss) = kem_encaps_pub(&peer_kem)?;
         let (rk1, cks, nhks) = root_kdf(&base, &dh1, Some(&ss));
         self.rk = rk1;
@@ -530,6 +530,9 @@ impl PqdrRatchet {
             // skip message keys in the previous receiving chain up to pn
             self.skip_message_keys(hdr.pn)?;
             // KEM #2: decapsulate incoming ct (acceptedKEM) with our current KEM sk
+            // U-08 (audit #3, F-05): on a DH ratchet step the KEM ciphertext is
+            // MANDATORY — accepting KemParams::Pk here would let an attacker strip
+            // the post-quantum contribution and downgrade the chain to plain X25519.
             let kem_ss = match &hdr.kem {
                 KemParams::CtPk(ct, _pk) => {
                     if ct.len() != KEM_CT_LEN {
@@ -537,10 +540,10 @@ impl PqdrRatchet {
                     }
                     Some(kem_decaps(&self.kem_s.dk, ct).map_err(|e| e.to_string())?)
                 }
-                _ => None,
+                _ => return Err("KEM ct required on DH ratchet step".into()),
             };
             // DHRatchetPQ2HE: state.RK, CKr, NHKr = rootKdf(RK, DH(newDHRs, DHRr) || ss)
-            let dh1 = x25519_dh(&self.dh_s.secret, &dh_pub);
+            let dh1 = x25519_dh_checked(&self.dh_s.secret, &dh_pub)?;
             let (rk1, ckr, nhkr) = root_kdf(&self.rk, &dh1, kem_ss.as_ref());
             self.rk_peer = Some(rk1); // peer's rk after it ratchets on our next header
             // new DH key + KEM #1: encapsulate against the incoming KEM pk
@@ -554,7 +557,7 @@ impl PqdrRatchet {
                 return Err("KEM pk len".into());
             }
             let (ct, ss) = kem_encaps_pub(&new_kem_pk)?;
-            let dh2 = x25519_dh(&self.dh_s.secret, &dh_pub);
+            let dh2 = x25519_dh_checked(&self.dh_s.secret, &dh_pub)?;
             let (rk2, cks, nhks) = root_kdf(&rk1, &dh2, Some(&ss));
             self.rk = rk2;
             self.ckr = Some(ckr);

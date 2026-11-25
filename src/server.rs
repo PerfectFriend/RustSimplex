@@ -231,7 +231,11 @@ pub fn hsalsa20_pub(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
 fn qauth(session_id: &[u8], t: &Transmission, q: &Queue, ctx: &ConnCtx) -> bool {
     if q.rcv_auth_x {
         match &ctx.server_eph_priv {
-            Some(eph) => verify_box(session_id, t, &x25519_dh(eph, &x25519_public(q.rcv_auth_raw))),
+            // U-07: small-order peer key must fail CLOSED, never derive a predictable secret
+            Some(eph) => match x25519_dh_checked(eph, &x25519_public(q.rcv_auth_raw)) {
+                Ok(k) => verify_box(session_id, t, &k),
+                Err(_) => false,
+            },
             None => false,
         }
     } else {
@@ -295,20 +299,30 @@ fn dispatch_cmd(
                 // X25519 queue auth: crypto_box authenticator with dhSecret = DH(server eph priv, queue auth pub)
                 // (C.cbVerify k pk (cbNonce corrId) authenticator authorized, Server.hs verifyCmdAuth)
                 AuthAlg::X25519 => match &ctx.server_eph_priv {
-                    Some(eph) => verify_box(session_id, t, &x25519_dh(eph, &x25519_public(raw))),
+                    Some(eph) => match x25519_dh_checked(eph, &x25519_public(raw)) {
+                        Ok(k) => verify_box(session_id, t, &k),
+                        Err(_) => false,
+                    },
                     None => false,
                 },
             };
             if !ok {
                 return vec![err_np!(t.corr_id.clone(), vec![], "AUTH")];
             }
-            let (_dh_alg, dh_raw) = match parse_spki(&rcv_dh_key) {
+            // U-19: rcv_dh_key must be an X25519 SPKI (Ed25519 here would be a protocol violation)
+            let (dh_alg, dh_raw) = match parse_spki(&rcv_dh_key) {
                 Ok(x) => x,
                 Err(_) => return vec![err_np!(t.corr_id.clone(), vec![], "CMD SYNTAX")],
             };
+            if dh_alg != AuthAlg::X25519 {
+                return vec![err_np!(t.corr_id.clone(), vec![], "CMD SYNTAX")];
+            }
             let client_dh_pub = x25519_public(dh_raw);
             let srv = x25519_keypair();
-            let rcv_dh_secret = x25519_dh(&srv.secret, &client_dh_pub);
+            let rcv_dh_secret = match x25519_dh_checked(&srv.secret, &client_dh_pub) {
+                Ok(k) => k,
+                Err(e) => return vec![err_np!(t.corr_id.clone(), vec![], &format!("CRYPTO {e}"))],
+            };
             let rcv_id = random_bytes(16);
             let snd_id = random_bytes(24);
             let srv_dh_der = spki_x25519(&srv.public.to_bytes());
@@ -648,12 +662,18 @@ fn dispatch_cmd(
                 Ok(x) => x,
                 Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "AUTH")],
             };
-            let (_dh_alg, rcv_ntf_dh_raw) = match parse_spki(&rcv_ntf_dh_key) {
+            let (ntf_dh_alg, rcv_ntf_dh_raw) = match parse_spki(&rcv_ntf_dh_key) {
                 Ok(x) => x,
                 Err(_) => return vec![err_np!(t.corr_id.clone(), rcv_id, "CMD SYNTAX")],
             };
+            if ntf_dh_alg != AuthAlg::X25519 {
+                return vec![err_np!(t.corr_id.clone(), rcv_id, "CMD SYNTAX")];
+            }
             let srv_ntf = x25519_keypair();
-            let rcv_ntf_dh_secret = x25519_dh(&srv_ntf.secret, &x25519_public(rcv_ntf_dh_raw));
+            let rcv_ntf_dh_secret = match x25519_dh_checked(&srv_ntf.secret, &x25519_public(rcv_ntf_dh_raw)) {
+                Ok(k) => k,
+                Err(e) => return vec![err_np!(t.corr_id.clone(), rcv_id, &format!("CRYPTO {e}"))],
+            };
             let ntf_id = random_bytes(16);
             let srv_ntf_dh_der = spki_x25519(&srv_ntf.public.to_bytes());
             q.ntf_id = Some(ntf_id.clone());
@@ -771,7 +791,7 @@ pub fn handle_conn(
         sess_secret: client_auth.and_then(|der| {
             parse_spki(&der)
                 .ok()
-                .map(|(_a, raw)| x25519_dh(&eph.secret, &x25519_public(raw)))
+                .and_then(|(_a, raw)| x25519_dh_checked(&eph.secret, &x25519_public(raw)).ok())
         }),
         server_eph_priv: Some(eph.secret),
         last_proxy: std::sync::Arc::new(std::sync::Mutex::new(None)),

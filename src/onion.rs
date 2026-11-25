@@ -17,7 +17,7 @@
 use std::net::SocketAddr;
 
 use crate::client::Client;
-use crate::crypto::{cb_nonce, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, x25519_dh, x25519_from_secret, x25519_keypair, x25519_public, Ed25519Keypair};
+use crate::crypto::{cb_nonce, random_bytes, secretbox_decrypt, secretbox_encrypt, spki_x25519, x25519_dh_checked, x25519_from_secret, x25519_keypair, x25519_public, Ed25519Keypair};
 use crate::encoding::{pad, unpad};
 use crate::protocol::{
     auth_sign, decode_block, decode_block_raw, decode_transmission, encode_block, encode_block_raw,
@@ -101,7 +101,7 @@ pub fn onion_request_with(
     let mut layers: Vec<([u8; 32], Vec<u8>, [u8; 32])> = Vec::new();
     for i in (0..hops.len()).rev() {
         let eph = x25519_keypair();
-        let key = x25519_dh(&eph.secret, &x25519_public(next_pub));
+        let key = x25519_dh_checked(&eph.secret, &x25519_public(next_pub))?;
         let corr = random_bytes(24);
         let content = encode_block_raw(&wires).map_err(|e| e.to_string())?;
         // each nesting level adds ~150B of wire overhead, so inner layers get a
@@ -168,7 +168,7 @@ pub fn onion_request_with(
     // unwrap nested PRES layers outermost-first; layer i's PRES is encrypted with
     // DH(eph_i, target_pub_i) and nonce reverse(cb_nonce(corr_i))
     for (secret, corr, target) in &layers {
-        let key = x25519_dh(&x25519_from_secret(*secret).secret, &x25519_public(*target));
+        let key = x25519_dh_checked(&x25519_from_secret(*secret).secret, &x25519_public(*target))?;
         let nonce = cb_nonce(corr);
         let rn = reverse_nonce(&nonce);
         let mut next: Vec<BrokerMsg> = Vec::new();

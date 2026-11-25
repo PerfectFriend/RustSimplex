@@ -52,8 +52,9 @@ pub fn open_proxy_session(dest_host: &str, dest_port: u16, dest_key_hash: &[u8])
     let ch = client_hello_block_key(SMP_VERSION, dest_key_hash, true, Some(spki_x25519(&eph.public.to_bytes())))
         .map_err(|e| e.to_string())?;
     write_block(&mut stream, &ch).map_err(|e| e.to_string())?;
-    let sess_secret = x25519_dh(&eph.secret, &x25519_public(dest_pub_raw));
+    let sess_secret = x25519_dh_checked(&eph.secret, &x25519_public(dest_pub_raw))?;
     let dest_pub: [u8; 32] = dest_pub_raw
+        .as_slice()
         .try_into()
         .map_err(|_| "proxy dest: bad session pubkey length".to_string())?;
     Ok(ProxyConn { stream, sess_secret, dest_session_id: dest_sid, dest_session_pub: dest_pub, v_min, v_max })
@@ -156,7 +157,7 @@ pub fn handle_rfwd(
     let client_enc = r.rest().to_vec();
     // client layer: DH(serverEph, clientEphPub from command_key), nonce cbNonce(fwd_corr)
     let (_alg, client_eph_raw) = parse_spki(&command_key).map_err(|e| e.to_string())?;
-    let client_sess = x25519_dh(server_eph_priv, &x25519_public(client_eph_raw));
+    let client_sess = x25519_dh_checked(server_eph_priv, &x25519_public(client_eph_raw))?;
     let fc: [u8; 24] = fwd_corr
         .as_slice()
         .try_into()

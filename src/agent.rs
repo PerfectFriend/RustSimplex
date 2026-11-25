@@ -310,7 +310,7 @@ pub struct Agent<T: SmpTransport = Client> {
 impl<T: SmpTransport> Agent<T> {
     fn dh_secret(&self) -> Result<[u8; 32], String> {
         let srv_raw = parse_spki(&self.srv_dh).map_err(|e| e.to_string())?.1;
-        Ok(x25519_dh(&self.rcv_dh.secret, &x25519_public(srv_raw)))
+        x25519_dh_checked(&self.rcv_dh.secret, &x25519_public(srv_raw))
     }
 
     /// Initiator: create a contact queue and produce a connection link.
@@ -589,7 +589,7 @@ impl<T: SmpTransport> Agent<T> {
                     self.peer_snd_id = Some(peer);
                     // auto-negotiate E2E: SK = DH(our rcv_dh, joiner rcv_dh from queue info)
                     let peer_dh_raw = parse_spki(&q0.dh_pub).map_err(|e| e.to_string())?.1;
-                    let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(peer_dh_raw));
+                    let sk = x25519_dh_checked(&self.rcv_dh.secret, &x25519_public(peer_dh_raw))?;
                     let peer_ci: Option<ConnInfo> = serde_json::from_slice(&ci).ok();
                     let peer_kem = (|| {
                         let e2e = peer_ci.as_ref()?.e2e.as_ref()?;
@@ -678,7 +678,7 @@ impl<T: SmpTransport> Agent<T> {
                         let params = crate::pq::decode_e2e_ratchet_params(&mut Reader::new(&pq_params))
                             .map_err(|e| format!("e2e params: {e}"))?;
                         let (_, dh_raw) = parse_spki(&params.snd_dh_spki).map_err(|e| e.to_string())?;
-                        let sk = x25519_dh(&self.rcv_dh.secret, &x25519_public(dh_raw));
+                        let sk = x25519_dh_checked(&self.rcv_dh.secret, &x25519_public(dh_raw))?;
                         self.init_e2e_receiver(&sk, dh_raw)?;
                     }
                     return Ok(());

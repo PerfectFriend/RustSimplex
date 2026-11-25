@@ -87,6 +87,18 @@ pub fn x25519_dh(secret: &StaticSecret, peer_pub: &XPublic) -> [u8; 32] {
     secret.diffie_hellman(peer_pub).to_bytes()
 }
 
+/// X25519 DH with small-order / non-contributory check (external audit #3, U-07/F-04).
+/// A peer public key of small order (e.g. all-zero) yields a predictable shared
+/// secret; `was_contributory()` rejects exactly that. All handshake / ratchet /
+/// server-auth paths MUST use this — never raw `x25519_dh` on peer-supplied keys.
+pub fn x25519_dh_checked(secret: &StaticSecret, peer_pub: &XPublic) -> Result<[u8; 32], String> {
+    let shared = secret.diffie_hellman(peer_pub);
+    if !shared.was_contributory() {
+        return Err("X25519: non-contributory (small-order) peer public key".into());
+    }
+    Ok(shared.to_bytes())
+}
+
 // ---------- Ed25519 ----------
 pub struct Ed25519Keypair {
     pub signing: SigningKey,

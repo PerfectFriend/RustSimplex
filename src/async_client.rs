@@ -236,14 +236,15 @@ impl AsyncSmpClient {
     ///
     /// The flag is explicit: it is a property of this connection, never read
     /// from the process environment.
-    pub fn maybe_enable_strict(&mut self, strict: bool) {
+    pub fn maybe_enable_strict(&mut self, strict: bool) -> Result<(), String> {
         if !strict {
-            return;
+            return Ok(());
         }
         if let (Some(p), Some(srv)) = (self.eph_priv, self.server_eph_pub) {
-            let secret = x25519_dh(&p.into(), &x25519_public(srv));
+            let secret = x25519_dh_checked(&p.into(), &x25519_public(srv))?;
             self.enable_strict(&secret);
         }
+        Ok(())
     }
 
     /// Enable strict v23 block encryption with an explicit DH secret.

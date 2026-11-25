@@ -318,6 +318,9 @@ pub fn connect_tls_sni(addr: SocketAddr, host: &str, key_hash: [u8; 32], with_sn
 }
 
 /// Probe-only TLS config: NoVerify. NEVER use outside `v71-probes` diagnostic binaries.
+/// (U-09, audit #3: gated behind the `v71-probes` feature so the default library
+/// build cannot disable certificate verification at all.)
+#[cfg(feature = "v71-probes")]
 pub fn tls_client_config_noverify() -> std::io::Result<Arc<ClientConfig>> {
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
@@ -331,7 +334,9 @@ pub fn tls_client_config_noverify() -> std::io::Result<Arc<ClientConfig>> {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "v71-probes")]
 struct NoVerify;
+#[cfg(feature = "v71-probes")]
 impl rustls::client::danger::ServerCertVerifier for NoVerify {
     fn verify_server_cert(&self, _e: &CertificateDer<'_>, _i: &[CertificateDer<'_>], _n: &ServerName<'_>, _o: &[u8], _now: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
@@ -369,6 +374,7 @@ pub fn connect_tls_sni_alpn(addr: SocketAddr, host: &str, key_hash: [u8; 32], wi
 }
 
 /// Probe-only variant of connect_tls_sni_alpn with NoVerify cert verifier (v71-probes bins).
+#[cfg(feature = "v71-probes")]
 pub fn connect_tls_sni_alpn_noverify(addr: SocketAddr, host: &str, with_sni: bool, alpn: Option<&[u8]>) -> std::io::Result<BoxStream> {
     let tcp = TcpStream::connect(addr)?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;

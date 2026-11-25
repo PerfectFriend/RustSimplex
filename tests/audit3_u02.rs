@@ -17,7 +17,7 @@ fn u02_bad_corr_id_len_returns_err_not_panic() {
     let sess = [7u8; 32];
     let sid = vec![0u8; 16];
     let r = std::panic::catch_unwind(|| {
-        handle_rfwd(&vec![0xAA; 40], &vec![0u8; 10], &sess, &eph, &sid, &dispatch)
+        handle_rfwd(&[0xAA; 40], &[0u8; 10], &sess, &eph, &sid, &dispatch)
     });
     match r {
         Ok(Err(e)) => assert!(e.contains("corr_id"), "unexpected err: {e}"),
@@ -33,7 +33,7 @@ fn u02_bad_fwd_corr_len_returns_err_not_panic() {
     let ck = x25519_keypair();
     // craft a proxy-layer payload whose fwd_corr is 10 bytes, not 24
     let mut fwd = Vec::new();
-    w_short(&mut fwd, &vec![0u8; 10]).unwrap();
+    w_short(&mut fwd, &[0u8; 10]).unwrap();
     w_u16(&mut fwd, 23);
     w_short(&mut fwd, &spki_x25519(&ck.public.to_bytes())).unwrap();
     fwd.extend_from_slice(&[0u8; 40]);

@@ -166,7 +166,7 @@ async fn strict_v23_blocks_work_over_the_async_transport() {
     let mut c = AsyncSmpClient::connect_plain(server.addr, &[0x07; 32])
         .await
         .expect("connect_plain");
-    c.maybe_enable_strict(true);
+    c.maybe_enable_strict(true).unwrap();
     assert!(c.has_strict_keys(), "strict keys derived from the server hello authPubKey");
     let reply = c.request(Command::Ping, vec![], None).await.expect("PING in strict mode");
     assert!(has_pong(&reply), "expected PONG in strict mode, got {reply:?}");

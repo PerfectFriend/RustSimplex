@@ -79,7 +79,7 @@ impl Client {
         let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() };
         // The default is taken from the environment once, at connect time.
         let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
-        c.maybe_enable_strict(strict);
+        c.maybe_enable_strict(strict)?;
         Ok(c)
     }
 
@@ -103,7 +103,7 @@ impl Client {
     pub fn connect_plain_with_strict(addr: SocketAddr, key_hash: &[u8], strict: bool) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
@@ -115,12 +115,17 @@ impl Client {
     ///
     /// The flag is passed in explicitly: it is a property of this connection, not
     /// of the process.
-    pub fn maybe_enable_strict(&mut self, strict: bool) {
-        if !strict { return; }
+    /// U-07: returns Err on a non-contributory server key — strict mode must fail
+    /// closed, never silently stay plaintext.
+    pub fn maybe_enable_strict(&mut self, strict: bool) -> Result<(), String> {
+        if !strict {
+            return Ok(());
+        }
         if let (Some(p), Some(srv)) = (self.eph_priv, self.server_eph_pub) {
-            let secret = x25519_dh(&p.into(), &x25519_public(srv));
+            let secret = x25519_dh_checked(&p.into(), &x25519_public(srv))?;
             self.enable_strict(&secret);
         }
+        Ok(())
     }
 
     /// Whether strict v23 block encryption is active on this connection.
@@ -146,7 +151,7 @@ impl Client {
     ) -> ClResult<Client> {
         let (mut s, binding) = crate::transport::connect_tls_sni_bound(addr, host, key_hash, with_sni).map_err(map_e)?;
         let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict); Ok(c) }
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
     }
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
@@ -160,7 +165,7 @@ impl Client {
     /// dhSecret = DH(queue auth priv, server per-connection eph pub) — C.cbAuthenticate k pk.
     pub fn box_secret(&self, qauth_kp: &X25519Keypair) -> Option<[u8; 32]> {
         let srv = self.server_eph_pub?;
-        Some(x25519_dh(&qauth_kp.secret, &x25519_public(srv)))
+        x25519_dh_checked(&qauth_kp.secret, &x25519_public(srv)).ok()
     }
 
     /// Write one command and read one response block. NOTE: a pushed MSG block that
@@ -328,7 +333,7 @@ impl Client {
         let dest_pub = x25519_public(dest_pub_raw);
         // per-command ephemeral key
         let eph = x25519_keypair();
-        let client_sess = x25519_dh(&eph.secret, &dest_pub);
+        let client_sess = x25519_dh_checked(&eph.secret, &dest_pub)?;
         // inner transmission (signed with OUR session id on the proxy connection, as usual)
         let mut t = Transmission {
             authenticator: Vec::new(),

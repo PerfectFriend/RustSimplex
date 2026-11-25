@@ -673,7 +673,12 @@ where
     F: FnOnce(&mut ServerState),
 {
     let _lock = lock_store(path)?;
-    let mut st = load_with_key(path, key).unwrap_or_default();
+    // U-06/H5 (audit #3): fail-closed — an existing but undecryptable store is an
+    // ERROR, never a silent reset to default (the old unwrap_or_default() overwrote
+    // the real store on the first mutation, exactly the P0-2 pattern).
+    let mut st = load_checked_with_key(path, key)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        .unwrap_or_default();
     f(&mut st);
     save_with_key(path, &st, key)
 }

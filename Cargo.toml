@@ -38,6 +38,7 @@ path = "src/bin/smp_client.rs"
 [[bin]]
 name = "xftp-h2"
 path = "src/bin/xftp_h2.rs"
+required-features = ["v71-probes"]
 
 [[bin]]
 name = "xftp-h2-v71"
