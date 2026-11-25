@@ -351,6 +351,10 @@ fn dispatch_cmd(
             let srv_dh_der = spki_x25519(&srv.public.to_bytes());
             {
                 let mut s = lock_state(st);
+                // U-19: global queue quota — NEW past the cap is refused (memory bound).
+                if s.by_rcv.len() >= MAX_QUEUES {
+                    return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA queues")];
+                }
                 s.by_rcv.insert(rcv_id.clone(), Queue {
                     rcv_id: rcv_id.clone(),
                     snd_id: snd_id.clone(),
@@ -589,6 +593,20 @@ fn dispatch_cmd(
             if !verify_sign(session_id, t, &sender_raw) {
                 return vec![err_np!(t.corr_id.clone(), vec![], "AUTH bad signature")];
             }
+            // U-19: XFTP quotas — per-file size, packet count, aggregate declared bytes.
+            if size > MAX_XFTP_FILE_SIZE {
+                return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA file size")];
+            }
+            {
+                let g = lock_state(st);
+                if g.xftp.len() >= MAX_XFTP_PACKETS {
+                    return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA packets")];
+                }
+                let total: u64 = g.xftp.values().map(|p| p.size).sum();
+                if total.saturating_add(size) > MAX_XFTP_TOTAL {
+                    return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA total")];
+                }
+            }
             let packet_id = random_bytes(16);
             lock_state(st).xftp.insert(
                 packet_id.clone(),
@@ -607,6 +625,16 @@ fn dispatch_cmd(
             let Some(p) = g.xftp.get_mut(&packet_id) else {
                 return vec![err_np!(t.corr_id.clone(), vec![], "NO_FILE")];
             };
+            // U-19: Fput validation — chunk size, offset range, chunk count.
+            if chunk.len() > MAX_XFTP_CHUNK {
+                return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA chunk size")];
+            }
+            if offset as u64 + chunk.len() as u64 > p.size {
+                return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA offset")];
+            }
+            if p.chunks.len() >= MAX_XFTP_CHUNKS && !p.chunks.contains_key(&offset) {
+                return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA chunks")];
+            }
             p.chunks.insert(offset, chunk);
             drop(g);
             vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ok)]
@@ -649,6 +677,10 @@ fn dispatch_cmd(
             let port: u16 = String::from_utf8_lossy(&port).parse().unwrap_or(0);
             if let Err(e) = guard_proxy_dest(&host, port, ctx.allow_local_proxy) {
                 return vec![err_np!(t.corr_id.clone(), vec![], &e)];
+            }
+            // U-19: cap proxy sessions per engine.
+            if lock_state(st).proxies.len() >= MAX_PROXIES {
+                return vec![err_np!(t.corr_id.clone(), vec![], "QUOTA proxies")];
             }
             // connect to destination router as a proxy client (plain TCP for now)
             let dest_kh = [0u8; 32]; // plain mode: no keyHash pinning between our engines
@@ -807,6 +839,10 @@ pub fn handle_conn(
     allow_local_proxy: bool,
 ) -> std::io::Result<()> {
     let ctrl = tcp.try_clone()?;
+    // U-13: handshake slowloris guard — pre-hello reads/writes are bounded; the
+    // receive pump later lowers the read timeout to its 50 ms poll.
+    ctrl.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    ctrl.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let mut tls_binding: Option<Vec<u8>> = None;
     let mut stream: BoxStream = match mode {
         Mode::Plain => Box::new(tcp),
@@ -1036,6 +1072,9 @@ pub struct Engine {
     /// Per-engine for the same reason as `strict`: the previous implementation
     /// read `SMP_ALLOW_LOCAL_PROXY` from the environment on every request.
     pub allow_local_proxy: bool,
+    /// U-13: live connection counter + cap; the accept loop drops excess connections.
+    pub conns: Arc<std::sync::atomic::AtomicUsize>,
+    pub max_conns: usize,
 }
 
 impl Engine {
@@ -1076,6 +1115,8 @@ impl Engine {
             shutdown: Arc::new(AtomicBool::new(false)),
             strict,
             allow_local_proxy,
+            conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_conns: MAX_CONNS,
         })
     }
 
@@ -1149,6 +1190,8 @@ impl Engine {
             shutdown: Arc::new(AtomicBool::new(false)),
             strict: std::env::var("SMP_STRICT").as_deref() == Ok("1"),
             allow_local_proxy: std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some(),
+            conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_conns: MAX_CONNS,
         })
     }
 
@@ -1220,15 +1263,32 @@ impl Engine {
             if self.shutdown.load(Ordering::Relaxed) {
                 break Ok(());
             };
+            // U-13: connection cap — excess connections are dropped BEFORE any
+            // thread/handshake work (slowloris / fd-exhaustion guard).
+            let cur = self.conns.fetch_add(1, Ordering::Relaxed);
+            if cur >= self.max_conns {
+                self.conns.fetch_sub(1, Ordering::Relaxed);
+                drop(tcp);
+                continue;
+            }
             let st = self.state.clone();
             let mode = self.mode.clone();
-            thread::spawn(move || {
-                if let Err(e) = handle_conn(tcp, &mode, st, strict, allow_local_proxy) {
+            let conns = self.conns.clone();
+            match thread::Builder::new().name("smp-conn".into()).spawn(move || {
+                let r = handle_conn(tcp, &mode, st, strict, allow_local_proxy);
+                conns.fetch_sub(1, Ordering::Relaxed);
+                if let Err(e) = r {
                     if std::env::var_os("SMP_DEBUG").is_some() {
                         eprintln!("[engine] conn error: {e}");
                     }
                 }
-            });
+            }) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[engine] failed to spawn conn thread: {e}");
+                    self.conns.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
         };
 
         watcher_stop.store(true, Ordering::Relaxed);
@@ -1326,6 +1386,18 @@ fn guard_proxy_dest(host: &str, port: u16, allow_local_proxy: bool) -> Result<()
 
 /// P1: offline queue bound per recipient.
 const MAX_QUEUE_MSGS: usize = 1000;
+
+/// U-13: resource caps per engine — bound threads/memory against unauthenticated abuse.
+pub const MAX_CONNS: usize = 1024;
+pub const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// U-19: store quotas.
+pub const MAX_QUEUES: usize = 100_000;
+pub const MAX_PROXIES: usize = 256;
+pub const MAX_XFTP_PACKETS: usize = 1_000;
+pub const MAX_XFTP_FILE_SIZE: u64 = 256 << 20; // 256 MiB per file
+pub const MAX_XFTP_TOTAL: u64 = 1 << 30; // 1 GiB aggregate declared size
+pub const MAX_XFTP_CHUNK: usize = 16_384; // one 16 KiB block worth
+pub const MAX_XFTP_CHUNKS: usize = 65_536; // per file
 
 #[cfg(test)]
 mod proxy_guard_tests {
