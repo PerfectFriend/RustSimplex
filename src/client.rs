@@ -28,10 +28,18 @@ pub fn check_session_binding(sid: &[u8]) -> ClResult<()> {
 /// sessionId MUST equal it — rejects a MITM that rewrites serverHello sessionId.
 pub fn verify_channel_binding(sid: &[u8], tls_binding: &[u8]) -> ClResult<()> {
     if sid == tls_binding && !sid.is_empty() {
-        Ok(())
-    } else {
-        Err("channel binding mismatch".into())
+        return Ok(()); // same derivation (rustls exporter on both sides)
     }
+    // Stock simplex binds sessionId to the TLS 1.3 Finished verify_data, which
+    // rustls cannot export (only the openssl backend can recompute it). Strict
+    // equality with the exporter binding is the default; Finished-shaped sids are
+    // accepted ONLY under the explicit SMP_ALLOW_FINISHED_SID=1 interop-probe flag.
+    if (sid.len() == 32 || sid.len() == 48)
+        && std::env::var("SMP_ALLOW_FINISHED_SID").as_deref() == Ok("1")
+    {
+        return Ok(());
+    }
+    Err("channel binding mismatch".into())
 }
 
 fn map_e<E: std::fmt::Display>(e: E) -> String {

@@ -67,16 +67,30 @@ pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeErr
 pub type ServerHelloKey = (u16, u16, Vec<u8>, Option<Vec<u8>>);
 pub fn parse_server_hello_key(block: &[u8]) -> Result<ServerHelloKey, EncodeError> {
     let c = unpad(block)?;
-    let mut r = Reader::new(&c);
-    let min = r.u16()?;
-    let max = r.u16()?;
-    let sid = r.short()?;
-    let auth = match r.u8()? {
-        b'0' | 0x00 => None,   // ASCII '0' (SMP 5223) and binary 0x00 (NTF vhost) both seen live
-        b'1' | 0x01 => Some(r.short()?),
-        t => return Err(EncodeError(format!("bad Maybe tag {t} in server hello"))),
+    // Stock SMP blocks carry a 2-byte big-endian content length in front of the
+    // payload (total block stays BLOCK_SIZE). Skip it when present.
+    let c: &[u8] = if c.len() >= 4 && u16::from_be_bytes([c[0], c[1]]) as usize == c.len() - 2 {
+        &c[2..]
+    } else {
+        &c[..]
     };
-    Ok((min, max, sid, auth))
+    // Two live layouts: legacy = u16-len short sid + Maybe tag 0x00/0x01/'0'/'1';
+    // stock v23 (observed on official smp-server) = u8 sidlen + tag 0x02 + u16 spki.
+    let parse = |c: &[u8], len8: bool| -> Option<ServerHelloKey> {
+        let mut r = Reader::new(c);
+        let min = r.u16().ok()?;
+        let max = r.u16().ok()?;
+        let sid = if len8 { let n = r.u8().ok()? as usize; r.take(n).ok()?.to_vec() } else { r.short().ok()? };
+        let tag = r.u8().ok()?;
+        let auth = match tag {
+            0x00 | b'0' => None,
+            0x01 | b'1' | 0x02 => Some(r.short().ok()?),
+            _ => return None,
+        };
+        Some((min, max, sid, auth))
+    };
+    parse(c, false).or_else(|| parse(c, true))
+        .ok_or_else(|| EncodeError("bad server hello layout".into()))
 }
 
 pub fn client_hello_block(version: u16, key_hash: &[u8], proxy: bool) -> Result<Vec<u8>, EncodeError> {
@@ -88,20 +102,18 @@ pub fn client_hello_block_key(version: u16, key_hash: &[u8], proxy: bool, auth_p
     let mut c = Vec::new();
     w_u16(&mut c, version);
     w_short(&mut c, key_hash)?;
+    // Stock wire order (official smp-server): version, keyHash, proxyServer Bool,
+    // authPubKey Maybe, [clientService Maybe v>=16] — binary tags 0x00/0x01.
+    c.push(if proxy { 0x01 } else { 0x00 });
     match &auth_pub {
         Some(k) => {
-            c.push(b'1');
+            c.push(0x01);
             w_short(&mut c, k)?;
         }
-        None => {
-            c.push(b'0'); // authPubKey = Nothing (Maybe tag, all versions)
-        }
+        None => c.push(0x00),
     }
-    // v0.26: SMP clients MUST send authPubKey (X25519) — agreeSecret=True in defaultSMPClientConfig
-    // proxyServer :: Bool — 'T'/'F' chars at ALL versions (v14+ gate was wrong)
-    c.push(if proxy { b'T' } else { b'F' });
     if version >= 16 {
-        c.push(b'0'); // clientService = Nothing (ifHasService v>=16)
+        c.push(0x00); // clientService = Nothing
     }
     pad(&c, BLOCK_SIZE)
 }
@@ -114,19 +126,27 @@ pub fn parse_client_hello(block: &[u8]) -> Result<(u16, Vec<u8>, bool), EncodeEr
 /// (version, keyHash, proxyServer, authPubKey SPKI DER if Just).
 pub type ClientHelloKey = (u16, Vec<u8>, bool, Option<Vec<u8>>);
 pub fn parse_client_hello_key(block: &[u8]) -> Result<ClientHelloKey, EncodeError> {
-    let c = unpad(block)?;
-    let mut r = Reader::new(&c);
-    let v = r.u16()?;
-    let kh = r.short()?;
-    // For v>=7 a Nothing authPubKey is encoded as ZERO bytes (maybe "" smpEncode),
-    // so only consume a Maybe tag when the next byte is actually '0'/'1'.
-    let auth = match r.peek_u8()? {
-        b'0' => { r.u8()?; None }
-        b'1' => { r.u8()?; Some(r.short()?) }
-        _ => None,
+    let c0 = unpad(block)?;
+    // Stock layout: v, keyHash, proxy(0x00/0x01), auth Maybe, [service v>=16].
+    // Legacy layout (ours pre-interop): v, keyHash, auth ('0'/'1'), proxy ('T'/'F').
+    let c: &[u8] = if c0.len() >= 4 && u16::from_be_bytes([c0[0], c0[1]]) as usize == c0.len() - 2 { &c0[2..] } else { &c0[..] };
+    let parse = |c: &[u8], stock: bool| -> Option<ClientHelloKey> {
+        let mut r = Reader::new(c);
+        let v = r.u16().ok()?;
+        let kh = r.short().ok()?;
+        let (proxy, auth) = if stock {
+            let proxy = matches!(r.u8().ok()?, 0x01 | b'T');
+            let auth = match r.u8().ok()? { 0x01 | b'1' => Some(r.short().ok()?), _ => None };
+            (proxy, auth)
+        } else {
+            let auth = match r.u8().ok()? { 0x01 | b'1' => Some(r.short().ok()?), _ => None };
+            let proxy = matches!(r.u8().ok()?, 0x01 | b'T');
+            (proxy, auth)
+        };
+        Some((v, kh, proxy, auth))
     };
-    let proxy = if v >= 14 { r.bool()? } else { false };
-    Ok((v, kh, proxy, auth))
+    parse(c, true).or_else(|| parse(c, false))
+        .ok_or_else(|| EncodeError("bad client hello layout".into()))
 }
 
 // ---------- block I/O ----------

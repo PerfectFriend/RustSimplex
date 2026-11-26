@@ -93,3 +93,8 @@ release-gate; остальное — в roadmap.
 - **SMP version negotiation (plan item 15)**: `transport::negotiate_version(server_min, server_max, client_min, client_max) = min(client_max, server_max)` on overlap, `None` fail-closed otherwise; stored as `Client::negotiated_version` / `AsyncSmpClient::negotiated_version` from the server hello.
 - **Live interop executed locally (D5 verification, not just CI plan)**: `scripts/live_interop.sh` against public relays — SMP v17..v23 OK, XFTP v4 transport PONG OK (full file cycle incl. 1MiB chunked verified in prior round), NTF v3 PING->PONG OK, all CA-pinned; proxy probe correctly refused server-side (`CMD SYNTAX`). Result recorded here; CI job remains (b) until Docker runners.
 - State: 209/0 tests (ffi 210/0), clippy 0 warnings (lib+targets+ffi), gates `check_no_unwrap`/`check-tree-hygiene` OK, MSRV 1.87 CI job passing.
+
+### Stock smp-server interop (docker, official image) — 2026-11-26 round 3
+- Reached: TLS 1.3 + keyHash pin (self-signed relay cert accepted via new self-pin fast-path in PinVerifier), server hello parsed (tolerant of stock v23 layout: u8 sidlen + tag 0x02), channel binding strict by default, Finished-shaped sid only under SMP_ALLOW_FINISHED_SID=1.
+- NOT yet reached: full SMP session against stock server — stock answers our client hello with an all-padding block (handshake rejected). Open item: exact stock SMPClientHandshake field order/tags (likely proxy Bool and Maybe auth as binary 0x00/0x01 in stock order; our writer now emits that, but server still rejects — needs a byte-level diff against a known-good stock client capture).
+- Public relay interop unchanged and green (SMP v17..v23, XFTP v4, NTF v3).
