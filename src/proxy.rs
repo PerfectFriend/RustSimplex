@@ -41,7 +41,16 @@ pub type ProxyMap = std::collections::HashMap<Vec<u8>, Arc<Mutex<ProxyConn>>>;
 /// Proxy router: handle PRXY — open a session to the destination router.
 pub fn open_proxy_session(dest_host: &str, dest_port: u16, dest_key_hash: &[u8]) -> Result<ProxyConn, String> {
     let addr: std::net::SocketAddr = format!("{dest_host}:{dest_port}").parse().map_err(|e| format!("{e}"))?;
-    let mut stream = connect_plain(addr).map_err(|e| e.to_string())?;
+    // U-15 (audit #3): with a real keyHash the proxy hop MUST be TLS 1.3 pinned to
+    // it (PinVerifier) — plain TCP lets a MITM impersonate the destination router.
+    // An all-zero hash is accepted only for local dev/test engines.
+    let zero = [0u8; 32];
+    let mut stream: crate::transport::BoxStream = if dest_key_hash.len() == 32 && dest_key_hash != zero {
+        let kh: [u8; 32] = dest_key_hash.try_into().map_err(|_| "bad keyhash len".to_string())?;
+        crate::transport::connect_tls_sni(addr, dest_host, kh, true).map_err(|e| e.to_string())?
+    } else {
+        connect_plain(addr).map_err(|e| e.to_string())?
+    };
     // read dest server hello (has dest session pub in authPubKey)
     let sh = read_block(&mut stream).map_err(|e| e.to_string())?;
     let (v_min, v_max, dest_sid, auth) = parse_server_hello_key(&sh).map_err(|e| e.to_string())?;

@@ -26,17 +26,29 @@ use crate::protocol::{
 use crate::proxy::{reverse_nonce, PROXIED_T_LEN};
 
 /// One onion hop: relay address + its server ephemeral X25519 pub (from server hello).
+/// U-15: `tls`+`key_hash`+`host` describe a TLS 1.3 pinned connection to the hop;
+/// `tls == false` (all-zero key hash) is local dev/test only.
 #[derive(Clone, Debug)]
 pub struct OnionHop {
     pub addr: SocketAddr,
     pub server_pub: [u8; 32],
+    pub tls: bool,
+    pub host: String,
+    pub key_hash: [u8; 32],
 }
 
 /// Fetch a relay's ephemeral X25519 pub via a plain handshake (server hello authPubKey).
 pub fn fetch_hop(addr: SocketAddr) -> Result<OnionHop, String> {
     let c = Client::connect_plain(addr, &[0u8; 32])?;
     let server_pub = c.server_eph_pub.ok_or("server hello had no authPubKey")?;
-    Ok(OnionHop { addr, server_pub })
+    Ok(OnionHop { addr, server_pub, tls: false, host: addr.to_string(), key_hash: [0u8; 32] })
+}
+
+/// Fetch a relay's ephemeral pub over TLS 1.3 pinned to `key_hash` (U-15).
+pub fn fetch_hop_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> Result<OnionHop, String> {
+    let c = Client::connect_tls_sni(addr, host, key_hash, true)?;
+    let server_pub = c.server_eph_pub.ok_or("server hello had no authPubKey")?;
+    Ok(OnionHop { addr, server_pub, tls: true, host: host.to_string(), key_hash })
 }
 
 /// Send `cmd` (with `entity`, optionally signed with `auth_kp`) to `dest` through
@@ -52,7 +64,12 @@ pub fn onion_request(
     if hops.is_empty() {
         return Err("onion_request: at least one hop required".into());
     }
-    let mut entry = Client::connect_plain(hops[0].addr, &[0u8; 32])?;
+    // U-15: entry hop uses TLS 1.3 + pinning whenever the hop was fetched securely
+    let mut entry = if hops[0].tls {
+        Client::connect_tls_sni(hops[0].addr, &hops[0].host, hops[0].key_hash, true)?
+    } else {
+        Client::connect_plain(hops[0].addr, &[0u8; 32])?
+    };
     onion_request_with(
         &mut entry,
         hops,
