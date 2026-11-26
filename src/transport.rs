@@ -227,6 +227,11 @@ impl ServerCertVerifier for PinVerifier {
         // SEC-01: pin strictly to the last certificate in the chain (offline CA), never "any cert in chain".
         let pinned = intermediates.last().unwrap_or(end_entity);
         if cert_fingerprint(pinned.as_ref()) != self.key_hash {
+            // self-signed relay cert pinned directly by its own hash (stock simplex
+            // keyHash semantics): the pin IS the certificate, no chain to verify.
+            if cert_fingerprint(end_entity.as_ref()) == self.key_hash {
+                return Ok(ServerCertVerified::assertion());
+            }
             return Err(TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer));
         }
         // Verify the leaf is actually signed by the pinned CA (blocks [evil_leaf, pinned_CA] MITM).
