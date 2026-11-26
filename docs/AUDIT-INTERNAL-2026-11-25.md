@@ -63,16 +63,19 @@
 
 ## 4. Что осталось открытым (честно, не закрыто кодом)
 
-- **U-14 частично:** глобальный `agents()` mutex в FFI всё ещё держится во время сетевых
-  операций агента (нужен take-out/reinsert паттерн) — риск блокировки, не уязвимость.
-- **Per-IP лимит соединений не сделан** — только глобальный `MAX_CONNS`; per-IP остался в плане.
-- **TTL/GC для `by_rcv`/`xftp`/`proxies` не сделан** — только квоты; residual DoS-поверхность
-  ограничена квотами, но не вычищается по времени.
+- ~~**U-14**~~ **ЗАКРЫТО** (`e79c2ff`): FFI-операции переведены на take-out/reinsert
+  (`with_agent`) — глобальный mutex не держится во время сетевых операций.
+- ~~**Per-IP лимит**~~ **ЗАКРЫТ** (`e79c2ff`): `MAX_CONNS_PER_IP = 64` + счётчик per-IP в accept loop.
+- ~~**TTL/GC**~~ **ЗАКРЫТ** (`e79c2ff`): `ServerState::gc()` — очереди 30d / xftp 7d,
+  живые подписчики не жнутся; sweep каждые 30s в watcher; при load все записи штампуются now.
 - **P0-7:** channel binding сейчас через TLS exporter, а не raw Finished verify_data
   (нужен openssl-sys TlsBackend) — задокументировано в коде.
 - **`simplexmq/` — pełny 14M clone, не pinned submodule** (решение владельца).
-- **Fuzz-харнес расширен не полностью** (есть `tests/fuzz_parse.rs`; нет CI fuzz job и не все
-  парсеры в нём); **interop-CI против официального smp-server в Docker** не добавлен.
+- ~~**Fuzz-харнес**~~ **расширен** (`e79c2ff`, `tests/audit3_u25.rs::fuzz_parsers_never_panic`):
+  8 парсеров (parse_command/parse_broker/decode_ratchet_msg/parse_snapshot/agent_envelope/
+  AgentLink/parse_ntf_batch/handle_rfwd), мутационный фаззинг с catch_unwind — паник нет.
+  **CI fuzz job и interop-CI против официального smp-server в Docker** остались нев добавлены
+  (нужна сеть в CI).
 - **U-25/U-26** — ADR-решения владельца (X3DH/X448 dual-mode, agent-mode CLI), не код.
 - Косметика: комментарий в `scripts/ffi_smoke.sh:47` упоминает `$HOME/build`.
 - README/SECURITY: числа тестов/версии не генерируются из CI.
