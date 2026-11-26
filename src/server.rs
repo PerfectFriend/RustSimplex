@@ -163,7 +163,7 @@ pub fn init_router_store(bind: &str, host: &str, store: &std::path::Path, opts: 
     ensure_store_encryption(store, &opts)?;
     let st = new_state_persist_with_key(store.to_path_buf(), opts.key_bytes())?;
     let id = {
-        let mut g = st.lock().unwrap();
+        let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
         match &g.identity {
             Some(sid) => sid.to_router()?,
             None => {
@@ -1172,7 +1172,7 @@ impl Engine {
                 ensure_store_encryption(p, &opts)?;
                 let st = new_state_persist_with_key(p.clone(), key)?;
                 let id = {
-                    let mut g = st.lock().unwrap();
+                    let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
                     match &g.identity {
                         Some(sid) => sid.to_router()?,
                         None => {

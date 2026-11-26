@@ -157,3 +157,20 @@ jobs:
       - name: Scan tracked files
         run: bash scripts/check-tree-hygiene.sh
 
+  no-unwrap:
+    name: no unwrap/expect in library code (audit #3 U-23)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan src/
+        run: bash scripts/check_no_unwrap.sh
+
+  msrv:
+    name: MSRV check (rust-version = 1.87)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - name: cargo check on MSRV
+        run: cargo check --locked
+

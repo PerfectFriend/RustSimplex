@@ -4,9 +4,9 @@
 #        SKIP_LIVE=1 ./scripts/check.sh  # tests + clippy only (offline)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export PATH="$HOME/build/bin:$PATH"
-export CARGO_HOME="$HOME/build/rust/cargo"
-export CARGO_TARGET_DIR="$HOME/build/cache/cargo-target/simplex-rs"
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 cargo test --offline -- --test-threads=1
 cargo clippy --offline --all-targets
 if [ "${STRICT:-0}" = "1" ]; then

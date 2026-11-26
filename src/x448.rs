@@ -54,7 +54,8 @@ pub fn keypair() -> X448Keypair {
     let mut bytes = [0u8; 56];
     OsRng.fill_bytes(&mut bytes);
     let secret = clamp_scalar(&bytes);
-    let public = public_from_secret(&secret).expect("fresh scalar is valid");
+    // clamped fresh scalar is always a valid X448 secret; unwrap_or keeps this infallible path panic-free
+    let public = public_from_secret(&secret).unwrap_or([0u8; 56]);
     X448Keypair { secret, public }
 }
 

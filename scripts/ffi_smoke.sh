@@ -15,11 +15,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The local dev box has a vendored cargo registry under ~/build; CI does not.
 # CARGO_OFFLINE can be emptied to build against the network registry.
-if [ -d "$HOME/build/rust/cargo" ] && [ -z "${CARGO_HOME:-}" ]; then
-  export CARGO_HOME="$HOME/build/rust/cargo"
-  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/build/cache/cargo-target/simplex-rs}"
+if [ -d "${CARGO_HOME:-$HOME/.cargo}" ] && [ -z "${CARGO_HOME:-}" ]; then
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
   export CARGO_OFFLINE="${CARGO_OFFLINE:---offline}"
-  export PATH="$HOME/build/bin:$PATH"
+  export PATH="$HOME/.cargo/bin:$PATH"
 else
   export CARGO_OFFLINE="${CARGO_OFFLINE:-}"
 fi
@@ -47,14 +47,14 @@ echo "[3/5] locating JNA + the Kotlin stdlib"
 # `|| true`: on a clean CI runner $HOME/build and $HOME/.gradle do not exist, so `find`
 # exits non-zero; with `set -e -o pipefail` that aborted the script BEFORE the download
 # fallback below could run.
-JNA_JAR="${JNA_JAR:-$(find "$HOME/build" "$HOME/.gradle" -name 'jna-5*.jar' 2>/dev/null | sed -n '1p' || true)}"
+JNA_JAR="${JNA_JAR:-$(find /opt "$HOME/.gradle" -name 'jna-5*.jar' 2>/dev/null | sed -n '1p' || true)}"
 if [ -z "$JNA_JAR" ]; then
   echo "      JNA not found locally — downloading it"
   JNA_JAR="$OUT/jna.jar"
   curl -fsSL -o "$JNA_JAR" \
     https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar
 fi
-KSTD="${KOTLIN_STDLIB:-$(find "$HOME/build" -name 'kotlin-stdlib.jar' 2>/dev/null | sed -n '1p' || true)}"
+KSTD="${KOTLIN_STDLIB:-$(find /opt -name 'kotlin-stdlib.jar' 2>/dev/null | sed -n '1p' || true)}"
 if [ -z "$KSTD" ]; then
   echo "      Kotlin stdlib not found — downloading it"
   KSTD="$OUT/kotlin-stdlib.jar"

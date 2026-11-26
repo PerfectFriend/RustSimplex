@@ -8,9 +8,9 @@
 # 4) live PROXY attempt (expected to be refused: public relays disable proxy server-side)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export PATH="$HOME/build/bin:$PATH"
-export CARGO_HOME="$HOME/build/rust/cargo"
-export CARGO_TARGET_DIR="$HOME/build/cache/cargo-target/simplex-rs"
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 cargo build --offline --features v71-probes --bin smp-v71 --bin xftp-h2-v71
 ./scripts/live_public_smp.sh
 XB="$CARGO_TARGET_DIR/debug/xftp-h2-v71"

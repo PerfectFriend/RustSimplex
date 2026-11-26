@@ -27,9 +27,9 @@ HOST="${HOST:-smp11.simplex.im}"
 PORT="${PORT:-5223}"
 PIN="${PIN:?set PIN to the relay keyHash (base64url, no padding)}"
 
-export PATH="$HOME/build/bin:$PATH"
-export CARGO_HOME="${CARGO_HOME:-$HOME/build/rust/cargo}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/build/cache/cargo-target/simplex-rs}"
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 CARGO_OFFLINE="${CARGO_OFFLINE:---offline}"
 
 echo "relay: $HOST:$PORT"

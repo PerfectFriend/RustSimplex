@@ -118,7 +118,8 @@ pub fn relay_pfwd(conn: &Arc<Mutex<ProxyConn>>, pfwd_corr: &[u8], version: u16, 
     w_u16(&mut fwd, version);
     w_short(&mut fwd, command_key).map_err(|e| e.to_string())?;
     fwd.extend_from_slice(client_enc); // transmission tail, raw
-    let n: [u8; 24] = rfwd_corr.as_slice().try_into().expect("rfwd_corr is random_bytes(24)");
+    // infallible by construction (rfwd_corr = random_bytes(24)) but kept panic-free per the no-unwrap gate
+    let n: [u8; 24] = rfwd_corr.as_slice().try_into().map_err(|_| "rfwd_corr len".to_string())?;
     let outer = secretbox_encrypt(&g.sess_secret, &n, &fwd)?;
     let mut cmd = b"RFWD ".to_vec();
     cmd.extend_from_slice(&outer);

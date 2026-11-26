@@ -8,6 +8,17 @@ tag on push (`git tag vX.Y.Z` → GitHub Actions → crates.io publish + GitHub 
 Work in progress toward v1.0. See `docs/RELEASE-READINESS.md` for the readiness audit and the
 remaining gates.
 
+- audit #3 remediation (Sprints A/B/C, 2026-11-25): fail-closed E2E decode (U-01), RFWD fixed-array
+  try_into (U-02), SKEY by snd_id with mandatory signature + KEY sets rcv_auth (U-04), persist
+  revision+mutex race fix (U-05), fail-closed store update (U-06), x25519_dh_checked everywhere
+  (U-07), mandatory KEM ct on DH ratchet (U-08), NoVerify behind v71-probes (U-09), full SSRF
+  range guard incl. IPv4-mapped v6 (U-10), strict mode fails closed (U-11), ACK-after-decrypt and
+  no message loss in chat (U-12), conn cap + handshake timeout + store/XFTP quotas (U-13/U-19),
+  parser checked_add + SOCKS5 field lengths + debug-dump feature gate (U-20/U-20b), XFTP download
+  verify-before-rename with 0o600 tmp (U-17), reconnect re-SUB via send_only (U-18), TLS refuse
+  empty session binding (U-16), proxy/onion TLS+pinning (U-15), FFI pinned TLS + real msg_id
+  (U-03/U-21), CI hygiene+MSRV jobs, CHANGELOG dedup, portable scripts.
+
 ## v0.99.1 — library release candidate
 
 - **NTF client made reachable from library code**: `NtfClient` (`connect` with a mandatory
@@ -45,10 +56,4 @@ remaining gates.
 - fix(security): replace cx448 with RustCrypto x448 — clears RUSTSEC-2026-0387 (96d8f96)
 - docs: readiness revision 12 — v0.99.2 published with trilingual README (a85dda5)
 
-## v0.99.3
-
 - fix(release): keep the working tree clean for cargo publish (0c2d729)
-- fix(tests): remove hardcoded /home/thomas scratch path from the test suite (bbba0ab)
-- release: v0.99.3 — X448 security fix (RUSTSEC-2026-0387) + CI pipeline repair (41d1025)
-- fix(security): replace cx448 with RustCrypto x448 — clears RUSTSEC-2026-0387 (96d8f96)
-- docs: readiness revision 12 — v0.99.2 published with trilingual README (a85dda5)
