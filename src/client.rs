@@ -47,6 +47,8 @@ pub struct Client {
     pub server_key_hash: Vec<u8>,
     /// per-connection ephemeral X25519 pub from server hello (authPubKey), used for box auth
     pub server_eph_pub: Option<[u8; 32]>,
+    /// negotiated SMP version = min(client_max, server_max) from the server hello (plan item 15)
+    pub negotiated_version: Option<u16>,
     eph_priv: Option<[u8; 32]>,
     /// pushed MSG broker messages diverted aside by request() so a command response
     /// is never confused with a push (and vice versa); recv_block drains these first.
@@ -54,12 +56,13 @@ pub struct Client {
 }
 
 /// (sessionId, tlsBinding, keyHash) extracted from a server hello.
-pub type HandshakeKeys = (Vec<u8>, Option<[u8; 32]>, [u8; 32]);
+pub type HandshakeKeys = (Vec<u8>, Option<[u8; 32]>, [u8; 32], Option<u16>);
 
 impl Client {
     fn handshake(stream: &mut BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<HandshakeKeys> {
         let sh = read_block(stream).map_err(map_e)?;
-        let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+        let (s_min, s_max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+        let negotiated = crate::transport::negotiate_version(s_min, s_max, SMP_VERSION, SMP_VERSION);
         // channel binding (spec appendix A): client MUST assert sessionIdentifier == tls-unique.
         check_session_binding(&sid)?;
         // SEC-04: enforce binding when the relay supplied a non-empty sessionId (TLS Finished); plain/local sid is empty.
@@ -69,14 +72,14 @@ impl Client {
         let ch = client_hello_block_key(SMP_VERSION, key_hash, false, Some(spki_x25519(eph.public.as_bytes()))).map_err(map_e)?;
         write_block(stream, &ch).map_err(map_e)?;
         let eph = auth_spki.and_then(|der| parse_spki(&der).ok()).map(|(_a, raw)| raw);
-        Ok((sid, eph, eph_priv))
+        Ok((sid, eph, eph_priv, negotiated))
     }
 
     /// Run the SMP handshake over an already-connected stream (e.g. openssl probe),
     /// then return a ready Client. `tls_binding` = TLS exporter for channel binding.
     pub fn handshake_over(mut s: BoxStream, key_hash: &[u8], tls_binding: Option<&[u8]>) -> ClResult<Client> {
-        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, tls_binding)?;
-        let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() };
+        let (sid, eph, eph_priv, neg_v) = Self::handshake(&mut s, key_hash, tls_binding)?;
+        let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, negotiated_version: neg_v, eph_priv: Some(eph_priv), pending: Vec::new() };
         // The default is taken from the environment once, at connect time.
         let strict = std::env::var("SMP_STRICT").as_deref() == Ok("1");
         c.maybe_enable_strict(strict)?;
@@ -85,7 +88,7 @@ impl Client {
 
     /// Wrap an already-handshaken stream (used by async/proxy wrappers).
     pub fn from_stream(s: BoxStream, key_hash: [u8; 32]) -> Client {
-        Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, eph_priv: None, pending: Vec::new() }
+        Client { stream: s, session_id: vec![], strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: None, negotiated_version: None, eph_priv: None, pending: Vec::new() }
     }
 
     pub fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> ClResult<Client> {
@@ -102,8 +105,8 @@ impl Client {
     /// in parallel) cannot influence each other.
     pub fn connect_plain_with_strict(addr: SocketAddr, key_hash: &[u8], strict: bool) -> ClResult<Client> {
         let mut s = connect_plain(addr).map_err(map_e)?;
-        let (sid, eph, eph_priv) = Self::handshake(&mut s, key_hash, None)?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
+        let (sid, eph, eph_priv, neg_v) = Self::handshake(&mut s, key_hash, None)?;
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, negotiated_version: neg_v, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
     }
 
     pub fn connect_tls(addr: SocketAddr, host: &str, key_hash: [u8; 32]) -> ClResult<Client> {
@@ -150,8 +153,8 @@ impl Client {
         strict: bool,
     ) -> ClResult<Client> {
         let (mut s, binding) = crate::transport::connect_tls_sni_bound(addr, host, key_hash, with_sni).map_err(map_e)?;
-        let (sid, eph, eph_priv) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
-        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
+        let (sid, eph, eph_priv, neg_v) = Self::handshake(&mut s, &key_hash, Some(&binding))?;
+        { let mut c = Client { stream: s, session_id: sid, strict_snd: None, strict_rcv: None, server_key_hash: key_hash.to_vec(), server_eph_pub: eph, negotiated_version: neg_v, eph_priv: Some(eph_priv), pending: Vec::new() }; c.maybe_enable_strict(strict)?; Ok(c) }
     }
 
     /// Enable strict v23 transport block encryption for this session (requires authPubKey/sessSecret).
@@ -396,7 +399,7 @@ mod tests {
             strict_snd: None,
             strict_rcv: None,
             server_key_hash: vec![],
-            server_eph_pub: None,
+            server_eph_pub: None, negotiated_version: None,
             eph_priv: None,
             pending: Vec::new(),
         };

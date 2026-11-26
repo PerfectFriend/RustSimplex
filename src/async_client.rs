@@ -91,6 +91,8 @@ async fn write_block(stream: &mut Stream, block: &[u8]) -> Result<(), String> {
 
 /// An SMP client speaking the protocol over an async transport.
 pub struct AsyncSmpClient {
+    /// negotiated SMP version = min(client_max, server_max) from the server hello
+    pub negotiated_version: Option<u16>,
     stream: Option<Stream>,
     host: String,
     port: u16,
@@ -120,6 +122,7 @@ impl AsyncSmpClient {
             key_hash,
             tls,
             session_id: Vec::new(),
+            negotiated_version: None,
             strict_snd: None,
             strict_rcv: None,
             server_eph_pub: None,
@@ -152,7 +155,7 @@ impl AsyncSmpClient {
     pub async fn connect_plain(addr: SocketAddr, key_hash: &[u8]) -> Result<Self, String> {
         let tcp = TcpStream::connect(addr).await.map_err(map_e)?;
         let mut stream = Stream::Plain(tcp);
-        let (sid, eph, eph_priv) = handshake(&mut stream, key_hash, None).await?;
+        let (sid, eph, eph_priv, neg_v) = handshake(&mut stream, key_hash, None).await?;
         Ok(AsyncSmpClient {
             stream: Some(stream),
             host: addr.ip().to_string(),
@@ -165,6 +168,7 @@ impl AsyncSmpClient {
             },
             tls: false,
             session_id: sid,
+            negotiated_version: neg_v,
             strict_snd: None,
             strict_rcv: None,
             server_eph_pub: eph,
@@ -200,7 +204,7 @@ impl AsyncSmpClient {
         let tls = connector.connect(name, tcp).await.map_err(map_e)?;
         let mut stream = Stream::Tls(Box::new(tls));
         let binding = stream.exporter();
-        let (sid, eph, eph_priv) = handshake(&mut stream, &key_hash, binding.as_ref().map(|b| &b[..])).await?;
+        let (sid, eph, eph_priv, neg_v) = handshake(&mut stream, &key_hash, binding.as_ref().map(|b| &b[..])).await?;
         Ok(AsyncSmpClient {
             stream: Some(stream),
             host: host.to_string(),
@@ -208,6 +212,7 @@ impl AsyncSmpClient {
             key_hash,
             tls: true,
             session_id: sid,
+            negotiated_version: neg_v,
             strict_snd: None,
             strict_rcv: None,
             server_eph_pub: eph,
@@ -396,9 +401,10 @@ async fn handshake(
     stream: &mut Stream,
     key_hash: &[u8],
     tls_binding: Option<&[u8]>,
-) -> Result<(Vec<u8>, Option<[u8; 32]>, [u8; 32]), String> {
+) -> Result<(Vec<u8>, Option<[u8; 32]>, [u8; 32], Option<u16>), String> {
     let sh = read_block(stream).await?;
-    let (_min, _max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+    let (s_min, s_max, sid, auth_spki) = parse_server_hello_key(&sh).map_err(map_e)?;
+    let neg_v = crate::transport::negotiate_version(s_min, s_max, crate::protocol::SMP_VERSION, crate::protocol::SMP_VERSION);
     // channel binding (spec appendix A): the client asserts sessionIdentifier
     // equals the TLS binding.
     check_session_binding(&sid)?;
@@ -420,5 +426,5 @@ async fn handshake(
     let eph = auth_spki
         .and_then(|der| parse_spki(&der).ok())
         .map(|(_a, raw)| raw);
-    Ok((sid, eph, eph_priv))
+    Ok((sid, eph, eph_priv, neg_v))
 }

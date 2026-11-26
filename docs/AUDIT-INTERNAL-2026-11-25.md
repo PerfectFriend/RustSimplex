@@ -85,3 +85,11 @@
 Sprint A (блокеры релиза) закрыт полностью и протестирован. Sprint B закрыт, кроме пунктов
 раздела 4. Для публичного релиза рекомендую закрыть per-IP cap, TTL/GC и U-14 перед
 release-gate; остальное — в roadmap.
+
+
+## Continuation round 2026-11-26 (post-compaction)
+
+- **SX448 parity increment (ADR D1(a) follow-up)**: `DhAlg::{X25519,X448}` + `DhKey`/`DhPub` in pqdr ratchet; header SPKI parses as X25519 or X448; cross-alg rejected; low-order X448 rejected via contributory check (U-07); AEAD-style `ad` binds header into message key with `PQDR_VERSION_AD` on the wire; snapshot format v2 (version byte, back-compat with legacy). Tests `audit3_sx448` (7 tests incl. negotiation) green. Self-found bug during the round: v2 snapshot initially omitted `dh_s.public` — caught by `pqdr_snapshot_restore_continues_chain`, fixed.
+- **SMP version negotiation (plan item 15)**: `transport::negotiate_version(server_min, server_max, client_min, client_max) = min(client_max, server_max)` on overlap, `None` fail-closed otherwise; stored as `Client::negotiated_version` / `AsyncSmpClient::negotiated_version` from the server hello.
+- **Live interop executed locally (D5 verification, not just CI plan)**: `scripts/live_interop.sh` against public relays — SMP v17..v23 OK, XFTP v4 transport PONG OK (full file cycle incl. 1MiB chunked verified in prior round), NTF v3 PING->PONG OK, all CA-pinned; proxy probe correctly refused server-side (`CMD SYNTAX`). Result recorded here; CI job remains (b) until Docker runners.
+- State: 209/0 tests (ffi 210/0), clippy 0 warnings (lib+targets+ffi), gates `check_no_unwrap`/`check-tree-hygiene` OK, MSRV 1.87 CI job passing.

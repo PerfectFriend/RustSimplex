@@ -48,6 +48,16 @@ pub fn server_hello_block_key(min_v: u16, max_v: u16, session_id: &[u8], auth_pu
     pad(&c, BLOCK_SIZE)
 }
 
+/// SMP version negotiation (plan item 15): the effective version is
+/// `min(client_max, server_max)` when the ranges overlap, else no common version.
+pub fn negotiate_version(server_min: u16, server_max: u16, client_min: u16, client_max: u16) -> Option<u16> {
+    if server_max < client_min || client_max < server_min {
+        None
+    } else {
+        Some(client_max.min(server_max))
+    }
+}
+
 pub fn parse_server_hello(block: &[u8]) -> Result<(u16, u16, Vec<u8>), EncodeError> {
     let (min, max, sid, _auth) = parse_server_hello_key(block)?;
     Ok((min, max, sid))

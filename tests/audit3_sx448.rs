@@ -107,3 +107,12 @@ fn low_order_x448_pub_rejected() {
     );
     assert!(alice.is_err(), "low-order X448 peer key must be rejected (U-07)");
 }
+
+#[test]
+fn smp_version_negotiation_min_of_max() {
+    use smp_rs::transport::negotiate_version;
+    // overlap -> min(client_max, server_max) (plan item 15)
+    assert_eq!(negotiate_version(15, 23, 17, 23), Some(23));
+    assert_eq!(negotiate_version(15, 20, 17, 23), Some(20));
+    assert_eq!(negotiate_version(20, 23, 17, 19), None, "no overlap -> fail-closed");
+}
