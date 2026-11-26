@@ -84,6 +84,8 @@ pub struct ReconnectingClient {
     backoff_count: u64,
     /// the sum of all applied delays
     total_backoff: Duration,
+    /// U-18: active subscriptions (rcv_id + auth secret) — re-SUBed after every reconnect
+    subs: Vec<(Vec<u8>, Option<[u8; 32]>)>,
 }
 
 impl ReconnectingClient {
@@ -106,6 +108,7 @@ impl ReconnectingClient {
             applied: Vec::new(),
             backoff_count: 0,
             total_backoff: Duration::ZERO,
+            subs: Vec::new(),
         }
     }
 
@@ -195,7 +198,38 @@ impl ReconnectingClient {
             Client::connect_plain(self.ep.addr, &self.ep.key_hash)?
         };
         self.inner = Some(c);
+        // U-18: the server forgets subscribers when a connection drops — restore
+        // every recorded SUB on each (re)connect.
+        let subs = std::mem::take(&mut self.subs);
+        let mut res: ClResult<()> = Ok(());
+        for (rcv_id, secret) in &subs {
+            let auth = secret.map(|s| {
+                let sk = ed25519_dalek::SigningKey::from_bytes(&s);
+                let vk = sk.verifying_key();
+                crate::crypto::Ed25519Keypair { signing: sk, verifying: vk }
+            });
+            if let Some(c) = self.inner.as_mut() {
+                // send_only, NOT request: the server answers SUB with SOK **and** a
+                // pushed MSG in the same block — request() would swallow the MSG.
+                if let Err(e) = c.send_only(Command::Sub, rcv_id.clone(), auth.as_ref()) {
+                    res = Err(e);
+                    break;
+                }
+            }
+        }
+        self.subs = subs;
+        res?;
         Ok(())
+    }
+
+    /// Subscribe to a queue and REMEMBER it — restored automatically after reconnect.
+    pub fn subscribe(&mut self, rcv_id: Vec<u8>, auth: Option<&Ed25519Keypair>) -> ClResult<Vec<BrokerMsg>> {
+        self.ensure(3)?;
+        let r = self.conn()?.request(Command::Sub, rcv_id.clone(), auth)?;
+        if !r.iter().any(|m| matches!(m, BrokerMsg::Err(_))) && !self.subs.iter().any(|(id, _)| *id == rcv_id) {
+            self.subs.push((rcv_id, auth.map(|k| k.signing.to_bytes())));
+        }
+        Ok(r)
     }
 
     /// Enable strict v23 blocks; remembers the secret for reconnects.

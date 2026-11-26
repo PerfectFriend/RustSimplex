@@ -872,6 +872,11 @@ pub fn handle_conn(
     };
     // in TLS mode sessionId = TLS channel binding; in plain mode it stays empty
     let session_id: Vec<u8> = tls_binding.unwrap_or_default();
+    // U-16/H10: in TLS mode an EMPTY session id means the channel binding failed —
+    // refuse the connection instead of running with a zero session id.
+    if matches!(mode, Mode::Tls(_)) && session_id.is_empty() {
+        return Err(io_err("TLS mode: empty session binding — refusing connection"));
+    }
     // --- phase 1: blocking handshake (drives the TLS handshake too) ---
     // per-engine stable ephemeral X25519 key (authPubKey in server hello)
     let eph = x25519_from_secret(st.lock().unwrap_or_else(|e| e.into_inner()).eph_secret);
