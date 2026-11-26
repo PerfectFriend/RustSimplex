@@ -20,6 +20,23 @@ fn next_id() -> u64 {
     id
 }
 
+/// Run `f` on the agent handle WITHOUT holding the global agents() lock during the
+/// (possibly blocking, network-bound) operation: take the agent out, run, reinsert.
+/// U-14 (audit #3): the old code held the global mutex across accept/await/recv,
+/// serializing every agent in the process on one slow handle.
+fn with_agent<T>(id: u64, f: impl FnOnce(&mut Agent) -> Result<T, String>) -> Result<T, String> {
+    let mut g = agents().lock().unwrap_or_else(|e| e.into_inner());
+    if g.contains_key(&id) {
+        let mut agent = g.remove(&id).ok_or("bad handle")?;
+        drop(g);
+        let r = f(&mut agent);
+        agents().lock().unwrap_or_else(|e| e.into_inner()).insert(id, agent);
+        r
+    } else {
+        Err("bad handle".into())
+    }
+}
+
 fn kh_from_hex(s: &str) -> Result<[u8; 32], String> {
     let v = crate::xftp::unhex(s).ok_or("bad keyhash hex")?;
     <[u8; 32]>::try_from(v.as_slice()).map_err(|_| "keyhash must be 32 bytes".to_string())
@@ -79,14 +96,14 @@ pub fn join_contact_tls(host: &str, port: u16, key_hash_hex: &str, link: &str) -
 }
 
 pub fn accept_contact(id: u64) -> Result<(), String> {
-    agents().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id).ok_or("bad handle")?.accept_contact()
+    with_agent(id, |a| a.accept_contact())
 }
 pub fn await_hello(id: u64) -> Result<(), String> {
-    agents().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id).ok_or("bad handle")?.await_hello()
+    with_agent(id, |a| a.await_hello())
 }
 pub fn send_msg(id: u64, body_hex: &str) -> Result<i64, String> {
     let body = crate::xftp::unhex(body_hex).ok_or("bad body hex")?;
-    agents().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id).ok_or("bad handle")?.send_msg(&body)
+    with_agent(id, |a| a.send_msg(&body))
 }
 /// Receive next agent message; returns hex of raw agent wire (caller decrypts/parses in Kotlin layer if needed).
 pub fn recv_agent_hex(id: u64) -> Result<String, String> {
@@ -97,7 +114,7 @@ pub fn recv_agent_hex(id: u64) -> Result<String, String> {
 /// prev_hash of the agent message (hex) — the old version discarded msg_id and
 /// passed a zero prev_hash to encode_agent.
 pub fn recv_agent_full(id: u64) -> Result<(String, String, String), String> {
-    let (mid, am) = agents().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id).ok_or("bad handle")?.recv_agent()?;
+    let (mid, am) = with_agent(id, |a| a.recv_agent())?;
     let prev = match &am {
         crate::agent::AgentMsg::Msg { prev_hash, .. } => prev_hash.clone(),
         _ => Vec::new(),

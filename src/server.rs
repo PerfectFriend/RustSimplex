@@ -55,6 +55,50 @@ pub struct ServerState {
     /// Not serialized — both start at 0 after a load, so the first mutation persists.
     pub revision: u64,
     pub persisted_revision: u64,
+    /// last-activity timestamps (unix secs), NOT serialized; populated at load
+    pub touches: HashMap<Vec<u8>, u64>,
+    pub xftp_touch: HashMap<Vec<u8>, u64>,
+}
+
+impl ServerState {
+    /// TTL sweep: reaps queues and xftp packets idle longer than their TTL.
+    /// A queue with a LIVE subscriber (or ntf subscriber) is never reaped.
+    /// Returns the number of removed entries.
+    pub fn gc(&mut self, now: u64) -> usize {
+        let mut removed = 0;
+        let ids: Vec<Vec<u8>> = self
+            .by_rcv
+            .iter()
+            .filter(|(id, q)| {
+                q.subscriber.is_none()
+                    && q.ntf_subscriber.is_none()
+                    && self.touches.get(*id).map(|t| now.saturating_sub(*t) > QUEUE_TTL_SECS).unwrap_or(false)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(q) = self.by_rcv.remove(&id) {
+                self.by_snd.remove(&q.snd_id);
+                if let Some(n) = q.ntf_id {
+                    self.by_ntf.remove(&n);
+                }
+                self.touches.remove(&id);
+                removed += 1;
+            }
+        }
+        let pids: Vec<Vec<u8>> = self
+            .xftp
+            .iter()
+            .filter(|(pid, _)| self.xftp_touch.get(*pid).map(|t| now.saturating_sub(*t) > XFTP_TTL_SECS).unwrap_or(false))
+            .map(|(pid, _)| pid.clone())
+            .collect();
+        for pid in pids {
+            self.xftp.remove(&pid);
+            self.xftp_touch.remove(&pid);
+            removed += 1;
+        }
+        removed
+    }
 }
 
 /// Serializes store snapshots+writes across connection threads (U-05): without it,
@@ -78,7 +122,7 @@ pub struct ConnCtx {
 impl ServerState {
     pub fn new() -> Self {
         let kp = x25519_keypair();
-        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, persist_key: None, identity: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes(), revision: 0, persisted_revision: 0 }
+        ServerState { by_rcv: HashMap::new(), by_snd: HashMap::new(), by_ntf: HashMap::new(), proxies: HashMap::new(), xftp: HashMap::new(), persist: None, persist_key: None, identity: None, eph_secret: kp.secret.to_bytes(), eph_pub: kp.public.to_bytes(), revision: 0, persisted_revision: 0, touches: HashMap::new(), xftp_touch: HashMap::new() }
     }
     pub fn persist_now(&self) {
         if let Some(p) = &self.persist {
@@ -117,9 +161,19 @@ pub fn new_state_persist(path: std::path::PathBuf) -> Result<Arc<Mutex<ServerSta
 
 /// Load a persistent server state with an explicit store key (no env lookup).
 pub fn new_state_persist_with_key(path: std::path::PathBuf, key: Option<[u8; 32]>) -> Result<Arc<Mutex<ServerState>>, String> {
+    // NOTE: touches are (re)populated by the caller right after load.
     let mut st = crate::store::load_checked_with_key(&path, key)?.unwrap_or_default();
     st.persist = Some(path);
     st.persist_key = key.map(crate::store::StoreKey::from_bytes);
+    // a freshly loaded store must not be reaped by the first gc tick — stamp all
+    // loaded queues/packets as touched now
+    let now = now_secs();
+    for id in st.by_rcv.keys() {
+        st.touches.insert(id.clone(), now);
+    }
+    for pid in st.xftp.keys() {
+        st.xftp_touch.insert(pid.clone(), now);
+    }
     Ok(Arc::new(Mutex::new(st)))
 }
 
@@ -268,6 +322,18 @@ fn dispatch(
             | Command::Nkey { .. } | Command::Nsub | Command::Ndel
             | Command::Fnew { .. } | Command::Fput { .. } | Command::Fdel { .. }
     );
+    {
+        let mut g = lock_state(st);
+        let now = now_secs();
+        if !t.entity_id.is_empty() && g.by_rcv.contains_key(&t.entity_id) {
+            g.touches.insert(t.entity_id.clone(), now);
+        }
+        if let Command::Fput { packet_id, .. } | Command::Fget { packet_id, .. } | Command::Fdel { packet_id } = &cmd {
+            if g.xftp.contains_key(packet_id) {
+                g.xftp_touch.insert(packet_id.clone(), now);
+            }
+        }
+    }
     let out = dispatch_cmd(cmd, t, st, session_id, outbox, ctx);
     // U-05/H1: persist only on a REAL mutation — a command that came back with ERR
     // changed nothing (e.g. SEND with a foreign snd_id gets ERR AUTH) and must not
@@ -370,6 +436,7 @@ fn dispatch_cmd(
                     ntf_subscriber: None,
                 });
                 s.by_snd.insert(snd_id.clone(), rcv_id.clone());
+                s.touches.insert(rcv_id.clone(), now_secs());
             }
             vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Ids {
                 rcv_id, snd_id, rcv_dh_key: srv_dh_der,
@@ -608,10 +675,14 @@ fn dispatch_cmd(
                 }
             }
             let packet_id = random_bytes(16);
-            lock_state(st).xftp.insert(
+            {
+                let mut g = lock_state(st);
+                g.xftp_touch.insert(packet_id.clone(), now_secs());
+                g.xftp.insert(
                 packet_id.clone(),
                 crate::xftp::XftpPacket { size, digest, sender_raw, chunks: Default::default() },
-            );
+                );
+            }
             vec![resp_np!(t.corr_id.clone(), vec![], BrokerMsg::Fid { packet_id })]
         }
         Command::Fput { packet_id, offset, chunk } => {
@@ -1082,6 +1153,9 @@ pub struct Engine {
     /// U-13: live connection counter + cap; the accept loop drops excess connections.
     pub conns: Arc<std::sync::atomic::AtomicUsize>,
     pub max_conns: usize,
+    /// per-source-IP connection counter + cap (slowloris from one host)
+    pub per_ip: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+    pub max_conns_per_ip: usize,
 }
 
 impl Engine {
@@ -1124,6 +1198,8 @@ impl Engine {
             allow_local_proxy,
             conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_conns: MAX_CONNS,
+            per_ip: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            max_conns_per_ip: MAX_CONNS_PER_IP,
         })
     }
 
@@ -1199,6 +1275,8 @@ impl Engine {
             allow_local_proxy: std::env::var_os("SMP_ALLOW_LOCAL_PROXY").is_some(),
             conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_conns: MAX_CONNS,
+            per_ip: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            max_conns_per_ip: MAX_CONNS_PER_IP,
         })
     }
 
@@ -1238,13 +1316,23 @@ impl Engine {
         let shutdown_flag = self.shutdown.clone();
         let watcher_stop = std::sync::Arc::new(AtomicBool::new(false));
         let watcher_stop_thread = watcher_stop.clone();
+        let st_gc = self.state.clone();
         let watcher = self.listener.local_addr().ok().map(|addr| {
             thread::spawn(move || {
+                let mut last_gc = std::time::Instant::now();
                 while !watcher_stop_thread.load(Ordering::Relaxed) {
                     if shutdown_flag.load(Ordering::Relaxed) {
                         // Wake the accept loop with a connection it will drop.
                         let _ = std::net::TcpStream::connect(addr);
                         return;
+                    }
+                    // TTL sweep (U-19): reap idle queues/xftp packets every 30 s
+                    if last_gc.elapsed() >= std::time::Duration::from_secs(30) {
+                        last_gc = std::time::Instant::now();
+                        let n = lock_state(&st_gc).gc(now_secs());
+                        if n > 0 && std::env::var_os("SMP_DEBUG").is_some() {
+                            eprintln!("[engine] gc reaped {n} idle entries");
+                        }
                     }
                     thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -1255,8 +1343,8 @@ impl Engine {
             if self.shutdown.load(Ordering::Relaxed) {
                 break Ok(());
             }
-            let tcp = match self.listener.accept() {
-                Ok((t, _peer)) => t,
+            let (tcp, peer) = match self.listener.accept() {
+                Ok((t, peer)) => (t, peer),
                 Err(e) => {
                     if self.shutdown.load(Ordering::Relaxed) {
                         break Ok(());
@@ -1278,12 +1366,32 @@ impl Engine {
                 drop(tcp);
                 continue;
             }
+            // per-IP cap: one host cannot exhaust the global budget
+            let ip = peer.ip();
+            {
+                let mut m = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+                let e = m.entry(ip).or_insert(0);
+                if *e >= self.max_conns_per_ip {
+                    drop(m);
+                    self.conns.fetch_sub(1, Ordering::Relaxed);
+                    drop(tcp);
+                    continue;
+                }
+                *e += 1;
+            }
             let st = self.state.clone();
             let mode = self.mode.clone();
             let conns = self.conns.clone();
+            let per_ip = self.per_ip.clone();
+            let dec = move |per_ip: &Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>| {
+                if let Some(e) = per_ip.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&ip) {
+                    *e = e.saturating_sub(1);
+                }
+            };
             match thread::Builder::new().name("smp-conn".into()).spawn(move || {
                 let r = handle_conn(tcp, &mode, st, strict, allow_local_proxy);
                 conns.fetch_sub(1, Ordering::Relaxed);
+                dec(&per_ip);
                 if let Err(e) = r {
                     if std::env::var_os("SMP_DEBUG").is_some() {
                         eprintln!("[engine] conn error: {e}");
@@ -1294,6 +1402,9 @@ impl Engine {
                 Err(e) => {
                     eprintln!("[engine] failed to spawn conn thread: {e}");
                     self.conns.fetch_sub(1, Ordering::Relaxed);
+                    if let Some(en) = self.per_ip.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&ip) {
+                        *en = en.saturating_sub(1);
+                    }
                 }
             }
         };
@@ -1396,6 +1507,14 @@ const MAX_QUEUE_MSGS: usize = 1000;
 
 /// U-13: resource caps per engine — bound threads/memory against unauthenticated abuse.
 pub const MAX_CONNS: usize = 1024;
+pub const MAX_CONNS_PER_IP: usize = 64;
+/// TTL sweep bounds (idle queues / xftp packets are reaped; live subscribers never).
+pub const QUEUE_TTL_SECS: u64 = 30 * 24 * 3600;
+pub const XFTP_TTL_SECS: u64 = 7 * 24 * 3600;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 pub const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// U-19: store quotas.
 pub const MAX_QUEUES: usize = 100_000;
