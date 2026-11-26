@@ -31,6 +31,100 @@ pub const MAX_SKIPPED_TOTAL: usize = 4096;
 /// DH+KEM keys on its own.
 pub const DEFAULT_ROTATE_EVERY: u32 = 1024;
 
+/// Wire version that binds the encoded header into the message key (AEAD-style `ad`,
+/// part of SX448 parity). Legacy frames use PQDR_VERSION and skip the binding.
+pub const PQDR_VERSION_AD: u16 = PQDR_VERSION + 1;
+
+/// DH ratchet key algorithm (ADR D1(a) dual-mode): X25519 = legacy wire, X448 = stock
+/// SimpleX (SX448) wire compatibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DhAlg { X25519, X448 }
+
+impl DhAlg {
+    pub fn to_u8(self) -> u8 { match self { DhAlg::X25519 => 1, DhAlg::X448 => 2 } }
+    pub fn from_u8(b: u8) -> Option<DhAlg> { match b { 1 => Some(DhAlg::X25519), 2 => Some(DhAlg::X448), _ => None } }
+}
+
+#[derive(Clone)]
+pub enum DhKey {
+    X25519(X25519Keypair),
+    X448(crate::x448::X448Keypair),
+}
+
+#[derive(Clone)]
+pub enum DhPub {
+    X25519(XPublic),
+    X448([u8; 56]),
+}
+
+impl DhKey {
+    pub fn gen(alg: DhAlg) -> DhKey {
+        match alg {
+            DhAlg::X25519 => DhKey::X25519(x25519_keypair()),
+            DhAlg::X448 => DhKey::X448(crate::x448::keypair()),
+        }
+    }
+    pub fn public(&self) -> DhPub {
+        match self {
+            DhKey::X25519(k) => DhPub::X25519(k.public),
+            DhKey::X448(k) => DhPub::X448(k.public),
+        }
+    }
+    pub fn spki(&self) -> Vec<u8> {
+        match self {
+            DhKey::X25519(k) => crate::crypto::spki_x25519(&k.public.to_bytes()),
+            DhKey::X448(k) => crate::x448::spki_x448(&k.public),
+        }
+    }
+    pub fn secret_bytes(&self) -> Vec<u8> {
+        match self {
+            DhKey::X25519(k) => k.secret.to_bytes().to_vec(),
+            DhKey::X448(k) => k.secret.to_vec(),
+        }
+    }
+    pub fn alg(&self) -> DhAlg {
+        match self { DhKey::X25519(_) => DhAlg::X25519, DhKey::X448(_) => DhAlg::X448 }
+    }
+    /// Contributory-checked DH (U-07): alg mismatch or low-order/non-contributory
+    /// output is an Err, never a silent all-zero accept.
+    pub fn dh_checked(&self, peer: &DhPub) -> Result<Vec<u8>, String> {
+        match (self, peer) {
+            (DhKey::X25519(a), DhPub::X25519(b)) => Ok(x25519_dh_checked(&a.secret, b)?.to_vec()),
+            (DhKey::X448(a), DhPub::X448(b)) => crate::x448::dh(&a.secret, b)
+                .map(|d| d.to_vec())
+                .ok_or_else(|| "x448: non-contributory DH output".to_string()),
+            _ => Err("dh alg mismatch".into()),
+        }
+    }
+}
+
+impl DhPub {
+    pub fn raw(&self) -> Vec<u8> {
+        match self { DhPub::X25519(p) => p.to_bytes().to_vec(), DhPub::X448(p) => p.to_vec() }
+    }
+    pub fn alg(&self) -> DhAlg {
+        match self { DhPub::X25519(_) => DhAlg::X25519, DhPub::X448(_) => DhAlg::X448 }
+    }
+    pub fn from_spki(der: &[u8]) -> Result<DhPub, String> {
+        if let Ok((crate::crypto::AuthAlg::X25519, raw)) = crate::crypto::parse_spki(der) {
+            return Ok(DhPub::X25519(x25519_public(raw)));
+        }
+        if let Some(raw) = crate::x448::parse_spki_x448(der) {
+            return Ok(DhPub::X448(raw));
+        }
+        Err("dh spki: unknown algorithm".into())
+    }
+}
+
+/// Bind the encoded header into the message key (AEAD `ad` semantics without pulling a
+/// new cipher dep): mk_ad = HKDF-SHA512(salt=mk, ikm=headerBytes, info="SimpleXMsgAD")[:32].
+fn ad_bind(mk: &[u8; 32], header_bytes: &[u8]) -> [u8; 32] {
+    let out = hkdf(mk, header_bytes, b"SimpleXMsgAD", 32);
+    let mut k = [0u8; 32];
+    k.copy_from_slice(&out);
+    k
+}
+
 /// When the ratchet rotates its DH+KEM keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RotationSchedule {
@@ -52,6 +146,10 @@ pub struct RatchetConfig {
     pub rotation: RotationSchedule,
     /// how many messages of a chain may arrive out of order
     pub max_skip: u32,
+    /// DH ratchet key algorithm (SX448 parity; default X25519 = legacy wire)
+    pub dh_alg: DhAlg,
+    /// bind the encoded header into the message key (AEAD `ad`); bumps wire version
+    pub aead_ad: bool,
 }
 
 impl Default for RatchetConfig {
@@ -59,6 +157,8 @@ impl Default for RatchetConfig {
         RatchetConfig {
             rotation: RotationSchedule::EveryMessages(DEFAULT_ROTATE_EVERY),
             max_skip: MAX_SKIP,
+            dh_alg: DhAlg::X25519,
+            aead_ad: false,
         }
     }
 }
@@ -120,7 +220,7 @@ fn hkdf3(salt: &[u8], ikm: &[u8], info: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32])
 }
 
 /// rootKdf: (RK', CK, NHK) = hkdf3(rk, dh || kem_ss, "SimpleXRootRatchet")
-fn root_kdf(rk: &[u8; 32], dh: &[u8; 32], kem_ss: Option<&[u8; 32]>) -> ([u8; 32], [u8; 32], [u8; 32]) {
+fn root_kdf(rk: &[u8; 32], dh: &[u8], kem_ss: Option<&[u8; 32]>) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut ikm = dh.to_vec();
     if let Some(ss) = kem_ss {
         ikm.extend_from_slice(ss);
@@ -207,8 +307,10 @@ pub struct PqdrRatchet {
     /// root key the PEER will use when processing our next DH ratchet (== rk1 of our last decrypt);
     /// `rotate()` derives from this, not from `rk` (which holds our own send-chain root)
     rk_peer: Option<[u8; 32]>,
-    pub dh_s: X25519Keypair, // our current DH ratchet private key
-    pub dh_r: XPublic,       // peer's current DH ratchet public key
+    pub dh_s: DhKey, // our current DH ratchet private key
+    pub dh_r: DhPub, // peer's current DH ratchet public key
+    pub dh_alg: DhAlg,
+    pub aead_ad: bool,
     pub cks: [u8; 32],       // sending chain key
     pub ckr: Option<[u8; 32]>, // receiving chain key
     pub nhks: [u8; 32],      // next header key (sending)
@@ -243,32 +345,28 @@ pub struct PqdrRatchet {
     pub_is_new: bool,
 }
 
-type SkippedKey = ([u8; 32], u32, [u8; 32], [u8; 16]);
-
-fn dh_pub_raw(kp: &X25519Keypair) -> [u8; 32] {
-    kp.public.to_bytes()
-}
+type SkippedKey = (Vec<u8>, u32, [u8; 32], [u8; 16]);
 
 impl PqdrRatchet {
     /// Sender init (Alice): SK = initial shared secret from X3DH-style key agreement.
     /// Bob's DH pub `dh_r` and KEM pub `kem_r` come from the connection request.
     pub fn init_sender(sk: &[u8; 32], ad: Vec<u8>, dh_r: XPublic, kem_r: Vec<u8>) -> Result<PqdrRatchet, String> {
-        Self::init_sender_with_config(sk, ad, dh_r, kem_r, RatchetConfig::default())
+        Self::init_sender_with_config(sk, ad, DhPub::X25519(dh_r), kem_r, RatchetConfig::default())
     }
 
     /// Sender init with an explicit policy (rotation schedule + reorder window).
     pub fn init_sender_with_config(
         sk: &[u8; 32],
         ad: Vec<u8>,
-        dh_r: XPublic,
+        dh_r: DhPub,
         kem_r: Vec<u8>,
         cfg: RatchetConfig,
     ) -> Result<PqdrRatchet, String> {
-        let dh_s = x25519_keypair();
+        let dh_s = DhKey::gen(cfg.dh_alg);
         let kem_s = kem_keypair();
         // KEM #1 at init: encapsulate against Bob's KEM key (peer-supplied — validate, never panic)
         let (ct, ss) = kem_encaps_pub(&kem_r)?;
-        let dh = x25519_dh_checked(&dh_s.secret, &dh_r)?;
+        let dh = dh_s.dh_checked(&dh_r)?;
         let (rk, cks, nhks) = root_kdf(sk, &dh, Some(&ss));
         let kem_pk = kem_s.ek.as_ref().to_vec();
         Ok(PqdrRatchet {
@@ -277,6 +375,8 @@ impl PqdrRatchet {
             rk_peer: Some(rk),
             dh_s,
             dh_r,
+            dh_alg: cfg.dh_alg,
+            aead_ad: cfg.aead_ad,
             cks,
             ckr: None,
             nhks,
@@ -302,26 +402,28 @@ impl PqdrRatchet {
     /// DH ratchet step using Alice's DH/KEM params from her first header — so `dh_r`
     /// starts as a placeholder (own pub) that never matches.
     pub fn init_receiver(sk: &[u8; 32], ad: Vec<u8>, dh_s: X25519Keypair, kem_s: KemKeypair, kem_r: Vec<u8>) -> PqdrRatchet {
-        Self::init_receiver_with_config(sk, ad, dh_s, kem_s, kem_r, RatchetConfig::default())
+        Self::init_receiver_with_config(sk, ad, DhKey::X25519(dh_s), kem_s, kem_r, RatchetConfig::default())
     }
 
     /// Receiver init with an explicit policy (rotation schedule + reorder window).
     pub fn init_receiver_with_config(
         sk: &[u8; 32],
         ad: Vec<u8>,
-        dh_s: X25519Keypair,
+        dh_s: DhKey,
         kem_s: KemKeypair,
         kem_r: Vec<u8>,
         cfg: RatchetConfig,
     ) -> PqdrRatchet {
         let rk = *sk;
-        let dh_r = dh_s.public;
+        let dh_r = dh_s.public();
         PqdrRatchet {
             ad,
             rk,
             rk_peer: None,
             dh_s,
             dh_r,
+            dh_alg: cfg.dh_alg,
+            aead_ad: cfg.aead_ad,
             cks: [0u8; 32],
             ckr: None,
             nhks: [0u8; 32],
@@ -361,16 +463,19 @@ impl PqdrRatchet {
         let mut nonce = [0u8; 24];
         nonce[..16].copy_from_slice(&iv1);
         nonce[16..].copy_from_slice(&(n as u64).to_be_bytes());
-        let body = secretbox_encrypt(&mk, &nonce, plaintext)?;
-        self.cks = cks;
-        self.ns += 1;
         let hdr = MsgHeader {
-            max_version: PQDR_VERSION,
-            dh_pub_spki: crate::crypto::spki_x25519(&dh_pub_raw(&self.dh_s)),
+            max_version: if self.aead_ad { PQDR_VERSION_AD } else { PQDR_VERSION },
+            dh_pub_spki: self.dh_s.spki(),
             kem: self.header_kem(),
             pn: self.pn,
             ns: n,
         };
+        let hdr_bytes = encode_msg_header(&hdr);
+        // AEAD `ad`: the encoded header is bound into the message key (SX448 parity)
+        let mk_eff = if self.aead_ad { ad_bind(&mk, &hdr_bytes) } else { mk };
+        let body = secretbox_encrypt(&mk_eff, &nonce, plaintext)?;
+        self.cks = cks;
+        self.ns += 1;
         let out = encode_ratchet_msg(&RatchetMsg { header: hdr, body });
         self.sent_since_rotation = self.sent_since_rotation.saturating_add(1);
         if self.pub_is_new {
@@ -468,9 +573,9 @@ impl PqdrRatchet {
         }
         // mirror the receiver's DH-ratchet step: fresh DH+KEM pair, then
         // RK, CKs, NHKs = rootKdf(RK, DH(newDHs, DHRr) || ss)
-        let dh_new = x25519_keypair();
+        let dh_new = DhKey::gen(self.dh_alg);
         let kem_new = kem_keypair();
-        let dh1 = x25519_dh_checked(&dh_new.secret, &self.dh_r)?;
+        let dh1 = dh_new.dh_checked(&self.dh_r)?;
         let (ct, ss) = kem_encaps_pub(&peer_kem)?;
         let (rk1, cks, nhks) = root_kdf(&base, &dh1, Some(&ss));
         self.rk = rk1;
@@ -510,8 +615,19 @@ impl PqdrRatchet {
     fn decrypt_inner(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let msg = decode_ratchet_msg(wire).map_err(|e| e.to_string())?;
         let hdr = &msg.header;
-        let (_, dh_raw) = crate::crypto::parse_spki(&hdr.dh_pub_spki).map_err(|e| e.to_string())?;
-        let dh_pub = x25519_public(dh_raw);
+        let dh_pub = DhPub::from_spki(&hdr.dh_pub_spki).map_err(|e| e.to_string())?;
+        if dh_pub.alg() != self.dh_alg {
+            return Err("dh alg mismatch".into());
+        }
+        let dh_raw = dh_pub.raw();
+        // AEAD `ad`: frames with the AD wire version bind the header into the msg key
+        let mk_eff = |mk: &[u8; 32]| -> [u8; 32] {
+            if hdr.max_version >= PQDR_VERSION_AD {
+                ad_bind(mk, &encode_msg_header(hdr))
+            } else {
+                *mk
+            }
+        };
 
         // 1) try skipped message keys first
         if let Some(pos) = self.skipped.iter().position(|(d, n, _, _)| *d == dh_raw && *n == hdr.ns) {
@@ -519,11 +635,11 @@ impl PqdrRatchet {
             let mut nonce = [0u8; 24];
             nonce[..16].copy_from_slice(&iv1);
             nonce[16..].copy_from_slice(&(hdr.ns as u64).to_be_bytes());
-            return secretbox_decrypt(&mk, &nonce, &msg.body).ok_or_else(|| "AUTH".to_string());
+            return secretbox_decrypt(&mk_eff(&mk), &nonce, &msg.body).ok_or_else(|| "AUTH".to_string());
         }
 
         // 2) DH ratchet step if the header carries a new DH key
-        let new_dh = dh_raw != self.dh_r.to_bytes();
+        let new_dh = dh_raw != self.dh_r.raw();
         if new_dh {
             // how many messages the epoch that is ending carried
             let sent_before = self.sent_since_rotation;
@@ -543,11 +659,11 @@ impl PqdrRatchet {
                 _ => return Err("KEM ct required on DH ratchet step".into()),
             };
             // DHRatchetPQ2HE: state.RK, CKr, NHKr = rootKdf(RK, DH(newDHRs, DHRr) || ss)
-            let dh1 = x25519_dh_checked(&self.dh_s.secret, &dh_pub)?;
+            let dh1 = self.dh_s.dh_checked(&dh_pub)?;
             let (rk1, ckr, nhkr) = root_kdf(&self.rk, &dh1, kem_ss.as_ref());
             self.rk_peer = Some(rk1); // peer's rk after it ratchets on our next header
             // new DH key + KEM #1: encapsulate against the incoming KEM pk
-            self.dh_s = x25519_keypair();
+            self.dh_s = DhKey::gen(self.dh_alg);
             self.kem_s = kem_keypair();
             let new_kem_pk = match &hdr.kem {
                 KemParams::CtPk(_, pk) | KemParams::Pk(pk) => pk.clone(),
@@ -557,7 +673,7 @@ impl PqdrRatchet {
                 return Err("KEM pk len".into());
             }
             let (ct, ss) = kem_encaps_pub(&new_kem_pk)?;
-            let dh2 = x25519_dh_checked(&self.dh_s.secret, &dh_pub)?;
+            let dh2 = self.dh_s.dh_checked(&dh_pub)?;
             let (rk2, cks, nhks) = root_kdf(&rk1, &dh2, Some(&ss));
             self.rk = rk2;
             self.ckr = Some(ckr);
@@ -600,7 +716,7 @@ impl PqdrRatchet {
         let mut nonce = [0u8; 24];
         nonce[..16].copy_from_slice(&iv1);
         nonce[16..].copy_from_slice(&(hdr.ns as u64).to_be_bytes());
-        secretbox_decrypt(&mk, &nonce, &msg.body).ok_or_else(|| "AUTH".to_string())
+        secretbox_decrypt(&mk_eff(&mk), &nonce, &msg.body).ok_or_else(|| "AUTH".to_string())
     }
 
     fn skip_message_keys(&mut self, until: u32) -> Result<(), String> {
@@ -616,13 +732,13 @@ impl PqdrRatchet {
         if nr == until {
             return Ok(());
         }
-        let dh_raw = self.dh_r.to_bytes();
+        let dh_raw = self.dh_r.raw();
         let Some(mut ckr) = self.ckr else { return Ok(()); };
         let mut n = nr;
         while n < until {
             let (ckr2, mk, iv1, _) = chain_kdf(&ckr);
             ckr = ckr2;
-            self.skipped.push((dh_raw, n, mk, iv1));
+            self.skipped.push((dh_raw.clone(), n, mk, iv1));
             n += 1;
         }
         // prune oldest skipped keys beyond the global cap
@@ -657,6 +773,10 @@ impl Drop for PqdrRatchet {
         if let Some((ct, ss, pk)) = &mut self.pending {
             ct.zeroize(); ss.zeroize(); pk.zeroize();
         }
+        match &mut self.dh_s {
+            DhKey::X25519(k) => k.secret.zeroize(),
+            DhKey::X448(k) => { k.secret.zeroize(); k.public.zeroize(); }
+        }
         for (d, _, mk, iv) in &mut self.skipped {
             d.zeroize(); mk.zeroize(); iv.zeroize();
         }
@@ -684,12 +804,14 @@ impl PqdrRatchet {
     /// Binary snapshot of the full ratchet state (including skipped/pending).
     pub fn snapshot(&self) -> Vec<u8> {
         let mut o = Vec::new();
+        o.push(2u8); // snapshot v2: dual DH alg (legacy v0/v1 has no version byte)
         put_b(&mut o, &self.ad);
         put_a32(&mut o, &self.rk);
         put_opt32(&mut o, &self.rk_peer);
-        put_a32(&mut o, &self.dh_s.secret.to_bytes());
-        put_a32(&mut o, &self.dh_s.public.to_bytes());
-        put_a32(&mut o, &self.dh_r.to_bytes());
+        o.push(self.dh_alg.to_u8());
+        put_b(&mut o, &self.dh_s.secret_bytes());
+        put_b(&mut o, &self.dh_s.public().raw());
+        put_b(&mut o, &self.dh_r.raw());
         put_a32(&mut o, &self.cks);
         put_opt32(&mut o, &self.ckr);
         put_a32(&mut o, &self.nhks);
@@ -706,7 +828,7 @@ impl PqdrRatchet {
         o.extend_from_slice(&self.nr.to_be_bytes());
         o.extend_from_slice(&(self.skipped.len() as u32).to_be_bytes());
         for (d, n, mk, iv) in &self.skipped {
-            put_a32(&mut o, d);
+            put_b(&mut o, d);
             o.extend_from_slice(&n.to_be_bytes());
             put_a32(&mut o, mk);
             o.extend_from_slice(iv);
@@ -729,14 +851,41 @@ impl PqdrRatchet {
 
     pub fn restore(b: &[u8]) -> Result<PqdrRatchet, String> {
         let mut c = Cur { b, p: 0 };
+        // v2 snapshots carry a leading version byte; legacy ones start with the ad
+        // length (u32, high byte 0 for any sane ad), so byte 2 is unambiguous.
+        let v2 = !b.is_empty() && b[0] == 2;
+        if v2 { c.take(1)?; }
         let ad = c.bytes()?;
         let rk = c.b32()?;
         let rk_peer = c.opt32()?;
-        let dh_s = crate::crypto::X25519Keypair {
-            secret: x25519_dalek::StaticSecret::from(<[u8;32]>::try_from(c.take(32).map_err(|_| "s".to_string())?).map_err(|_| "s".to_string())?),
-            public: crate::crypto::x25519_public(c.b32()?),
+        let (dh_alg, dh_s, dh_r) = if v2 {
+            let alg = DhAlg::from_u8(c.take(1)?[0]).ok_or("bad dh alg")?;
+            let sec = c.bytes()?;
+            let pub_s = c.bytes()?;
+            let pub_r = c.bytes()?;
+            let k = match alg {
+                DhAlg::X25519 => DhKey::X25519(crate::crypto::X25519Keypair {
+                    secret: x25519_dalek::StaticSecret::from(<[u8; 32]>::try_from(sec.as_slice()).map_err(|_| "bad dh secret".to_string())?),
+                    public: crate::crypto::x25519_public(<[u8; 32]>::try_from(pub_s.as_slice()).map_err(|_| "bad dh pub".to_string())?),
+                }),
+                DhAlg::X448 => DhKey::X448(crate::x448::X448Keypair {
+                    secret: <[u8; 56]>::try_from(sec.as_slice()).map_err(|_| "bad dh secret".to_string())?,
+                    public: <[u8; 56]>::try_from(pub_s.as_slice()).map_err(|_| "bad dh pub".to_string())?,
+                }),
+            };
+            let p = match alg {
+                DhAlg::X25519 => DhPub::X25519(crate::crypto::x25519_public(<[u8; 32]>::try_from(pub_r.as_slice()).map_err(|_| "bad dh pub".to_string())?)),
+                DhAlg::X448 => DhPub::X448(<[u8; 56]>::try_from(pub_r.as_slice()).map_err(|_| "bad dh pub".to_string())?),
+            };
+            (alg, k, p)
+        } else {
+            let dh_s = DhKey::X25519(crate::crypto::X25519Keypair {
+                secret: x25519_dalek::StaticSecret::from(<[u8;32]>::try_from(c.take(32).map_err(|_| "s".to_string())?).map_err(|_| "s".to_string())?),
+                public: crate::crypto::x25519_public(c.b32()?),
+            });
+            let dh_r = DhPub::X25519(crate::crypto::x25519_public(c.b32()?));
+            (DhAlg::X25519, dh_s, dh_r)
         };
-        let dh_r = crate::crypto::x25519_public(c.b32()?);
         let cks = c.b32()?;
         let ckr = c.opt32()?;
         let nhks = c.b32()?;
@@ -755,7 +904,7 @@ impl PqdrRatchet {
         let nskip = c.u32()? as usize;
         let mut skipped = Vec::with_capacity(nskip);
         for _ in 0..nskip {
-            let d = c.b32()?;
+            let d = if v2 { c.bytes()? } else { c.b32()?.to_vec() };
             let n = c.u32()?;
             let mk = c.b32()?;
             let iv: [u8;16] = c.take(16)?.try_into().map_err(|_| "bad iv".to_string())?;
@@ -793,12 +942,15 @@ impl PqdrRatchet {
                 false,
             )
         };
+        let aead_ad = v2 && c.has(1) && c.take(1)?[0] != 0;
         Ok(PqdrRatchet {
             ad,
             rk,
             rk_peer,
             dh_s,
             dh_r,
+            dh_alg,
+            aead_ad,
             cks,
             ckr,
             nhks,

@@ -33,7 +33,7 @@ fn pair_with(sk: &[u8; 32], ad: &[u8], cfg: RatchetConfig) -> (PqdrRatchet, Pqdr
     let alice = PqdrRatchet::init_sender_with_config(
         sk,
         ad.to_vec(),
-        bob_dh.public,
+        smp_rs::pqdr::DhPub::X25519(bob_dh.public),
         bob_kem.ek.as_ref().to_vec(),
         cfg,
     )
@@ -41,7 +41,7 @@ fn pair_with(sk: &[u8; 32], ad: &[u8], cfg: RatchetConfig) -> (PqdrRatchet, Pqdr
     let bob = PqdrRatchet::init_receiver_with_config(
         sk,
         ad.to_vec(),
-        bob_dh.clone(),
+        smp_rs::pqdr::DhKey::X25519(bob_dh.clone()),
         bob_kem,
         alice.kem_s.ek.as_ref().to_vec(),
         cfg,
@@ -76,7 +76,7 @@ fn the_default_schedule_is_a_message_count() {
 
 #[test]
 fn manual_schedule_never_rotates_on_its_own() {
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::Manual,
         max_skip: MAX_SKIP,
     };
@@ -94,7 +94,7 @@ fn manual_schedule_never_rotates_on_its_own() {
 
 #[test]
 fn the_schedule_rotates_the_dh_key_after_n_messages() {
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::EveryMessages(2),
         max_skip: MAX_SKIP,
     };
@@ -125,7 +125,7 @@ fn the_schedule_rotates_the_dh_key_after_n_messages() {
 #[test]
 fn a_reorder_window_gap_inside_is_accepted_and_beyond_is_refused() {
     let window = 4u32;
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::Manual,
         max_skip: window,
     };
@@ -158,7 +158,7 @@ fn a_reorder_window_gap_inside_is_accepted_and_beyond_is_refused() {
 #[test]
 fn a_message_encrypted_before_a_rotation_still_decrypts_after_it() {
     // The in-flight invariant.
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::EveryMessages(2),
         max_skip: 8,
     };
@@ -197,7 +197,7 @@ fn a_rotation_on_a_stale_peer_root_is_refused() {
     // a new DH key from us, so a rotation built on the old copy of it derives
     // a key the peer cannot reproduce. `rotate()` must refuse instead of
     // silently corrupting the chain.
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::Manual,
         max_skip: MAX_SKIP,
     };
@@ -218,7 +218,7 @@ fn a_rotation_on_a_stale_peer_root_is_refused() {
 
 #[test]
 fn the_global_skipped_key_cap_still_prunes() {
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::Manual,
         max_skip: 5000,
     };
@@ -239,7 +239,7 @@ fn the_global_skipped_key_cap_still_prunes() {
 
 #[test]
 fn the_policy_survives_a_snapshot_roundtrip() {
-    let cfg = RatchetConfig {
+    let cfg = RatchetConfig { dh_alg: smp_rs::pqdr::DhAlg::X25519, aead_ad: false,
         rotation: RotationSchedule::EveryMessages(7),
         max_skip: 42,
     };

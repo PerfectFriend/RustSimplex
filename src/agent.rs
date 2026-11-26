@@ -710,7 +710,7 @@ impl<T: SmpTransport> Agent<T> {
             kem,
             Vec::new(),
         );
-        r.dh_r = x25519_public(peer_dh_raw);
+        r.dh_r = crate::pqdr::DhPub::X25519(x25519_public(peer_dh_raw));
         self.ratchet = Some(r);
         Ok(())
     }
