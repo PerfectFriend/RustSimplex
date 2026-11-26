@@ -165,6 +165,22 @@ jobs:
       - name: Scan src/
         run: bash scripts/check_no_unwrap.sh
 
+  docs-sync:
+    name: README/SECURITY numbers in sync with CI (ADR D6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: CHECK=1 bash scripts/sync_docs.sh
+
+  msrv-plus-one:
+    name: MSRV+1 check (rust 1.88, ADR D7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: cargo test --locked
+
   msrv:
     name: MSRV check (rust-version = 1.87)
     runs-on: ubuntu-latest

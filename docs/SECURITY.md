@@ -20,6 +20,19 @@
 - **PQDR (v0.15)**: SNTRUP761 KEM + гибридный секрет SHA3-256(dh‖kem)
   (`kemHybridSecret` по SNTRUP761.hs), `kemParams` wire-формат, kcb-шифрование.
 
+## Channel binding (ADR D3, 2026-11-26)
+
+Привязка SMP-сессии к TLS-соединению идёт через **TLS exporter**
+(`rustls` exporter label, а не raw Finished verify_data — P0-7 отложен ADR D3(b)).
+Это защищает от relay внутри одного TLS-соединения; для full transcript binding
+нужен `TlsBackend` с извлечением Finished — записано как follow-up.
+
+## Responsible disclosure (ADR D7, 2026-11-26)
+
+Уязвимости безопасности сообщайте на **security@<owner-domain>** (заменить на реальный адрес)
+с темой `[smp-rs security]`. PGP приветствуется. SLA ответа — 72 часа, публичный credit
+в CHANGELOG после фикса (по желанию репортера). DoS/спам репозитория — вне scope.
+
 ## Модель угроз
 
 | Угроза | Защита | Примечание |

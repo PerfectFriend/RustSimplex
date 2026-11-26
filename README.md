@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/SMP-v23-2f6feb?style=flat-square" alt="SMP v23" />
   <img src="https://img.shields.io/badge/rust-1.87%2B-b7410e?style=flat-square" alt="Rust 1.87+" />
   <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/tests-162%20passed-2ea44f?style=flat-square" alt="162 tests" />
+  <img src="https://img.shields.io/badge/tests-202%20passed-2ea44f?style=flat-square" alt="162 tests" />
   <img src="https://img.shields.io/badge/clippy-0%20warnings-2ea44f?style=flat-square" alt="clippy clean" />
 </p>
 
@@ -87,7 +87,7 @@ smp-rs = "0.99.1"
 ### Проверка
 
 ```bash
-cargo test                    # 162 теста, 0 падений
+cargo test                    # 202 теста, 0 падений
 cargo clippy --all-targets    # 0 предупреждений
 cargo audit                   # 0 неallowlisted advisory (4 известных — в allowlist)
 cargo publish --dry-run       # OK
@@ -95,7 +95,7 @@ cargo publish --dry-run       # OK
 
 | Проверка | Результат |
 |---|---|
-| Модульные + интеграционные тесты | **162 passed / 0 failed** |
+| Модульные + интеграционные тесты | **202 passed / 0 failed** |
 | clippy (`--all-targets`, оба feature-конфига) | **0 warnings** |
 | `cargo audit` | 0 новых advisory; 4 известных (RUSTSEC-2023-0037, -2024-0436, -2025-0141, -2026-0374) — в allowlist |
 | PQDR KAT | сверено с SUPERCOP-векторами `supercop-20201130` |
@@ -194,7 +194,7 @@ smp-rs = "0.99.1"
 ### Verification
 
 ```bash
-cargo test                    # 162 tests, 0 failures
+cargo test                    # 202 tests, 0 failures
 cargo clippy --all-targets    # 0 warnings
 cargo audit                   # 0 non-allowlisted advisories (4 known ones are allowlisted)
 cargo publish --dry-run       # OK
@@ -202,7 +202,7 @@ cargo publish --dry-run       # OK
 
 | Check | Result |
 |---|---|
-| Unit + integration tests | **162 passed / 0 failed** |
+| Unit + integration tests | **202 passed / 0 failed** |
 | clippy (`--all-targets`, both feature configs) | **0 warnings** |
 | `cargo audit` | 0 new advisories; 4 known (RUSTSEC-2023-0037, -2024-0436, -2025-0141, -2026-0374) allowlisted |
 | PQDR KAT | checked against the SUPERCOP `supercop-20201130` vectors |

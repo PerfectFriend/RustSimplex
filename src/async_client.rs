@@ -106,6 +106,8 @@ pub struct AsyncSmpClient {
     /// pushed MSG broker messages diverted aside by request() so a command
     /// response is never confused with a push (and vice versa).
     pending: Vec<BrokerMsg>,
+    /// remembered SUB queue ids, restored after a reconnect (U-18, async twin)
+    pub subs: Vec<Vec<u8>>,
 }
 
 impl AsyncSmpClient {
@@ -123,6 +125,7 @@ impl AsyncSmpClient {
             server_eph_pub: None,
             eph_priv: None,
             pending: Vec::new(),
+            subs: Vec::new(),
         }
     }
 
@@ -167,6 +170,7 @@ impl AsyncSmpClient {
             server_eph_pub: eph,
             eph_priv: Some(eph_priv),
             pending: Vec::new(),
+            subs: Vec::new(),
         })
     }
 
@@ -209,6 +213,7 @@ impl AsyncSmpClient {
             server_eph_pub: eph,
             eph_priv: Some(eph_priv),
             pending: Vec::new(),
+            subs: Vec::new(),
         })
     }
 
@@ -301,6 +306,45 @@ impl AsyncSmpClient {
             write_block(stream, &blk).await?;
         }
         Ok(())
+    }
+
+    /// SUB a queue and REMEMBER it — `reconnect()` re-issues it after a reconnect.
+    /// Re-SUB goes through send_only (not request): the SOK block may also carry a
+    /// pushed MSG, and request() would swallow it (U-18).
+    pub async fn subscribe(&mut self, qid: &[u8], auth: Option<&Ed25519Keypair>) -> Result<(), String> {
+        self.send_only(Command::Sub, qid.to_vec(), auth).await?;
+        if !self.subs.iter().any(|q| q == qid) {
+            self.subs.push(qid.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Reconnect and restore all remembered subscriptions (D2(b)/U-18 async).
+    pub async fn reconnect(&mut self) -> Result<(), String> {
+        self.stream = None;
+        self.pending.clear();
+        self.connect().await?;
+        for q in self.subs.clone() {
+            self.send_only(Command::Sub, q, None).await?;
+        }
+        Ok(())
+    }
+
+    /// `request` with one automatic reconnect+retry on a transport error (D2(b)).
+    /// Protocol-level ERR responses are returned as-is, never retried.
+    pub async fn request_retry(
+        &mut self,
+        cmd: Command,
+        entity_id: Vec<u8>,
+        auth: Option<&Ed25519Keypair>,
+    ) -> Result<Vec<BrokerMsg>, String> {
+        match self.request(cmd.clone(), entity_id.clone(), auth).await {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                self.reconnect().await.map_err(|e2| format!("reconnect failed: {e2} (orig: {e})"))?;
+                self.request(cmd, entity_id, auth).await
+            }
+        }
     }
 
     /// Read one block of broker messages. Drains diverted pushes first.
